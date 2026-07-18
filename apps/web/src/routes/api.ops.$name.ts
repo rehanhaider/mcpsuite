@@ -7,18 +7,32 @@
  *     http://localhost:2222/api/ops/company.list -d '{"limit":5}'
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntime, resolveSession, webContext } from "@emcp/db";
+import { getRuntimeAsync, resolveSession, resolveWorkspaceAccess, webContext, workspaceLockedResult } from "@emcp/db";
 
 export const Route = createFileRoute("/api/ops/$name")({
   server: {
     handlers: {
       POST: async ({ request, params }) => {
-        const session = resolveSession(getRuntime().db, cookieValue(request.headers.get("cookie"), "emcp_session"));
+        const runtime = await getRuntimeAsync();
+        if (runtime.adapter !== "sqlite") {
+          // Cookie sessions resolve from the SQLite store; another adapter
+          // cannot authenticate this surface (hosted identity is separate).
+          return Response.json(
+            { status: "error", error: { code: "unauthorized", message: "Sign in first" } },
+            { status: 401 },
+          );
+        }
+        const session = resolveSession(runtime.db, cookieValue(request.headers.get("cookie"), "emcp_session"));
         if (!session) {
           return Response.json(
             { status: "error", error: { code: "unauthorized", message: "Sign in first" } },
             { status: 401 },
           );
+        }
+        // Hosted access gate: identification succeeded, but a locked
+        // workspace refuses every catalog operation.
+        if (resolveWorkspaceAccess(runtime.db, session.workspaceId).mode === "locked") {
+          return Response.json(workspaceLockedResult(), { status: 403 });
         }
         let input: unknown = {};
         try {
@@ -30,7 +44,7 @@ export const Route = createFileRoute("/api/ops/$name")({
             { status: 400 },
           );
         }
-        const result = getRuntime().run(webContext(session), params.name, input);
+        const result = await runtime.run(webContext(session), params.name, input);
         const status =
           result.status === "ok" ? 200 : result.status === "pending_approval" ? 202 : httpStatus(result.error.code);
         return Response.json(result, { status });
@@ -53,6 +67,7 @@ function httpStatus(code: string): number {
     case "not_found":
       return 404;
     case "forbidden":
+    case "workspace_locked":
       return 403;
     case "unauthorized":
       return 401;

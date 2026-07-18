@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MIGRATIONS } from "./migrations.ts";
 import * as schema from "./schema.ts";
 
@@ -9,9 +10,23 @@ export type Db = BetterSQLite3Database<typeof schema> & { $client: Database.Data
 
 let singleton: Db | null = null;
 
-/** Resolve the SQLite path. Defaults to <cwd>/data/emcp.db; override with DB_PATH. */
-export function resolveDbPath(): string {
-  return resolve(process.env.DB_PATH ?? "./data/emcp.db");
+/**
+ * Resolve the SQLite path. Defaults to <cwd>/data/emcp.db; override with
+ * DB_PATH. A `file:` DATABASE_URL (adapter selection, docs/issues/0023) wins
+ * over both, so the async runtime and the SQLite-only scripts agree on one
+ * file. With DATABASE_URL unset the resolution is unchanged.
+ */
+export function resolveDbPath(env: NodeJS.ProcessEnv = process.env): string {
+  const url = env.DATABASE_URL?.trim();
+  if (url && url.toLowerCase().startsWith("file:")) return resolve(sqlitePathFromFileUrl(url));
+  return resolve(env.DB_PATH ?? "./data/emcp.db");
+}
+
+/** Accepts file:./relative, file:/absolute and file:///absolute forms. */
+function sqlitePathFromFileUrl(url: string): string {
+  const rest = url.slice("file:".length);
+  if (!rest) throw new Error(`DATABASE_URL "${url}" is missing a SQLite file path after "file:"`);
+  return rest.startsWith("//") ? fileURLToPath(url) : rest;
 }
 
 export function openDatabase(path: string): Db {

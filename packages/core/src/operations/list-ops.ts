@@ -40,9 +40,9 @@ export const listOps = [
     input: z.object({ id: zId }),
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      found(ports.lists.get(id), "list", id);
-      const withCounts = ports.lists.list().find((l) => l.id === id);
+    handler: async ({ ports }, { id }) => {
+      found(await ports.lists.get(id), "list", id);
+      const withCounts = (await ports.lists.list()).find((l) => l.id === id);
       return withCounts!;
     },
   }),
@@ -55,10 +55,10 @@ export const listOps = [
     input: zListCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
+    handler: async (op, input) => {
       const name = input.name.trim();
       const requested = input.entityType ?? null;
-      const existing = op.ports.lists.getByName(name);
+      const existing = await op.ports.lists.getByName(name);
       if (existing) {
         if (existing.entityType && requested && existing.entityType !== requested) {
           throw OpError.validation(
@@ -67,13 +67,13 @@ export const listOps = [
         }
         return existing;
       }
-      const list = op.ports.lists.create({
+      const list = await op.ports.lists.create({
         name,
         description: input.description ?? null,
         color: input.color,
         entityType: requested,
       });
-      audit(op, { operation: "list.create", entityType: "list", entityId: list.id, summary: `Created list "${list.name}"` });
+      await audit(op, { operation: "list.create", entityType: "list", entityId: list.id, summary: `Created list "${list.name}"` });
       return list;
     },
   }),
@@ -85,18 +85,18 @@ export const listOps = [
     input: zListUpdate,
     minRole: "member",
     scope: "write",
-    handler: (op, { id, ...patch }) => {
-      found(op.ports.lists.get(id), "list", id);
+    handler: async (op, { id, ...patch }) => {
+      found(await op.ports.lists.get(id), "list", id);
       if (patch.entityType) {
-        const counts = op.ports.lists.memberTypeCounts(id);
+        const counts = await op.ports.lists.memberTypeCounts(id);
         for (const [type, n] of Object.entries(counts)) {
           if (n > 0 && type !== patch.entityType) {
             throw OpError.validation(`List has ${n} ${ENTITY_LABELS[type as ListableType] ?? type} members; remove them before retyping`);
           }
         }
       }
-      const list = op.ports.lists.update(id, definedOnly(patch));
-      audit(op, { operation: "list.update", entityType: "list", entityId: id, summary: `Updated list "${list.name}"` });
+      const list = await op.ports.lists.update(id, definedOnly(patch));
+      await audit(op, { operation: "list.update", entityType: "list", entityId: id, summary: `Updated list "${list.name}"` });
       return list;
     },
   }),
@@ -109,16 +109,16 @@ export const listOps = [
     minRole: "admin",
     scope: "write",
     risk: "config",
-    preview: ({ ports }, { id }) => {
-      const l = ports.lists.list().find((x) => x.id === id);
+    preview: async ({ ports }, { id }) => {
+      const l = (await ports.lists.list()).find((x) => x.id === id);
       return {
         list: l ? { name: l.name, people: l.people, companies: l.companies, engagements: l.engagements, deals: l.deals } : null,
       };
     },
-    handler: (op, { id }) => {
-      const list = found(op.ports.lists.get(id), "list", id);
-      op.ports.lists.delete(id);
-      audit(op, { operation: "list.delete", entityType: "list", entityId: id, summary: `Deleted list "${list.name}"` });
+    handler: async (op, { id }) => {
+      const list = found(await op.ports.lists.get(id), "list", id);
+      await op.ports.lists.delete(id);
+      await audit(op, { operation: "list.delete", entityType: "list", entityId: id, summary: `Deleted list "${list.name}"` });
       return { deleted: id };
     },
   }),
@@ -130,8 +130,8 @@ export const listOps = [
     input: zListMembers,
     minRole: "member",
     scope: "write",
-    handler: (op, { listId, entityType, entityIds }) => {
-      const list = found(op.ports.lists.get(listId), "list", listId);
+    handler: async (op, { listId, entityType, entityIds }) => {
+      const list = found(await op.ports.lists.get(listId), "list", listId);
       if (list.entityType && list.entityType !== entityType) {
         throw OpError.validation(`List "${list.name}" holds ${list.entityType}s only`);
       }
@@ -141,10 +141,13 @@ export const listOps = [
         engagement: op.ports.engagements,
         deal: op.ports.deals,
       }[entityType];
-      const missing = entityIds.filter((id) => !port.get(id));
+      const missing: string[] = [];
+      for (const id of entityIds) {
+        if (!(await port.get(id))) missing.push(id);
+      }
       if (missing.length > 0) throw OpError.validation(`Unknown ${entityType} ids: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? "…" : ""}`);
-      const added = op.ports.tx(() => op.ports.lists.addMembers(listId, entityType, entityIds));
-      audit(op, {
+      const added = await op.ports.tx(() => op.ports.lists.addMembers(listId, entityType, entityIds));
+      await audit(op, {
         operation: "list.addMembers",
         entityType: "list",
         entityId: listId,
@@ -161,10 +164,10 @@ export const listOps = [
     input: zListMembers,
     minRole: "member",
     scope: "write",
-    handler: (op, { listId, entityType, entityIds }) => {
-      const list = found(op.ports.lists.get(listId), "list", listId);
-      const removed = op.ports.tx(() => op.ports.lists.removeMembers(listId, entityType, entityIds));
-      audit(op, {
+    handler: async (op, { listId, entityType, entityIds }) => {
+      const list = found(await op.ports.lists.get(listId), "list", listId);
+      const removed = await op.ports.tx(() => op.ports.lists.removeMembers(listId, entityType, entityIds));
+      await audit(op, {
         operation: "list.removeMembers",
         entityType: "list",
         entityId: listId,
@@ -186,8 +189,8 @@ export const listOps = [
     }),
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id, entityType, limit, offset }) => {
-      const list = found(ports.lists.get(id), "list", id);
+    handler: async ({ ports }, { id, entityType, limit, offset }) => {
+      const list = found(await ports.lists.get(id), "list", id);
       const want = (t: ListableType) => entityType === undefined || entityType === t;
       const typed = list.entityType;
       if (typed) {
@@ -195,35 +198,35 @@ export const listOps = [
           list,
           people:
             typed === "person" && want("person")
-              ? ports.people.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
+              ? await ports.people.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
               : null,
           companies:
             typed === "company" && want("company")
-              ? ports.companies.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
+              ? await ports.companies.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
               : null,
           engagements:
             typed === "engagement" && want("engagement")
-              ? ports.engagements.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
+              ? await ports.engagements.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
               : null,
           deals:
             typed === "deal" && want("deal")
-              ? ports.deals.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
+              ? await ports.deals.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
               : null,
         };
       }
       return {
         list,
         people: want("person")
-          ? ports.people.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
+          ? await ports.people.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
           : null,
         companies: want("company")
-          ? ports.companies.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
+          ? await ports.companies.list({ listId: id, includeArchived: false, sort: "name", dir: "asc", limit, offset })
           : null,
         engagements: want("engagement")
-          ? ports.engagements.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
+          ? await ports.engagements.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
           : null,
         deals: want("deal")
-          ? ports.deals.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
+          ? await ports.deals.list({ listId: id, includeArchived: false, sort: "updatedAt", dir: "desc", limit, offset })
           : null,
       };
     },

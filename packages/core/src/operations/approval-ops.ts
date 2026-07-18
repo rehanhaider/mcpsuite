@@ -23,7 +23,7 @@ export const approvalOps = [
     input: z.object({ id: zId }),
     minRole: "member",
     scope: "approvals",
-    handler: ({ ports }, { id }) => found(ports.pendingActions.get(id), "pending action", id),
+    handler: async ({ ports }, { id }) => found(await ports.pendingActions.get(id), "pending action", id),
   }),
 
   defineOperation({
@@ -33,15 +33,15 @@ export const approvalOps = [
     input: z.object({ id: zId, note: z.string().max(2000).nullish() }),
     minRole: "admin",
     scope: "approvals",
-    handler: (op, { id, note }) => {
-      const pa = found(op.ports.pendingActions.get(id), "pending action", id);
+    handler: async (op, { id, note }) => {
+      const pa = found(await op.ports.pendingActions.get(id), "pending action", id);
       if (pa.status !== "pending") throw OpError.validation(`Action is already ${pa.status}`);
-      const updated = op.ports.pendingActions.setStatus(id, {
+      const updated = await op.ports.pendingActions.setStatus(id, {
         status: "rejected",
         reviewedByUserId: op.ctx.userId,
         reviewNote: note ?? null,
       });
-      audit(op, {
+      await audit(op, {
         operation: "pendingAction.reject",
         entityType: "pending_action",
         entityId: id,
@@ -59,8 +59,8 @@ export const approvalOps = [
     input: z.object({ id: zId }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      const pa = found(op.ports.pendingActions.get(id), "pending action", id);
+    handler: async (op, { id }) => {
+      const pa = found(await op.ports.pendingActions.get(id), "pending action", id);
       if (pa.status !== "pending") throw OpError.validation(`Action is already ${pa.status}`);
       const isRequester =
         (op.ctx.clientId && pa.requestedByClientId === op.ctx.clientId) ||
@@ -68,8 +68,8 @@ export const approvalOps = [
       if (!isRequester && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
         throw OpError.forbidden("Only the requester or an admin can cancel");
       }
-      const updated = op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewedByUserId: op.ctx.userId });
-      audit(op, {
+      const updated = await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewedByUserId: op.ctx.userId });
+      await audit(op, {
         operation: "pendingAction.cancel",
         entityType: "pending_action",
         entityId: id,

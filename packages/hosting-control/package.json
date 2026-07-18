@@ -1,0 +1,26 @@
+{
+  "name": "@emcp/hosting-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "description": "Private-network hosting control API: workspace provisioning, generic access state, and permanent deletion for hosted deployments. Not part of the normal self-host process set.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@emcp/core": "workspace:*",
+    "@emcp/db": "workspace:*",
+    "tsx": "^4.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,6 +1,11 @@
 /**
  * Port implementations (Drizzle + better-sqlite3), constructed per request and
- * scoped to one workspace. Sync by design — see packages/core/src/ports.ts.
+ * scoped to one workspace. The port contract is async (Promise-returning) —
+ * see packages/core/src/ports.ts — but this adapter fulfils it with purely
+ * synchronous better-sqlite3 work inside async-signature methods. Do not add
+ * real awaits (network I/O, timers) inside these methods: the transaction
+ * helper at the bottom of this file relies on every port call completing its
+ * database work synchronously.
  */
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
 import { existsSync, mkdirSync } from "node:fs";
@@ -74,6 +79,13 @@ function json<T>(value: string | null | undefined, fallback: T): T {
 function bool(v: number | boolean): boolean {
   return v === 1 || v === true;
 }
+
+/**
+ * One promise-chain lock per SQLite connection: serializes top-level
+ * transactions across all Ports instances sharing that connection.
+ * See the transaction section at the bottom of createPorts.
+ */
+const txLock = new WeakMap<object, Promise<void>>();
 
 // ---------------------------------------------------------------------------
 // Row mappers
@@ -355,7 +367,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- workspace --------------------------------------------------------
 
   const workspacePort: Ports["workspace"] = {
-    get(): Workspace {
+    async get() {
       const row = db.select().from(t.workspaces).where(eq(t.workspaces.id, ws)).get();
       if (!row) throw new OpError("internal", `Workspace ${ws} missing`);
       return {
@@ -368,8 +380,8 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         updatedAt: row.updatedAt,
       };
     },
-    update(patch) {
-      const current = this.get();
+    async update(patch) {
+      const current = await this.get();
       db.update(t.workspaces)
         .set({
           name: patch.name ?? current.name,
@@ -396,7 +408,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   };
 
   const usersPort: Ports["users"] = {
-    list() {
+    async list() {
       const rows = db
         .select({ user: t.users, role: t.memberships.role })
         .from(t.memberships)
@@ -406,16 +418,16 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all();
       return rows.map((r) => mapUser(r.user, r.role as Role));
     },
-    get(id) {
+    async get(id) {
       const row = db.select().from(t.users).where(eq(t.users.id, id)).get();
       return row ? mapUser(row, roleOf(id)) : null;
     },
-    getByEmail(email) {
+    async getByEmail(email) {
       const row = db.select().from(t.users).where(eq(t.users.email, email.toLowerCase())).get();
       if (!row) return null;
       return { ...mapUser(row, roleOf(row.id)), passwordHash: row.passwordHash };
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       const now = nowIso();
       db.insert(t.users)
@@ -429,9 +441,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .run();
       db.insert(t.memberships).values({ id: newId(), workspaceId: ws, userId: id, role: input.role, createdAt: now }).run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       const now = nowIso();
       if (patch.name !== undefined || patch.disabledAt !== undefined) {
         db.update(t.users)
@@ -449,22 +461,27 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           .where(and(eq(t.memberships.workspaceId, ws), eq(t.memberships.userId, id)))
           .run();
       }
-      const user = this.get(id);
+      const user = await this.get(id);
       if (!user) throw OpError.notFound("user", id);
       return user;
     },
-    setPassword(id, passwordHash) {
+    async setPassword(id, passwordHash) {
       db.update(t.users).set({ passwordHash, updatedAt: nowIso() }).where(eq(t.users.id, id)).run();
     },
-    count() {
+    async count() {
       return db.select({ n: count() }).from(t.users).get()?.n ?? 0;
+    },
+    async deleteSessions(userId) {
+      // Hard delete: a disabled user's sessions are gone for good — re-enabling
+      // the user restores nothing (docs/issues/0022).
+      return db.delete(t.sessions).where(eq(t.sessions.userId, userId)).run().changes;
     },
   };
 
   // --- companies ----------------------------------------------------------
 
   const companiesPort: Ports["companies"] = {
-    list(filter: CompanyFilter): Page<CompanyListItem> {
+    async list(filter: CompanyFilter) {
       const conds: SQL[] = [eq(t.companies.workspaceId, ws) as unknown as SQL];
       if (!filter.includeArchived) conds.push(isNull(t.companies.archivedAt) as unknown as SQL);
       if (filter.ownerUserId) conds.push(eq(t.companies.ownerUserId, filter.ownerUserId) as unknown as SQL);
@@ -500,10 +517,10 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .limit(filter.limit)
         .offset(filter.offset)
         .all();
-      const memberOf = listsPort.forEntities("company", rows.map((r) => r.id));
+      const memberOf = await listsPort.forEntities("company", rows.map((r) => r.id));
       return { items: rows.map((r) => ({ ...mapCompany(r), lists: memberOf[r.id] ?? [] })), total };
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.companies)
@@ -511,7 +528,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapCompany(row) : null;
     },
-    getByName(name) {
+    async getByName(name) {
       const row = db
         .select()
         .from(t.companies)
@@ -519,7 +536,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapCompany(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.companies)
@@ -540,9 +557,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           updatedAt: now,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.companies)
         .set({
           ...(patch as Record<string, unknown>),
@@ -551,14 +568,14 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(and(eq(t.companies.workspaceId, ws), eq(t.companies.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("company", id);
       return row;
     },
-    setArchived(id, archived) {
+    async setArchived(id, archived) {
       return this.update(id, { archivedAt: archived ? nowIso() : null });
     },
-    hardDelete(id) {
+    async hardDelete(id) {
       db.delete(t.companyPeople).where(and(eq(t.companyPeople.workspaceId, ws), eq(t.companyPeople.companyId, id))).run();
       db.delete(t.taggings).where(and(eq(t.taggings.workspaceId, ws), eq(t.taggings.entityType, "company"), eq(t.taggings.entityId, id))).run();
       db.delete(t.customFieldValues)
@@ -569,7 +586,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       db.update(t.activities).set({ companyId: null }).where(and(eq(t.activities.workspaceId, ws), eq(t.activities.companyId, id))).run();
       db.delete(t.companies).where(and(eq(t.companies.workspaceId, ws), eq(t.companies.id, id))).run();
     },
-    people(companyId) {
+    async people(companyId) {
       const rows = db
         .select({ link: t.companyPeople, person: t.people })
         .from(t.companyPeople)
@@ -593,7 +610,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- people --------------------------------------------------------------
 
   const peoplePort: Ports["people"] = {
-    list(filter: PersonFilter): Page<PersonListItem> {
+    async list(filter: PersonFilter) {
       const conds: SQL[] = [eq(t.people.workspaceId, ws) as unknown as SQL];
       if (!filter.includeArchived) conds.push(isNull(t.people.archivedAt) as unknown as SQL);
       if (filter.ownerUserId) conds.push(eq(t.people.ownerUserId, filter.ownerUserId) as unknown as SQL);
@@ -649,13 +666,13 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           }
         }
       }
-      const memberOf = listsPort.forEntities("person", items.map((p) => p.id));
+      const memberOf = await listsPort.forEntities("person", items.map((p) => p.id));
       return {
         items: items.map((p) => ({ ...p, primaryCompanyName: primaryCompany.get(p.id) ?? null, lists: memberOf[p.id] ?? [] })),
         total,
       };
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.people)
@@ -663,7 +680,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapPerson(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.people)
@@ -683,21 +700,21 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           updatedAt: now,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.people)
         .set({ ...(patch as Record<string, unknown>), version: sql`${t.people.version} + 1`, updatedAt: nowIso() })
         .where(and(eq(t.people.workspaceId, ws), eq(t.people.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("person", id);
       return row;
     },
-    setArchived(id, archived) {
+    async setArchived(id, archived) {
       return this.update(id, { archivedAt: archived ? nowIso() : null });
     },
-    hardDelete(id) {
+    async hardDelete(id) {
       db.delete(t.companyPeople).where(and(eq(t.companyPeople.workspaceId, ws), eq(t.companyPeople.personId, id))).run();
       db.delete(t.taggings).where(and(eq(t.taggings.workspaceId, ws), eq(t.taggings.entityType, "person"), eq(t.taggings.entityId, id))).run();
       db.delete(t.customFieldValues)
@@ -709,7 +726,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       db.update(t.activities).set({ personId: null }).where(and(eq(t.activities.workspaceId, ws), eq(t.activities.personId, id))).run();
       db.delete(t.people).where(and(eq(t.people.workspaceId, ws), eq(t.people.id, id))).run();
     },
-    companies(personId) {
+    async companies(personId) {
       const rows = db
         .select({ link: t.companyPeople, company: t.companies })
         .from(t.companyPeople)
@@ -728,7 +745,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         company: mapCompany(r.company),
       }));
     },
-    link(input) {
+    async link(input) {
       const existing = db
         .select()
         .from(t.companyPeople)
@@ -785,7 +802,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         createdAt: now,
       };
     },
-    unlink(companyId, personId) {
+    async unlink(companyId, personId) {
       db.delete(t.companyPeople)
         .where(and(eq(t.companyPeople.workspaceId, ws), eq(t.companyPeople.companyId, companyId), eq(t.companyPeople.personId, personId)))
         .run();
@@ -795,7 +812,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- pipelines -------------------------------------------------------------
 
   const pipelinesPort: Ports["pipelines"] = {
-    list(type?: PipelineType): Pipeline[] {
+    async list(type?: PipelineType) {
       const conds = [eq(t.pipelines.workspaceId, ws)];
       if (type) conds.push(eq(t.pipelines.type, type));
       const rows = db
@@ -819,14 +836,14 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           .map(mapStage),
       }));
     },
-    get(id) {
-      return this.list().find((p) => p.id === id) ?? null;
+    async get(id) {
+      return (await this.list()).find((p) => p.id === id) ?? null;
     },
-    getDefault(type) {
-      const all = this.list(type);
+    async getDefault(type) {
+      const all = await this.list(type);
       return all.find((p) => p.isDefault) ?? all[0] ?? null;
     },
-    getStage(stageId) {
+    async getStage(stageId) {
       const row = db
         .select()
         .from(t.stages)
@@ -834,7 +851,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapStage(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       const now = nowIso();
       if (input.isDefault) {
@@ -863,23 +880,23 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           })
           .run();
       });
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    rename(id, name) {
+    async rename(id, name) {
       db.update(t.pipelines).set({ name }).where(and(eq(t.pipelines.workspaceId, ws), eq(t.pipelines.id, id))).run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    setDefault(id) {
-      const pipeline = this.get(id);
+    async setDefault(id) {
+      const pipeline = await this.get(id);
       if (!pipeline) throw OpError.notFound("pipeline", id);
       db.update(t.pipelines).set({ isDefault: 0 }).where(and(eq(t.pipelines.workspaceId, ws), eq(t.pipelines.type, pipeline.type))).run();
       db.update(t.pipelines).set({ isDefault: 1 }).where(eq(t.pipelines.id, id)).run();
     },
-    delete(id) {
+    async delete(id) {
       db.delete(t.stages).where(and(eq(t.stages.workspaceId, ws), eq(t.stages.pipelineId, id))).run();
       db.delete(t.pipelines).where(and(eq(t.pipelines.workspaceId, ws), eq(t.pipelines.id, id))).run();
     },
-    addStage(pipelineId, input) {
+    async addStage(pipelineId, input) {
       const id = newId();
       const maxPos =
         db
@@ -899,18 +916,18 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           outcome: input.outcome ?? null,
         })
         .run();
-      return this.getStage(id)!;
+      return (await this.getStage(id))!;
     },
-    updateStage(stageId, patch) {
+    async updateStage(stageId, patch) {
       db.update(t.stages)
         .set(patch as Record<string, unknown>)
         .where(and(eq(t.stages.workspaceId, ws), eq(t.stages.id, stageId)))
         .run();
-      const s = this.getStage(stageId);
+      const s = await this.getStage(stageId);
       if (!s) throw OpError.notFound("stage", stageId);
       return s;
     },
-    reorderStages(pipelineId, stageIds) {
+    async reorderStages(pipelineId, stageIds) {
       stageIds.forEach((sid, i) => {
         db.update(t.stages)
           .set({ position: i })
@@ -918,15 +935,15 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           .run();
       });
     },
-    deleteStage(stageId) {
+    async deleteStage(stageId) {
       db.delete(t.stages).where(and(eq(t.stages.workspaceId, ws), eq(t.stages.id, stageId))).run();
     },
-    stageUsage(stageId) {
+    async stageUsage(stageId) {
       const e = db.select({ n: count() }).from(t.engagements).where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.stageId, stageId))).get()?.n ?? 0;
       const d = db.select({ n: count() }).from(t.deals).where(and(eq(t.deals.workspaceId, ws), eq(t.deals.stageId, stageId))).get()?.n ?? 0;
       return e + d;
     },
-    pipelineUsage(pipelineId) {
+    async pipelineUsage(pipelineId) {
       const e =
         db.select({ n: count() }).from(t.engagements).where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.pipelineId, pipelineId))).get()?.n ?? 0;
       const d = db.select({ n: count() }).from(t.deals).where(and(eq(t.deals.workspaceId, ws), eq(t.deals.pipelineId, pipelineId))).get()?.n ?? 0;
@@ -937,7 +954,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- engagements -------------------------------------------------------------
 
   const engagementsPort: Ports["engagements"] = {
-    list(filter: EngagementFilter): Page<EngagementListItem> {
+    async list(filter: EngagementFilter) {
       const conds: SQL[] = [eq(t.engagements.workspaceId, ws) as unknown as SQL];
       if (!filter.includeArchived) conds.push(isNull(t.engagements.archivedAt) as unknown as SQL);
       if (filter.pipelineId) conds.push(eq(t.engagements.pipelineId, filter.pipelineId) as unknown as SQL);
@@ -993,8 +1010,8 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       const items = rows.map(mapEngagement);
       const cNames = companyNames(items.map((e) => e.companyId));
       const pNames = personNames(items.map((e) => e.personId));
-      const memberOf = listsPort.forEntities("engagement", items.map((e) => e.id));
-      const offeringsBy = offeringsPort.linksForEntities("engagement", items.map((e) => e.id));
+      const memberOf = await listsPort.forEntities("engagement", items.map((e) => e.id));
+      const offeringsBy = await offeringsPort.linksForEntities("engagement", items.map((e) => e.id));
       return {
         items: items.map((e) => ({
           ...e,
@@ -1006,7 +1023,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         total,
       };
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.engagements)
@@ -1014,7 +1031,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapEngagement(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.engagements)
@@ -1038,21 +1055,21 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           lastActivityAt: input.lastActivityAt ?? null,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.engagements)
         .set({ ...(patch as Record<string, unknown>), version: sql`${t.engagements.version} + 1`, updatedAt: nowIso() })
         .where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("engagement", id);
       return row;
     },
-    setArchived(id, archived) {
+    async setArchived(id, archived) {
       return this.update(id, { archivedAt: archived ? nowIso() : null });
     },
-    hardDelete(id) {
+    async hardDelete(id) {
       db.delete(t.taggings).where(and(eq(t.taggings.workspaceId, ws), eq(t.taggings.entityType, "engagement"), eq(t.taggings.entityId, id))).run();
       db.delete(t.customFieldValues)
         .where(
@@ -1069,7 +1086,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       db.update(t.deals).set({ engagementId: null }).where(and(eq(t.deals.workspaceId, ws), eq(t.deals.engagementId, id))).run();
       db.delete(t.engagements).where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.id, id))).run();
     },
-    countByStage(pipelineId) {
+    async countByStage(pipelineId) {
       const rows = db
         .select({ stageId: t.engagements.stageId, n: count() })
         .from(t.engagements)
@@ -1083,7 +1100,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- deals ---------------------------------------------------------------
 
   const dealsPort: Ports["deals"] = {
-    list(filter: DealFilter): Page<DealListItem> {
+    async list(filter: DealFilter) {
       const conds: SQL[] = [eq(t.deals.workspaceId, ws) as unknown as SQL];
       if (!filter.includeArchived) conds.push(isNull(t.deals.archivedAt) as unknown as SQL);
       if (filter.pipelineId) conds.push(eq(t.deals.pipelineId, filter.pipelineId) as unknown as SQL);
@@ -1133,8 +1150,8 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       const items = rows.map(mapDeal);
       const cNames = companyNames(items.map((d) => d.companyId));
       const pNames = personNames(items.map((d) => d.primaryPersonId));
-      const memberOf = listsPort.forEntities("deal", items.map((d) => d.id));
-      const offeringsBy = offeringsPort.linksForEntities("deal", items.map((d) => d.id));
+      const memberOf = await listsPort.forEntities("deal", items.map((d) => d.id));
+      const offeringsBy = await offeringsPort.linksForEntities("deal", items.map((d) => d.id));
       return {
         items: items.map((d) => ({
           ...d,
@@ -1146,7 +1163,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         total,
       };
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.deals)
@@ -1154,7 +1171,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapDeal(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.deals)
@@ -1182,21 +1199,21 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           lastActivityAt: input.lastActivityAt ?? null,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.deals)
         .set({ ...(patch as Record<string, unknown>), version: sql`${t.deals.version} + 1`, updatedAt: nowIso() })
         .where(and(eq(t.deals.workspaceId, ws), eq(t.deals.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("deal", id);
       return row;
     },
-    setArchived(id, archived) {
+    async setArchived(id, archived) {
       return this.update(id, { archivedAt: archived ? nowIso() : null });
     },
-    hardDelete(id) {
+    async hardDelete(id) {
       db.delete(t.dealStakeholders).where(and(eq(t.dealStakeholders.workspaceId, ws), eq(t.dealStakeholders.dealId, id))).run();
       db.delete(t.taggings).where(and(eq(t.taggings.workspaceId, ws), eq(t.taggings.entityType, "deal"), eq(t.taggings.entityId, id))).run();
       db.delete(t.customFieldValues)
@@ -1212,7 +1229,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       db.update(t.engagements).set({ dealId: null }).where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.dealId, id))).run();
       db.delete(t.deals).where(and(eq(t.deals.workspaceId, ws), eq(t.deals.id, id))).run();
     },
-    stakeholders(dealId) {
+    async stakeholders(dealId) {
       const rows = db
         .select({ sh: t.dealStakeholders, person: t.people })
         .from(t.dealStakeholders)
@@ -1230,7 +1247,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         person: mapPerson(r.person),
       }));
     },
-    getStakeholder(id) {
+    async getStakeholder(id) {
       const r = db
         .select()
         .from(t.dealStakeholders)
@@ -1238,7 +1255,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return r ? { id: r.id, dealId: r.dealId, personId: r.personId, role: r.role, isPrimary: bool(r.isPrimary), note: r.note } : null;
     },
-    addStakeholder(input) {
+    async addStakeholder(input) {
       const existing = db
         .select()
         .from(t.dealStakeholders)
@@ -1262,10 +1279,10 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           note: input.note ?? null,
         })
         .run();
-      return this.getStakeholder(id)!;
+      return (await this.getStakeholder(id))!;
     },
-    updateStakeholder(id, patch) {
-      const existing = this.getStakeholder(id);
+    async updateStakeholder(id, patch) {
+      const existing = await this.getStakeholder(id);
       if (!existing) throw OpError.notFound("stakeholder", id);
       if (patch.isPrimary) {
         db.update(t.dealStakeholders).set({ isPrimary: 0 }).where(and(eq(t.dealStakeholders.workspaceId, ws), eq(t.dealStakeholders.dealId, existing.dealId))).run();
@@ -1278,12 +1295,12 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(eq(t.dealStakeholders.id, id))
         .run();
-      return this.getStakeholder(id)!;
+      return (await this.getStakeholder(id))!;
     },
-    removeStakeholder(id) {
+    async removeStakeholder(id) {
       db.delete(t.dealStakeholders).where(and(eq(t.dealStakeholders.workspaceId, ws), eq(t.dealStakeholders.id, id))).run();
     },
-    stageStats(pipelineId) {
+    async stageStats(pipelineId) {
       const rows = sqlite
         .prepare(
           `SELECT d.stage_id AS stageId, d.currency AS currency, COUNT(*) AS n,
@@ -1309,7 +1326,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- offerings -------------------------------------------------------------
 
   const offeringsPort: Ports["offerings"] = {
-    list(includeArchived) {
+    async list(includeArchived) {
       const conds = [eq(t.offerings.workspaceId, ws)];
       if (!includeArchived) conds.push(isNull(t.offerings.archivedAt));
       return db
@@ -1320,7 +1337,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all()
         .map(mapOffering);
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.offerings)
@@ -1328,7 +1345,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapOffering(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       const now = nowIso();
       db.insert(t.offerings)
@@ -1344,9 +1361,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           updatedAt: now,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       const { active, ...rest } = patch;
       db.update(t.offerings)
         .set({
@@ -1357,21 +1374,21 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(and(eq(t.offerings.workspaceId, ws), eq(t.offerings.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("offering", id);
       return row;
     },
-    setArchived(id, archived) {
+    async setArchived(id, archived) {
       return this.update(id, { archivedAt: archived ? nowIso() : null } as Partial<Offering>);
     },
-    hardDelete(id) {
+    async hardDelete(id) {
       db.delete(t.offeringLinks).where(and(eq(t.offeringLinks.workspaceId, ws), eq(t.offeringLinks.offeringId, id))).run();
       db.delete(t.customFieldValues)
         .where(and(eq(t.customFieldValues.workspaceId, ws), eq(t.customFieldValues.entityType, "offering"), eq(t.customFieldValues.entityId, id)))
         .run();
       db.delete(t.offerings).where(and(eq(t.offerings.workspaceId, ws), eq(t.offerings.id, id))).run();
     },
-    links(entityType, entityId) {
+    async links(entityType, entityId) {
       const rows = db
         .select({ link: t.offeringLinks, offering: t.offerings })
         .from(t.offeringLinks)
@@ -1389,7 +1406,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         offering: mapOffering(r.offering),
       }));
     },
-    linksForOffering(offeringId) {
+    async linksForOffering(offeringId) {
       return db
         .select()
         .from(t.offeringLinks)
@@ -1405,7 +1422,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           isPrimary: bool(r.isPrimary),
         }));
     },
-    linksForEntities(entityType, entityIds) {
+    async linksForEntities(entityType, entityIds) {
       if (entityIds.length === 0) return {};
       const rows = db
         .select({ link: t.offeringLinks, offering: t.offerings })
@@ -1429,7 +1446,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       }
       return out;
     },
-    link(input) {
+    async link(input) {
       const existing = db
         .select()
         .from(t.offeringLinks)
@@ -1484,7 +1501,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         isPrimary: input.isPrimary ?? false,
       };
     },
-    unlink(offeringId, entityType, entityId) {
+    async unlink(offeringId, entityType, entityId) {
       db.delete(t.offeringLinks)
         .where(
           and(
@@ -1501,7 +1518,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- activities ------------------------------------------------------------
 
   const activitiesPort: Ports["activities"] = {
-    list(filter: ActivityFilter): Page<Activity> {
+    async list(filter: ActivityFilter) {
       const conds: SQL[] = [eq(t.activities.workspaceId, ws) as unknown as SQL];
       const kinds = filter.kinds ?? (filter.kind ? [filter.kind] : null);
       if (kinds?.length) conds.push(inArray(t.activities.kind, kinds) as unknown as SQL);
@@ -1541,7 +1558,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all();
       return { items: rows.map(mapActivity), total };
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.activities)
@@ -1549,7 +1566,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapActivity(row) : null;
     },
-    create(input, actor: ActorStamp) {
+    async create(input, actor: ActorStamp) {
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.activities)
@@ -1575,9 +1592,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           updatedAt: now,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       const { meta, ...rest } = patch;
       db.update(t.activities)
         .set({
@@ -1587,14 +1604,14 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(and(eq(t.activities.workspaceId, ws), eq(t.activities.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("activity", id);
       return row;
     },
-    hardDelete(id) {
+    async hardDelete(id) {
       db.delete(t.activities).where(and(eq(t.activities.workspaceId, ws), eq(t.activities.id, id))).run();
     },
-    touchLinked(activity, at) {
+    async touchLinked(activity, at) {
       if (activity.engagementId) {
         db.update(t.engagements)
           .set({ lastActivityAt: at })
@@ -1613,7 +1630,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- tags --------------------------------------------------------------------
 
   const tagsPort: Ports["tags"] = {
-    list() {
+    async list() {
       const rows = db.select().from(t.tags).where(eq(t.tags.workspaceId, ws)).orderBy(asc(t.tags.name)).all();
       const usage = sqlite
         .prepare(`SELECT tag_id AS tagId, COUNT(*) AS n FROM taggings WHERE workspace_id = ? GROUP BY tag_id`)
@@ -1621,7 +1638,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       const usageMap = new Map(usage.map((u) => [u.tagId, u.n]));
       return rows.map((r) => ({ ...mapTag(r), usage: usageMap.get(r.id) ?? 0 }));
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.tags)
@@ -1629,7 +1646,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapTag(row) : null;
     },
-    getByName(name) {
+    async getByName(name) {
       const row = db
         .select()
         .from(t.tags)
@@ -1637,25 +1654,25 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapTag(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       db.insert(t.tags).values({ id, workspaceId: ws, name: input.name, color: input.color, createdAt: nowIso() }).run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.tags)
         .set(patch as Record<string, unknown>)
         .where(and(eq(t.tags.workspaceId, ws), eq(t.tags.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("tag", id);
       return row;
     },
-    delete(id) {
+    async delete(id) {
       db.delete(t.taggings).where(and(eq(t.taggings.workspaceId, ws), eq(t.taggings.tagId, id))).run();
       db.delete(t.tags).where(and(eq(t.tags.workspaceId, ws), eq(t.tags.id, id))).run();
     },
-    apply(tagId, entityType, entityId) {
+    async apply(tagId, entityType, entityId) {
       sqlite
         .prepare(
           `INSERT INTO taggings (id, workspace_id, tag_id, entity_type, entity_id) VALUES (?, ?, ?, ?, ?)
@@ -1663,14 +1680,14 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         )
         .run(newId(), ws, tagId, entityType, entityId);
     },
-    remove(tagId, entityType, entityId) {
+    async remove(tagId, entityType, entityId) {
       db.delete(t.taggings)
         .where(
           and(eq(t.taggings.workspaceId, ws), eq(t.taggings.tagId, tagId), eq(t.taggings.entityType, entityType), eq(t.taggings.entityId, entityId)),
         )
         .run();
     },
-    forEntity(entityType, entityId) {
+    async forEntity(entityType, entityId) {
       const rows = db
         .select({ tag: t.tags })
         .from(t.taggings)
@@ -1680,7 +1697,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all();
       return rows.map((r) => mapTag(r.tag));
     },
-    forEntities(entityType, entityIds) {
+    async forEntities(entityType, entityIds) {
       if (entityIds.length === 0) return {};
       const rows = db
         .select({ tag: t.tags, entityId: t.taggings.entityId })
@@ -1697,7 +1714,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- contact lists ------------------------------------------------------
 
   const listsPort: Ports["lists"] = {
-    list() {
+    async list() {
       const rows = db.select().from(t.lists).where(eq(t.lists.workspaceId, ws)).orderBy(asc(t.lists.name)).all();
       const counts = sqlite
         .prepare(`SELECT list_id AS listId, entity_type AS entityType, COUNT(*) AS n FROM list_members WHERE workspace_id = ? GROUP BY list_id, entity_type`)
@@ -1716,7 +1733,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         ...(byList.get(r.id) ?? { people: 0, companies: 0, engagements: 0, deals: 0 }),
       }));
     },
-    get(id) {
+    async get(id) {
       const row = db
         .select()
         .from(t.lists)
@@ -1724,7 +1741,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapList(row) : null;
     },
-    getByName(name) {
+    async getByName(name) {
       const row = db
         .select()
         .from(t.lists)
@@ -1732,7 +1749,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapList(row) : null;
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       const now = nowIso();
       db.insert(t.lists)
@@ -1747,22 +1764,22 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           updatedAt: now,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.lists)
         .set({ ...(patch as Record<string, unknown>), updatedAt: nowIso() })
         .where(and(eq(t.lists.workspaceId, ws), eq(t.lists.id, id)))
         .run();
-      const row = this.get(id);
+      const row = await this.get(id);
       if (!row) throw OpError.notFound("list", id);
       return row;
     },
-    delete(id) {
+    async delete(id) {
       db.delete(t.listMembers).where(and(eq(t.listMembers.workspaceId, ws), eq(t.listMembers.listId, id))).run();
       db.delete(t.lists).where(and(eq(t.lists.workspaceId, ws), eq(t.lists.id, id))).run();
     },
-    memberTypeCounts(listId) {
+    async memberTypeCounts(listId) {
       const rows = sqlite
         .prepare(`SELECT entity_type AS entityType, COUNT(*) AS n FROM list_members WHERE workspace_id = ? AND list_id = ? GROUP BY entity_type`)
         .all(ws, listId) as Array<{ entityType: string; n: number }>;
@@ -1770,7 +1787,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       for (const r of rows) out[r.entityType] = r.n;
       return out;
     },
-    addMembers(listId, entityType, entityIds) {
+    async addMembers(listId, entityType, entityIds) {
       const stmt = sqlite.prepare(
         `INSERT INTO list_members (id, workspace_id, list_id, entity_type, entity_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(list_id, entity_type, entity_id) DO NOTHING`,
@@ -1782,7 +1799,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       }
       return added;
     },
-    removeMembers(listId, entityType, entityIds) {
+    async removeMembers(listId, entityType, entityIds) {
       if (entityIds.length === 0) return 0;
       const res = db
         .delete(t.listMembers)
@@ -1797,7 +1814,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .run();
       return res.changes;
     },
-    forEntity(entityType, entityId) {
+    async forEntity(entityType, entityId) {
       const rows = db
         .select({ list: t.lists })
         .from(t.listMembers)
@@ -1807,7 +1824,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all();
       return rows.map((r) => mapList(r.list));
     },
-    forEntities(entityType, entityIds) {
+    async forEntities(entityType, entityIds) {
       if (entityIds.length === 0) return {};
       const rows = db
         .select({ list: t.lists, entityId: t.listMembers.entityId })
@@ -1824,7 +1841,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- custom fields ------------------------------------------------------------
 
   const customFieldsPort: Ports["customFields"] = {
-    listDefs(entityType, includeArchived = false) {
+    async listDefs(entityType, includeArchived = false) {
       const conds = [eq(t.customFieldDefs.workspaceId, ws)];
       if (entityType) conds.push(eq(t.customFieldDefs.entityType, entityType));
       if (!includeArchived) conds.push(isNull(t.customFieldDefs.archivedAt));
@@ -1836,7 +1853,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all()
         .map(mapCfd);
     },
-    getDef(id) {
+    async getDef(id) {
       const row = db
         .select()
         .from(t.customFieldDefs)
@@ -1844,7 +1861,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapCfd(row) : null;
     },
-    getDefByKey(entityType, key) {
+    async getDefByKey(entityType, key) {
       const row = db
         .select()
         .from(t.customFieldDefs)
@@ -1852,7 +1869,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapCfd(row) : null;
     },
-    createDef(input) {
+    async createDef(input) {
       const id = newId();
       const maxPos =
         db
@@ -1874,9 +1891,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           createdAt: nowIso(),
         })
         .run();
-      return this.getDef(id)!;
+      return (await this.getDef(id))!;
     },
-    updateDef(id, patch) {
+    async updateDef(id, patch) {
       db.update(t.customFieldDefs)
         .set({
           ...(patch.label !== undefined ? { label: patch.label } : {}),
@@ -1885,20 +1902,20 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(and(eq(t.customFieldDefs.workspaceId, ws), eq(t.customFieldDefs.id, id)))
         .run();
-      const def = this.getDef(id);
+      const def = await this.getDef(id);
       if (!def) throw OpError.notFound("custom field", id);
       return def;
     },
-    setDefArchived(id, archived) {
+    async setDefArchived(id, archived) {
       db.update(t.customFieldDefs)
         .set({ archivedAt: archived ? nowIso() : null })
         .where(and(eq(t.customFieldDefs.workspaceId, ws), eq(t.customFieldDefs.id, id)))
         .run();
-      const def = this.getDef(id);
+      const def = await this.getDef(id);
       if (!def) throw OpError.notFound("custom field", id);
       return def;
     },
-    setValue(fieldId, entityType, entityId, value) {
+    async setValue(fieldId, entityType, entityId, value) {
       if (value === null) {
         db.delete(t.customFieldValues)
           .where(and(eq(t.customFieldValues.fieldId, fieldId), eq(t.customFieldValues.entityId, entityId)))
@@ -1913,7 +1930,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         )
         .run(newId(), ws, fieldId, entityType, entityId, JSON.stringify(value), nowIso());
     },
-    values(entityType, entityId) {
+    async values(entityType, entityId) {
       const rows = db
         .select({ value: t.customFieldValues.value, key: t.customFieldDefs.key })
         .from(t.customFieldValues)
@@ -1936,7 +1953,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- saved views ----------------------------------------------------------------
 
   const savedViewsPort: Ports["savedViews"] = {
-    list(userId) {
+    async list(userId) {
       const rows = db
         .select()
         .from(t.savedViews)
@@ -1962,7 +1979,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         updatedAt: r.updatedAt,
       }));
     },
-    get(id) {
+    async get(id) {
       const r = db
         .select()
         .from(t.savedViews)
@@ -1981,7 +1998,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           }
         : null;
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       const now = nowIso();
       db.insert(t.savedViews)
@@ -1997,9 +2014,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           updatedAt: now,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.savedViews)
         .set({
           ...(patch.name !== undefined ? { name: patch.name } : {}),
@@ -2009,11 +2026,11 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(and(eq(t.savedViews.workspaceId, ws), eq(t.savedViews.id, id)))
         .run();
-      const v = this.get(id);
+      const v = await this.get(id);
       if (!v) throw OpError.notFound("saved view", id);
       return v;
     },
-    delete(id) {
+    async delete(id) {
       db.delete(t.savedViews).where(and(eq(t.savedViews.workspaceId, ws), eq(t.savedViews.id, id))).run();
     },
   };
@@ -2021,7 +2038,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- pending actions ----------------------------------------------------------
 
   const pendingPort: Ports["pendingActions"] = {
-    list(status) {
+    async list(status) {
       const conds = [eq(t.pendingActions.workspaceId, ws)];
       if (status) conds.push(eq(t.pendingActions.status, status));
       return db
@@ -2033,7 +2050,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all()
         .map(mapPending);
     },
-    get(id) {
+    async get(id) {
       const r = db
         .select()
         .from(t.pendingActions)
@@ -2041,7 +2058,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return r ? mapPending(r) : null;
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       db.insert(t.pendingActions)
         .values({
@@ -2059,9 +2076,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           expiresAt: input.expiresAt,
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    setStatus(id, patch) {
+    async setStatus(id, patch) {
       db.update(t.pendingActions)
         .set({
           status: patch.status,
@@ -2072,11 +2089,11 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(and(eq(t.pendingActions.workspaceId, ws), eq(t.pendingActions.id, id)))
         .run();
-      const pa = this.get(id);
+      const pa = await this.get(id);
       if (!pa) throw OpError.notFound("pending action", id);
       return pa;
     },
-    countPending() {
+    async countPending() {
       return (
         db
           .select({ n: count() })
@@ -2090,7 +2107,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- audit ---------------------------------------------------------------------
 
   const auditPort: Ports["audit"] = {
-    record(input: AuditInput, actor: ActorStamp) {
+    async record(input: AuditInput, actor: ActorStamp) {
       const id = newId();
       db.insert(t.auditEvents)
         .values({
@@ -2110,7 +2127,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .run();
       return mapAudit(db.select().from(t.auditEvents).where(eq(t.auditEvents.id, id)).get()!);
     },
-    list(filter) {
+    async list(filter) {
       const conds: SQL[] = [eq(t.auditEvents.workspaceId, ws) as unknown as SQL];
       if (filter.actorType) conds.push(eq(t.auditEvents.actorType, filter.actorType) as unknown as SQL);
       if (filter.operation) conds.push(like(t.auditEvents.operation, `${filter.operation}%`) as unknown as SQL);
@@ -2133,7 +2150,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- MCP clients ------------------------------------------------------------------
 
   const mcpClientsPort: Ports["mcpClients"] = {
-    list() {
+    async list() {
       return db
         .select()
         .from(t.mcpClients)
@@ -2142,7 +2159,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .all()
         .map(mapMcpClient);
     },
-    get(id) {
+    async get(id) {
       const r = db
         .select()
         .from(t.mcpClients)
@@ -2150,11 +2167,11 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return r ? mapMcpClient(r) : null;
     },
-    getByTokenHash(hash) {
+    async getByTokenHash(hash) {
       const r = db.select().from(t.mcpClients).where(eq(t.mcpClients.tokenHash, hash)).get();
       return r ? { ...mapMcpClient(r), workspaceId: r.workspaceId } : null;
     },
-    create(input) {
+    async create(input) {
       const id = newId();
       db.insert(t.mcpClients)
         .values({
@@ -2169,9 +2186,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
           createdAt: nowIso(),
         })
         .run();
-      return this.get(id)!;
+      return (await this.get(id))!;
     },
-    update(id, patch) {
+    async update(id, patch) {
       db.update(t.mcpClients)
         .set({
           ...(patch.name !== undefined ? { name: patch.name } : {}),
@@ -2180,20 +2197,31 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         })
         .where(and(eq(t.mcpClients.workspaceId, ws), eq(t.mcpClients.id, id)))
         .run();
-      const c = this.get(id);
+      const c = await this.get(id);
       if (!c) throw OpError.notFound("MCP client", id);
       return c;
     },
-    revoke(id) {
+    async revoke(id) {
       db.update(t.mcpClients)
         .set({ revokedAt: nowIso() })
         .where(and(eq(t.mcpClients.workspaceId, ws), eq(t.mcpClients.id, id)))
         .run();
-      const c = this.get(id);
+      const c = await this.get(id);
       if (!c) throw OpError.notFound("MCP client", id);
       return c;
     },
-    touchLastUsed(id) {
+    async revokeAllForUser(userId) {
+      // Same semantics as revoke(): flag with revokedAt, never delete. Only
+      // touches still-active clients so earlier revocation timestamps survive.
+      return db
+        .update(t.mcpClients)
+        .set({ revokedAt: nowIso() })
+        .where(
+          and(eq(t.mcpClients.workspaceId, ws), eq(t.mcpClients.createdByUserId, userId), isNull(t.mcpClients.revokedAt)),
+        )
+        .run().changes;
+    },
+    async touchLastUsed(id) {
       db.update(t.mcpClients).set({ lastUsedAt: nowIso() }).where(eq(t.mcpClients.id, id)).run();
     },
   };
@@ -2201,7 +2229,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- search -------------------------------------------------------------------
 
   const searchPort: Ports["search"] = {
-    global(query, limit): SearchHit[] {
+    async global(query, limit) {
       const prefixes = settings().prefixes;
       const q = `%${query.trim().toLowerCase()}%`;
       const hits: SearchHit[] = [];
@@ -2311,7 +2339,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   // --- maintenance -----------------------------------------------------------------
 
   const maintenancePort: Ports["maintenance"] = {
-    backup() {
+    async backup() {
       const dbPath = (sqlite as unknown as { name: string }).name;
       const dir = join(dirname(dbPath), "backups");
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -2321,7 +2349,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       sqlite.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
       return dest;
     },
-    counts() {
+    async counts() {
       const one = (table: string, extra = ""): number =>
         (sqlite.prepare(`SELECT COUNT(*) n FROM ${table} WHERE workspace_id = ? AND archived_at IS NULL ${extra}`).get(ws) as { n: number }).n;
       return {
@@ -2335,15 +2363,57 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   };
 
   // --- transactions -------------------------------------------------------------------
+  //
+  // better-sqlite3 transactions are SYNCHRONOUS: `sqlite.transaction(fn)()`
+  // commits the moment fn RETURNS. An async fn returns a pending Promise at
+  // its first await, so passing one would commit mid-flight and run the rest
+  // of the handler outside the transaction. Therefore: NEVER await inside a
+  // better-sqlite3 transaction callback. Because operation handlers are async,
+  // this adapter instead manages BEGIN/COMMIT/ROLLBACK manually around the
+  // awaited fn. That is safe here because of two invariants:
+  //
+  //   1. Every port method in this adapter is async-signature but internally
+  //      synchronous — awaits between statements only yield microtasks, never
+  //      real I/O, so a transaction still completes promptly.
+  //   2. txLock (per database connection, module scope) serializes top-level
+  //      transactions. The fully-sync adapter serialized them implicitly by
+  //      blocking the event loop; with async handlers two in-flight requests
+  //      could otherwise interleave BEGINs on the shared connection.
+  //
+  // Nested tx() calls join the outer transaction, exactly as before (the
+  // depth counter is per-Ports instance; a request runs on one instance, so
+  // its nested calls see depth > 0 while other requests queue on txLock).
+  //
+  // Async-capable adapters (e.g. a future Postgres one) should NOT copy this
+  // shape — they can use real client transactions (BEGIN…COMMIT on a
+  // dedicated connection, awaits welcome) behind the same port signature.
 
   let txDepth = 0;
-  const tx = <T>(fn: () => T): T => {
-    if (txDepth > 0) return fn();
+  const tx = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (txDepth > 0) return fn(); // nested: join the outer transaction
+    const previous = txLock.get(sqlite) ?? Promise.resolve();
+    let release!: () => void;
+    txLock.set(
+      sqlite,
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    await previous;
     txDepth++;
     try {
-      return sqlite.transaction(fn)();
+      sqlite.exec("BEGIN");
+      try {
+        const result = await fn();
+        sqlite.exec("COMMIT");
+        return result;
+      } catch (e) {
+        if (sqlite.inTransaction) sqlite.exec("ROLLBACK");
+        throw e;
+      }
     } finally {
       txDepth--;
+      release();
     }
   };
 

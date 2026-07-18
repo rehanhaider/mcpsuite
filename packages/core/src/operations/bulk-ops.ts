@@ -43,30 +43,30 @@ export const bulkOps = [
     minRole: "member",
     scope: "write",
     risk: "bulk",
-    preview: ({ ports }, { entityType, ids, stageId }) => ({
+    preview: async ({ ports }, { entityType, ids, stageId }) => ({
       entityType,
       count: ids.length,
-      stage: ports.pipelines.getStage(stageId)?.name ?? stageId,
+      stage: (await ports.pipelines.getStage(stageId))?.name ?? stageId,
     }),
-    handler: (op, { entityType, ids, stageId }) => {
-      const stage = found(op.ports.pipelines.getStage(stageId), "stage", stageId);
-      const updated = op.ports.tx(() => {
+    handler: async (op, { entityType, ids, stageId }) => {
+      const stage = found(await op.ports.pipelines.getStage(stageId), "stage", stageId);
+      const updated = await op.ports.tx(async () => {
         let n = 0;
         for (const id of ids) {
           if (entityType === "engagement") {
-            const e = op.ports.engagements.get(id);
+            const e = await op.ports.engagements.get(id);
             if (!e || e.pipelineId !== stage.pipelineId) continue;
-            op.ports.engagements.update(id, { stageId });
+            await op.ports.engagements.update(id, { stageId });
           } else {
-            const d = op.ports.deals.get(id);
+            const d = await op.ports.deals.get(id);
             if (!d || d.pipelineId !== stage.pipelineId) continue;
-            op.ports.deals.update(id, { stageId });
+            await op.ports.deals.update(id, { stageId });
           }
           n++;
         }
         return n;
       });
-      audit(op, {
+      await audit(op, {
         operation: "bulk.updateStage",
         entityType,
         entityId: null,
@@ -84,18 +84,18 @@ export const bulkOps = [
     minRole: "member",
     scope: "write",
     risk: "bulk",
-    preview: ({ ports }, { entityType, ids, ownerUserId }) => ({
+    preview: async ({ ports }, { entityType, ids, ownerUserId }) => ({
       entityType,
       count: ids.length,
-      owner: ownerUserId ? (ports.users.get(ownerUserId)?.name ?? ownerUserId) : "(unassigned)",
+      owner: ownerUserId ? ((await ports.users.get(ownerUserId))?.name ?? ownerUserId) : "(unassigned)",
     }),
-    handler: (op, { entityType, ids, ownerUserId }) => {
-      if (ownerUserId) found(op.ports.users.get(ownerUserId), "user", ownerUserId);
-      const updated = op.ports.tx(() => {
+    handler: async (op, { entityType, ids, ownerUserId }) => {
+      if (ownerUserId) found(await op.ports.users.get(ownerUserId), "user", ownerUserId);
+      const updated = await op.ports.tx(async () => {
         let n = 0;
         for (const id of ids) {
           try {
-            setOwnerFor(op, entityType, id, ownerUserId);
+            await setOwnerFor(op, entityType, id, ownerUserId);
             n++;
           } catch {
             // skip missing rows
@@ -103,7 +103,7 @@ export const bulkOps = [
         }
         return n;
       });
-      audit(op, {
+      await audit(op, {
         operation: "bulk.assignOwner",
         entityType,
         entityId: null,
@@ -121,17 +121,17 @@ export const bulkOps = [
     minRole: "member",
     scope: "write",
     risk: "bulk",
-    preview: ({ ports }, { entityType, ids, tagId }) => ({
+    preview: async ({ ports }, { entityType, ids, tagId }) => ({
       entityType,
       count: ids.length,
-      tag: ports.tags.get(tagId)?.name ?? tagId,
+      tag: (await ports.tags.get(tagId))?.name ?? tagId,
     }),
-    handler: (op, { entityType, ids, tagId }) => {
-      found(op.ports.tags.get(tagId), "tag", tagId);
-      op.ports.tx(() => {
-        for (const id of ids) op.ports.tags.apply(tagId, entityType, id);
+    handler: async (op, { entityType, ids, tagId }) => {
+      found(await op.ports.tags.get(tagId), "tag", tagId);
+      await op.ports.tx(async () => {
+        for (const id of ids) await op.ports.tags.apply(tagId, entityType, id);
       });
-      audit(op, {
+      await audit(op, {
         operation: "bulk.addTag",
         entityType,
         entityId: null,
@@ -149,13 +149,13 @@ export const bulkOps = [
     minRole: "member",
     scope: "write",
     risk: "bulk",
-    preview: (_op, { entityType, ids }) => ({ entityType, count: ids.length }),
-    handler: (op, { entityType, ids }) => {
-      const updated = op.ports.tx(() => {
+    preview: async (_op, { entityType, ids }) => ({ entityType, count: ids.length }),
+    handler: async (op, { entityType, ids }) => {
+      const updated = await op.ports.tx(async () => {
         let n = 0;
         for (const id of ids) {
           try {
-            setArchivedFor(op, entityType, id, true);
+            await setArchivedFor(op, entityType, id, true);
             n++;
           } catch (e) {
             if (e instanceof OpError && e.code === "not_found") continue;
@@ -164,7 +164,7 @@ export const bulkOps = [
         }
         return n;
       });
-      audit(op, {
+      await audit(op, {
         operation: "bulk.archive",
         entityType,
         entityId: null,

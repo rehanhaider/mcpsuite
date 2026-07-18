@@ -23,8 +23,8 @@ let pass = 0;
 let fail = 0;
 const failures: string[] = [];
 
-function run(name: string, input: unknown = {}): unknown {
-  const res = runtime.run(ctx, name, input);
+async function run(name: string, input: unknown = {}): Promise<unknown> {
+  const res = await runtime.run(ctx, name, input);
   if (res.status === "ok") {
     pass++;
     return res.data;
@@ -35,103 +35,103 @@ function run(name: string, input: unknown = {}): unknown {
 }
 
 // Reads used by pages
-const stats = run("stats.home") as Record<string, unknown>;
-run("stats.engagements");
-run("stats.deals");
-const pipelines = run("pipeline.list") as Array<{ id: string; type: string; stages: Array<{ id: string }> }>;
-run("user.list");
-run("tag.list");
-run("customField.list", { entityType: "company", includeArchived: false });
-run("workspace.get");
-run("pendingAction.list", { status: "pending" });
-run("mcpClient.list");
-run("audit.list", { limit: 10, offset: 0 });
-run("search.global", { query: "a", limit: 10 });
-run("savedView.list");
-run("list.list");
+const stats = (await run("stats.home")) as Record<string, unknown>;
+await run("stats.engagements");
+await run("stats.deals");
+const pipelines = (await run("pipeline.list")) as Array<{ id: string; type: string; stages: Array<{ id: string }> }>;
+await run("user.list");
+await run("tag.list");
+await run("customField.list", { entityType: "company", includeArchived: false });
+await run("workspace.get");
+await run("pendingAction.list", { status: "pending" });
+await run("mcpClient.list");
+await run("audit.list", { limit: 10, offset: 0 });
+await run("search.global", { query: "a", limit: 10 });
+await run("savedView.list");
+await run("list.list");
 
-const leads = run("engagement.list", { view: undefined, sort: "updatedAt", dir: "desc", limit: 25, offset: 0 }) as {
+const leads = (await run("engagement.list", { view: undefined, sort: "updatedAt", dir: "desc", limit: 25, offset: 0 })) as {
   items: Array<{ id: string; companyName: string | null }>;
   total: number;
 };
-const companies = run("company.list", { sort: "updatedAt", dir: "desc", limit: 25, offset: 0 }) as {
+const companies = (await run("company.list", { sort: "updatedAt", dir: "desc", limit: 25, offset: 0 })) as {
   items: Array<{ id: string; name: string }>;
   total: number;
 };
-const people = run("person.list", { sort: "updatedAt", dir: "desc", limit: 25, offset: 0 }) as {
+const people = (await run("person.list", { sort: "updatedAt", dir: "desc", limit: 25, offset: 0 })) as {
   items: Array<{ id: string; primaryCompanyName: string | null }>;
   total: number;
 };
-const deals = run("deal.list", { sort: "updatedAt", dir: "desc", limit: 25, offset: 0 }) as { items: unknown[]; total: number };
-run("activity.list", { limit: 25, offset: 0 });
-run("activity.list", { kind: "task", open: true, limit: 25, offset: 0 });
+const deals = (await run("deal.list", { sort: "updatedAt", dir: "desc", limit: 25, offset: 0 })) as { items: unknown[]; total: number };
+await run("activity.list", { limit: 25, offset: 0 });
+await run("activity.list", { kind: "task", open: true, limit: 25, offset: 0 });
 
 // Detail bundles for first records
-if (leads?.items[0]) run("engagement.getContext", { id: leads.items[0].id });
-if (companies?.items[0]) run("company.getContext", { id: companies.items[0].id });
-if (people?.items[0]) run("person.getContext", { id: people.items[0].id });
+if (leads?.items[0]) await run("engagement.getContext", { id: leads.items[0].id });
+if (companies?.items[0]) await run("company.getContext", { id: companies.items[0].id });
+if (people?.items[0]) await run("person.getContext", { id: people.items[0].id });
 
 // Write path round-trip: create → edit → task → complete → archive → delete
-const c = run("company.create", { name: `Smoke Test Co ${Date.now()}` }) as { id: string; version: number } | null;
+const c = (await run("company.create", { name: `Smoke Test Co ${Date.now()}` })) as { id: string; version: number } | null;
 if (c) {
-  run("company.update", { id: c.id, industry: "Testing" });
-  const p = run("person.create", { name: "Smoke Tester", companyId: c.id }) as { id: string } | null;
+  await run("company.update", { id: c.id, industry: "Testing" });
+  const p = (await run("person.create", { name: "Smoke Tester", companyId: c.id })) as { id: string } | null;
   const eng = pipelines?.find((x) => x.type === "engagement");
   const lead = eng
-    ? (run("engagement.create", { title: "Smoke lead", companyId: c.id, personId: p?.id, pipelineId: eng.id }) as {
+    ? ((await run("engagement.create", { title: "Smoke lead", companyId: c.id, personId: p?.id, pipelineId: eng.id })) as {
         id: string;
       } | null)
     : null;
   if (lead && eng) {
-    run("engagement.updateStage", { id: lead.id, stageId: eng.stages[1]!.id });
-    const task = run("activity.log", { kind: "task", title: "Smoke task", engagementId: lead.id }) as { id: string } | null;
+    await run("engagement.updateStage", { id: lead.id, stageId: eng.stages[1]!.id });
+    const task = (await run("activity.log", { kind: "task", title: "Smoke task", engagementId: lead.id })) as { id: string } | null;
     if (task) {
-      run("task.complete", { id: task.id });
-      run("task.reopen", { id: task.id });
-      run("task.complete", { id: task.id });
+      await run("task.complete", { id: task.id });
+      await run("task.reopen", { id: task.id });
+      await run("task.complete", { id: task.id });
     }
-    run("activity.log", { kind: "note", body: "Smoke note", engagementId: lead.id });
-    const typedList = run("list.create", { name: `Smoke Leads ${Date.now()}`, entityType: "engagement" }) as { id: string } | null;
+    await run("activity.log", { kind: "note", body: "Smoke note", engagementId: lead.id });
+    const typedList = (await run("list.create", { name: `Smoke Leads ${Date.now()}`, entityType: "engagement" })) as { id: string } | null;
     if (typedList) {
-      run("list.addMembers", { listId: typedList.id, entityType: "engagement", entityIds: [lead.id] });
-      run("engagement.list", { listId: typedList.id, limit: 5, offset: 0 });
-      run("list.removeMembers", { listId: typedList.id, entityType: "engagement", entityIds: [lead.id] });
-      run("list.delete", { id: typedList.id });
+      await run("list.addMembers", { listId: typedList.id, entityType: "engagement", entityIds: [lead.id] });
+      await run("engagement.list", { listId: typedList.id, limit: 5, offset: 0 });
+      await run("list.removeMembers", { listId: typedList.id, entityType: "engagement", entityIds: [lead.id] });
+      await run("list.delete", { id: typedList.id });
     }
-    const offering = run("offering.create", { name: `Smoke Offering ${Date.now()}`, type: "product" }) as { id: string } | null;
+    const offering = (await run("offering.create", { name: `Smoke Offering ${Date.now()}`, type: "product" })) as { id: string } | null;
     if (offering) {
-      run("offering.link", { offeringId: offering.id, entityType: "engagement", entityId: lead.id, isPrimary: true });
-      run("engagement.list", { offeringId: offering.id, limit: 5, offset: 0 });
-      run("offering.unlink", { offeringId: offering.id, entityType: "engagement", entityId: lead.id });
-      run("offering.delete", { id: offering.id });
+      await run("offering.link", { offeringId: offering.id, entityType: "engagement", entityId: lead.id, isPrimary: true });
+      await run("engagement.list", { offeringId: offering.id, limit: 5, offset: 0 });
+      await run("offering.unlink", { offeringId: offering.id, entityType: "engagement", entityId: lead.id });
+      await run("offering.delete", { id: offering.id });
     }
     const dp = pipelines?.find((x) => x.type === "deal");
     const deal = dp
-      ? (run("deal.create", { title: "Smoke deal", companyId: c.id, engagementId: lead.id, amountMinor: 500000 }) as {
+      ? ((await run("deal.create", { title: "Smoke deal", companyId: c.id, engagementId: lead.id, amountMinor: 500000 })) as {
           id: string;
         } | null)
       : null;
     if (deal) {
-      run("deal.getContext", { id: deal.id });
-      run("deal.markWon", { id: deal.id });
-      run("deal.reopen", { id: deal.id });
-      run("deal.delete", { id: deal.id });
+      await run("deal.getContext", { id: deal.id });
+      await run("deal.markWon", { id: deal.id });
+      await run("deal.reopen", { id: deal.id });
+      await run("deal.delete", { id: deal.id });
     }
-    run("engagement.archive", { id: lead.id });
-    run("engagement.restore", { id: lead.id });
-    run("engagement.delete", { id: lead.id });
+    await run("engagement.archive", { id: lead.id });
+    await run("engagement.restore", { id: lead.id });
+    await run("engagement.delete", { id: lead.id });
   }
   // Contact list round-trip on the throwaway person.
-  const list = run("list.create", { name: `Smoke List ${Date.now()}` }) as { id: string } | null;
+  const list = (await run("list.create", { name: `Smoke List ${Date.now()}` })) as { id: string } | null;
   if (list && p) {
-    run("list.addMembers", { listId: list.id, entityType: "person", entityIds: [p.id] });
-    run("person.list", { listId: list.id, limit: 5, offset: 0 });
-    run("list.members", { id: list.id });
-    run("list.removeMembers", { listId: list.id, entityType: "person", entityIds: [p.id] });
-    run("list.delete", { id: list.id });
+    await run("list.addMembers", { listId: list.id, entityType: "person", entityIds: [p.id] });
+    await run("person.list", { listId: list.id, limit: 5, offset: 0 });
+    await run("list.members", { id: list.id });
+    await run("list.removeMembers", { listId: list.id, entityType: "person", entityIds: [p.id] });
+    await run("list.delete", { id: list.id });
   }
-  if (p) run("person.delete", { id: p.id });
-  run("company.delete", { id: c.id });
+  if (p) await run("person.delete", { id: p.id });
+  await run("company.delete", { id: c.id });
 }
 
 console.log(`counts: leads=${leads?.total} companies=${companies?.total} people=${people?.total} deals=${deals?.total}`);

@@ -1,9 +1,9 @@
 /**
- * Repository ports — the persistence seam. `packages/db` implements these with
- * Drizzle + better-sqlite3. Methods are synchronous on purpose: the V1 store
- * is an embedded single-writer SQLite file and sync repos make transactional
- * operation handlers trivial. The Postgres adapter (0.3) will flip these to
- * async in one mechanical refactor.
+ * Repository ports — the persistence seam. Every method is asynchronous
+ * (returns a Promise) so adapters are free to talk to embedded or networked
+ * stores behind the same contract. The V1 SQLite adapter (`packages/db`)
+ * fulfils these signatures with synchronous better-sqlite3 work inside async
+ * methods; an async-capable adapter (e.g. Postgres) can await real I/O.
  *
  * Every method is already workspace-scoped by construction: implementations
  * are constructed per-request with the RequestContext's workspaceId.
@@ -68,110 +68,133 @@ export interface ActorStamp {
 }
 
 export interface WorkspacePort {
-  get(): Workspace;
-  update(patch: Partial<Pick<Workspace, "name" | "defaultCurrency" | "timezone" | "settings">>): Workspace;
+  get(): Promise<Workspace>;
+  update(patch: Partial<Pick<Workspace, "name" | "defaultCurrency" | "timezone" | "settings">>): Promise<Workspace>;
 }
 
 export interface UserPort {
-  list(): User[];
-  get(id: string): User | null;
-  getByEmail(email: string): (User & { passwordHash: string | null }) | null;
-  create(input: { name: string; email: string; role: Role; passwordHash: string | null }): User;
-  update(id: string, patch: { name?: string; role?: Role; disabledAt?: string | null }): User;
-  setPassword(id: string, passwordHash: string): void;
-  count(): number;
+  list(): Promise<User[]>;
+  get(id: string): Promise<User | null>;
+  getByEmail(email: string): Promise<(User & { passwordHash: string | null }) | null>;
+  create(input: { name: string; email: string; role: Role; passwordHash: string | null }): Promise<User>;
+  update(id: string, patch: { name?: string; role?: Role; disabledAt?: string | null }): Promise<User>;
+  setPassword(id: string, passwordHash: string): Promise<void>;
+  count(): Promise<number>;
+  /**
+   * Hard-delete every login session belonging to the user; returns the number
+   * of rows removed. Called by `user.update` inside the same transaction when
+   * a user is disabled — disabling immediately ends all sessions, and
+   * re-enabling restores nothing (docs/issues/0022). Optional only until every
+   * adapter implements it; the SQLite adapter does.
+   */
+  // TODO(pg): mirror disable-revocation (0029 #2)
+  deleteSessions?(userId: string): Promise<number>;
 }
 
 export interface CompanyPort {
-  list(filter: CompanyFilter): Page<CompanyListItem>;
-  get(id: string): Company | null;
-  getByName(name: string): Company | null;
-  create(input: Partial<Company> & { name: string }): Company;
-  update(id: string, patch: Partial<Company>): Company;
-  setArchived(id: string, archived: boolean): Company;
-  hardDelete(id: string): void;
-  people(companyId: string): Array<CompanyPersonLink & { person: Person }>;
+  list(filter: CompanyFilter): Promise<Page<CompanyListItem>>;
+  get(id: string): Promise<Company | null>;
+  getByName(name: string): Promise<Company | null>;
+  create(input: Partial<Company> & { name: string }): Promise<Company>;
+  update(id: string, patch: Partial<Company>): Promise<Company>;
+  setArchived(id: string, archived: boolean): Promise<Company>;
+  hardDelete(id: string): Promise<void>;
+  people(companyId: string): Promise<Array<CompanyPersonLink & { person: Person }>>;
 }
 
 export interface PersonPort {
-  list(filter: PersonFilter): Page<PersonListItem>;
-  get(id: string): Person | null;
-  create(input: Partial<Person> & { name: string }): Person;
-  update(id: string, patch: Partial<Person>): Person;
-  setArchived(id: string, archived: boolean): Person;
-  hardDelete(id: string): void;
-  companies(personId: string): Array<CompanyPersonLink & { company: Company }>;
+  list(filter: PersonFilter): Promise<Page<PersonListItem>>;
+  get(id: string): Promise<Person | null>;
+  create(input: Partial<Person> & { name: string }): Promise<Person>;
+  update(id: string, patch: Partial<Person>): Promise<Person>;
+  setArchived(id: string, archived: boolean): Promise<Person>;
+  hardDelete(id: string): Promise<void>;
+  companies(personId: string): Promise<Array<CompanyPersonLink & { company: Company }>>;
   link(input: {
     companyId: string;
     personId: string;
     roleTitle?: string | null;
     isPrimary?: boolean;
     status?: "current" | "past";
-  }): CompanyPersonLink;
-  unlink(companyId: string, personId: string): void;
+  }): Promise<CompanyPersonLink>;
+  unlink(companyId: string, personId: string): Promise<void>;
 }
 
 export interface PipelinePort {
-  list(type?: PipelineType): Pipeline[];
-  get(id: string): Pipeline | null;
-  getDefault(type: PipelineType): Pipeline | null;
-  getStage(stageId: string): Stage | null;
+  list(type?: PipelineType): Promise<Pipeline[]>;
+  get(id: string): Promise<Pipeline | null>;
+  getDefault(type: PipelineType): Promise<Pipeline | null>;
+  getStage(stageId: string): Promise<Stage | null>;
   create(input: {
     type: PipelineType;
     name: string;
     isDefault: boolean;
     stages: Array<{ name: string; color: string; probability?: number | null; outcome?: string | null }>;
-  }): Pipeline;
-  rename(id: string, name: string): Pipeline;
-  setDefault(id: string): void;
-  delete(id: string): void;
-  addStage(pipelineId: string, input: { name: string; color: string; probability?: number | null; outcome?: string | null }): Stage;
-  updateStage(stageId: string, patch: { name?: string; color?: string; probability?: number | null; outcome?: string | null }): Stage;
-  reorderStages(pipelineId: string, stageIds: string[]): void;
-  deleteStage(stageId: string): void;
-  stageUsage(stageId: string): number;
-  pipelineUsage(pipelineId: string): number;
+  }): Promise<Pipeline>;
+  rename(id: string, name: string): Promise<Pipeline>;
+  setDefault(id: string): Promise<void>;
+  delete(id: string): Promise<void>;
+  addStage(
+    pipelineId: string,
+    input: { name: string; color: string; probability?: number | null; outcome?: string | null },
+  ): Promise<Stage>;
+  updateStage(
+    stageId: string,
+    patch: { name?: string; color?: string; probability?: number | null; outcome?: string | null },
+  ): Promise<Stage>;
+  reorderStages(pipelineId: string, stageIds: string[]): Promise<void>;
+  deleteStage(stageId: string): Promise<void>;
+  stageUsage(stageId: string): Promise<number>;
+  pipelineUsage(pipelineId: string): Promise<number>;
 }
 
 export interface EngagementPort {
-  list(filter: EngagementFilter): Page<EngagementListItem>;
-  get(id: string): Engagement | null;
-  create(input: Partial<Engagement> & { title: string; pipelineId: string; stageId: string }): Engagement;
-  update(id: string, patch: Partial<Engagement>): Engagement;
-  setArchived(id: string, archived: boolean): Engagement;
-  hardDelete(id: string): void;
-  countByStage(pipelineId: string): Array<{ stageId: string; count: number }>;
+  list(filter: EngagementFilter): Promise<Page<EngagementListItem>>;
+  get(id: string): Promise<Engagement | null>;
+  create(input: Partial<Engagement> & { title: string; pipelineId: string; stageId: string }): Promise<Engagement>;
+  update(id: string, patch: Partial<Engagement>): Promise<Engagement>;
+  setArchived(id: string, archived: boolean): Promise<Engagement>;
+  hardDelete(id: string): Promise<void>;
+  countByStage(pipelineId: string): Promise<Array<{ stageId: string; count: number }>>;
 }
 
 export interface DealPort {
-  list(filter: DealFilter): Page<DealListItem>;
-  get(id: string): Deal | null;
-  create(input: Partial<Deal> & { title: string; pipelineId: string; stageId: string; currency: string }): Deal;
-  update(id: string, patch: Partial<Deal>): Deal;
-  setArchived(id: string, archived: boolean): Deal;
-  hardDelete(id: string): void;
-  stakeholders(dealId: string): Array<DealStakeholder & { person: Person }>;
-  addStakeholder(input: { dealId: string; personId: string; role?: string | null; isPrimary?: boolean; note?: string | null }): DealStakeholder;
-  updateStakeholder(id: string, patch: { role?: string | null; isPrimary?: boolean; note?: string | null }): DealStakeholder;
-  removeStakeholder(id: string): void;
-  getStakeholder(id: string): DealStakeholder | null;
-  stageStats(pipelineId: string): Array<{ stageId: string; count: number; sums: Record<string, number>; weighted: Record<string, number> }>;
+  list(filter: DealFilter): Promise<Page<DealListItem>>;
+  get(id: string): Promise<Deal | null>;
+  create(input: Partial<Deal> & { title: string; pipelineId: string; stageId: string; currency: string }): Promise<Deal>;
+  update(id: string, patch: Partial<Deal>): Promise<Deal>;
+  setArchived(id: string, archived: boolean): Promise<Deal>;
+  hardDelete(id: string): Promise<void>;
+  stakeholders(dealId: string): Promise<Array<DealStakeholder & { person: Person }>>;
+  addStakeholder(input: {
+    dealId: string;
+    personId: string;
+    role?: string | null;
+    isPrimary?: boolean;
+    note?: string | null;
+  }): Promise<DealStakeholder>;
+  updateStakeholder(id: string, patch: { role?: string | null; isPrimary?: boolean; note?: string | null }): Promise<DealStakeholder>;
+  removeStakeholder(id: string): Promise<void>;
+  getStakeholder(id: string): Promise<DealStakeholder | null>;
+  stageStats(
+    pipelineId: string,
+  ): Promise<Array<{ stageId: string; count: number; sums: Record<string, number>; weighted: Record<string, number> }>>;
 }
 
 export interface OfferingPort {
-  list(includeArchived: boolean): Offering[];
-  get(id: string): Offering | null;
-  create(input: Partial<Offering> & { name: string; type: string }): Offering;
-  update(id: string, patch: Partial<Offering>): Offering;
-  setArchived(id: string, archived: boolean): Offering;
-  hardDelete(id: string): void;
-  links(entityType: "engagement" | "deal", entityId: string): Array<OfferingLink & { offering: Offering }>;
+  list(includeArchived: boolean): Promise<Offering[]>;
+  get(id: string): Promise<Offering | null>;
+  create(input: Partial<Offering> & { name: string; type: string }): Promise<Offering>;
+  update(id: string, patch: Partial<Offering>): Promise<Offering>;
+  setArchived(id: string, archived: boolean): Promise<Offering>;
+  hardDelete(id: string): Promise<void>;
+  links(entityType: "engagement" | "deal", entityId: string): Promise<Array<OfferingLink & { offering: Offering }>>;
   /** Light per-row projection for list views, keyed by entity id. */
   linksForEntities(
     entityType: "engagement" | "deal",
     entityIds: string[],
-  ): Record<string, Array<{ id: string; name: string; isPrimary: boolean }>>;
-  linksForOffering(offeringId: string): OfferingLink[];
+  ): Promise<Record<string, Array<{ id: string; name: string; isPrimary: boolean }>>>;
+  linksForOffering(offeringId: string): Promise<OfferingLink[]>;
   link(input: {
     offeringId: string;
     entityType: "engagement" | "deal";
@@ -179,57 +202,65 @@ export interface OfferingPort {
     fit?: string | null;
     note?: string | null;
     isPrimary?: boolean;
-  }): OfferingLink;
-  unlink(offeringId: string, entityType: "engagement" | "deal", entityId: string): void;
+  }): Promise<OfferingLink>;
+  unlink(offeringId: string, entityType: "engagement" | "deal", entityId: string): Promise<void>;
 }
 
 export interface ActivityPort {
-  list(filter: ActivityFilter): Page<Activity>;
-  get(id: string): Activity | null;
+  list(filter: ActivityFilter): Promise<Page<Activity>>;
+  get(id: string): Promise<Activity | null>;
   create(
     input: Partial<Activity> & { kind: Activity["kind"] },
     actor: ActorStamp,
-  ): Activity;
-  update(id: string, patch: Partial<Activity>): Activity;
-  hardDelete(id: string): void;
+  ): Promise<Activity>;
+  update(id: string, patch: Partial<Activity>): Promise<Activity>;
+  hardDelete(id: string): Promise<void>;
   /** Bumps lastActivityAt denormalization on linked engagement/deal. */
-  touchLinked(activity: Pick<Activity, "engagementId" | "dealId">, at: string): void;
+  touchLinked(activity: Pick<Activity, "engagementId" | "dealId">, at: string): Promise<void>;
 }
 
 export interface TagPort {
-  list(): Array<Tag & { usage: number }>;
-  get(id: string): Tag | null;
-  getByName(name: string): Tag | null;
-  create(input: { name: string; color: string }): Tag;
-  update(id: string, patch: { name?: string; color?: string }): Tag;
-  delete(id: string): void;
-  apply(tagId: string, entityType: TaggableType, entityId: string): void;
-  remove(tagId: string, entityType: TaggableType, entityId: string): void;
-  forEntity(entityType: TaggableType, entityId: string): Tag[];
-  forEntities(entityType: TaggableType, entityIds: string[]): Record<string, Tag[]>;
+  list(): Promise<Array<Tag & { usage: number }>>;
+  get(id: string): Promise<Tag | null>;
+  getByName(name: string): Promise<Tag | null>;
+  create(input: { name: string; color: string }): Promise<Tag>;
+  update(id: string, patch: { name?: string; color?: string }): Promise<Tag>;
+  delete(id: string): Promise<void>;
+  apply(tagId: string, entityType: TaggableType, entityId: string): Promise<void>;
+  remove(tagId: string, entityType: TaggableType, entityId: string): Promise<void>;
+  forEntity(entityType: TaggableType, entityId: string): Promise<Tag[]>;
+  forEntities(entityType: TaggableType, entityIds: string[]): Promise<Record<string, Tag[]>>;
 }
 
 export interface ListPort {
-  list(): ContactListWithCounts[];
-  get(id: string): ContactList | null;
-  getByName(name: string): ContactList | null;
-  create(input: { name: string; description?: string | null; color: string; entityType?: ListableType | null }): ContactList;
-  update(id: string, patch: { name?: string; description?: string | null; color?: string; entityType?: ListableType | null }): ContactList;
+  list(): Promise<ContactListWithCounts[]>;
+  get(id: string): Promise<ContactList | null>;
+  getByName(name: string): Promise<ContactList | null>;
+  create(input: {
+    name: string;
+    description?: string | null;
+    color: string;
+    entityType?: ListableType | null;
+  }): Promise<ContactList>;
+  update(
+    id: string,
+    patch: { name?: string; description?: string | null; color?: string; entityType?: ListableType | null },
+  ): Promise<ContactList>;
   /** Deletes the list and detaches all members. */
-  delete(id: string): void;
-  memberTypeCounts(listId: string): Record<string, number>;
+  delete(id: string): Promise<void>;
+  memberTypeCounts(listId: string): Promise<Record<string, number>>;
   /** Idempotent bulk attach; returns the number of rows actually inserted. */
-  addMembers(listId: string, entityType: ListableType, entityIds: string[]): number;
+  addMembers(listId: string, entityType: ListableType, entityIds: string[]): Promise<number>;
   /** Returns the number of rows actually removed. */
-  removeMembers(listId: string, entityType: ListableType, entityIds: string[]): number;
-  forEntity(entityType: ListableType, entityId: string): ContactList[];
-  forEntities(entityType: ListableType, entityIds: string[]): Record<string, ContactList[]>;
+  removeMembers(listId: string, entityType: ListableType, entityIds: string[]): Promise<number>;
+  forEntity(entityType: ListableType, entityId: string): Promise<ContactList[]>;
+  forEntities(entityType: ListableType, entityIds: string[]): Promise<Record<string, ContactList[]>>;
 }
 
 export interface CustomFieldPort {
-  listDefs(entityType?: CustomFieldEntity, includeArchived?: boolean): CustomFieldDef[];
-  getDef(id: string): CustomFieldDef | null;
-  getDefByKey(entityType: CustomFieldEntity, key: string): CustomFieldDef | null;
+  listDefs(entityType?: CustomFieldEntity, includeArchived?: boolean): Promise<CustomFieldDef[]>;
+  getDef(id: string): Promise<CustomFieldDef | null>;
+  getDefByKey(entityType: CustomFieldEntity, key: string): Promise<CustomFieldDef | null>;
   createDef(input: {
     entityType: CustomFieldEntity;
     key: string;
@@ -237,30 +268,30 @@ export interface CustomFieldPort {
     type: string;
     options: string[] | null;
     required: boolean;
-  }): CustomFieldDef;
-  updateDef(id: string, patch: { label?: string; options?: string[] | null; required?: boolean }): CustomFieldDef;
-  setDefArchived(id: string, archived: boolean): CustomFieldDef;
-  setValue(fieldId: string, entityType: CustomFieldEntity, entityId: string, value: CustomFieldValue): void;
-  values(entityType: CustomFieldEntity, entityId: string): Record<string, CustomFieldValue>;
+  }): Promise<CustomFieldDef>;
+  updateDef(id: string, patch: { label?: string; options?: string[] | null; required?: boolean }): Promise<CustomFieldDef>;
+  setDefArchived(id: string, archived: boolean): Promise<CustomFieldDef>;
+  setValue(fieldId: string, entityType: CustomFieldEntity, entityId: string, value: CustomFieldValue): Promise<void>;
+  values(entityType: CustomFieldEntity, entityId: string): Promise<Record<string, CustomFieldValue>>;
 }
 
 export interface SavedViewPort {
-  list(userId: string | null): SavedView[];
-  get(id: string): SavedView | null;
+  list(userId: string | null): Promise<SavedView[]>;
+  get(id: string): Promise<SavedView | null>;
   create(input: {
     name: string;
     entityType: string;
     filters: Record<string, unknown>;
     visibility: string;
     ownerUserId: string | null;
-  }): SavedView;
-  update(id: string, patch: { name?: string; filters?: Record<string, unknown>; visibility?: string }): SavedView;
-  delete(id: string): void;
+  }): Promise<SavedView>;
+  update(id: string, patch: { name?: string; filters?: Record<string, unknown>; visibility?: string }): Promise<SavedView>;
+  delete(id: string): Promise<void>;
 }
 
 export interface PendingActionPort {
-  list(status?: PendingStatus): PendingAction[];
-  get(id: string): PendingAction | null;
+  list(status?: PendingStatus): Promise<PendingAction[]>;
+  get(id: string): Promise<PendingAction | null>;
   create(input: {
     operation: string;
     input: Record<string, unknown>;
@@ -268,7 +299,7 @@ export interface PendingActionPort {
     riskCategory: string;
     actor: ActorStamp;
     expiresAt: string;
-  }): PendingAction;
+  }): Promise<PendingAction>;
   setStatus(
     id: string,
     patch: {
@@ -277,12 +308,12 @@ export interface PendingActionPort {
       reviewNote?: string | null;
       result?: Record<string, unknown> | null;
     },
-  ): PendingAction;
-  countPending(): number;
+  ): Promise<PendingAction>;
+  countPending(): Promise<number>;
 }
 
 export interface AuditPort {
-  record(input: AuditInput, actor: ActorStamp): AuditEvent;
+  record(input: AuditInput, actor: ActorStamp): Promise<AuditEvent>;
   list(filter: {
     actorType?: ActorType;
     operation?: string;
@@ -290,13 +321,13 @@ export interface AuditPort {
     entityId?: string;
     limit: number;
     offset: number;
-  }): Page<AuditEvent>;
+  }): Promise<Page<AuditEvent>>;
 }
 
 export interface McpClientPort {
-  list(): McpClient[];
-  get(id: string): McpClient | null;
-  getByTokenHash(hash: string): (McpClient & { workspaceId: string }) | null;
+  list(): Promise<McpClient[]>;
+  get(id: string): Promise<McpClient | null>;
+  getByTokenHash(hash: string): Promise<(McpClient & { workspaceId: string }) | null>;
   create(input: {
     name: string;
     tokenHash: string;
@@ -304,20 +335,29 @@ export interface McpClientPort {
     scopes: McpScope[];
     trust: TrustProfile;
     createdByUserId: string | null;
-  }): McpClient;
-  update(id: string, patch: { name?: string; scopes?: McpScope[]; trust?: TrustProfile }): McpClient;
-  revoke(id: string): McpClient;
-  touchLastUsed(id: string): void;
+  }): Promise<McpClient>;
+  update(id: string, patch: { name?: string; scopes?: McpScope[]; trust?: TrustProfile }): Promise<McpClient>;
+  revoke(id: string): Promise<McpClient>;
+  /**
+   * Revoke (set revokedAt — same semantics as `revoke`, never delete) every
+   * active client created by the user; returns the number revoked. Called by
+   * `user.update` inside the same transaction when a user is disabled;
+   * re-enabling the user does NOT un-revoke (docs/issues/0022). Optional only
+   * until every adapter implements it; the SQLite adapter does.
+   */
+  // TODO(pg): mirror disable-revocation (0029 #2)
+  revokeAllForUser?(userId: string): Promise<number>;
+  touchLastUsed(id: string): Promise<void>;
 }
 
 export interface SearchPort {
-  global(query: string, limit: number): SearchHit[];
+  global(query: string, limit: number): Promise<SearchHit[]>;
 }
 
 export interface MaintenancePort {
   /** SQLite VACUUM INTO a timestamped file. Returns the absolute path. */
-  backup(): string;
-  counts(): { companies: number; people: number; engagements: number; deals: number; openDeals: number };
+  backup(): Promise<string>;
+  counts(): Promise<{ companies: number; people: number; engagements: number; deals: number; openDeals: number }>;
 }
 
 /** Everything an operation handler can touch, scoped to one workspace. */
@@ -340,6 +380,10 @@ export interface Ports {
   mcpClients: McpClientPort;
   search: SearchPort;
   maintenance: MaintenancePort;
-  /** Run fn atomically. Nested calls join the outer transaction. */
-  tx<T>(fn: () => T): T;
+  /**
+   * Run fn atomically. Nested calls join the outer transaction.
+   * Adapters must guarantee the awaited fn commits only after it fully
+   * resolves and rolls back when it rejects.
+   */
+  tx<T>(fn: () => Promise<T>): Promise<T>;
 }

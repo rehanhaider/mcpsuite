@@ -70,14 +70,14 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
     input: zApproveInput,
     minRole: "admin",
     scope: "approvals",
-    handler: (op, { id, note }) => {
-      const pa = found(op.ports.pendingActions.get(id), "pending action", id);
+    handler: async (op, { id, note }) => {
+      const pa = found(await op.ports.pendingActions.get(id), "pending action", id);
       if (pa.status !== "pending") throw OpError.validation(`Action is already ${pa.status}`);
       if (op.ctx.actorType === "agent" && pa.requestedByClientId && pa.requestedByClientId === op.ctx.clientId) {
         throw OpError.forbidden("An agent cannot approve its own pending actions");
       }
       if (pa.expiresAt < nowIso()) {
-        op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewNote: "expired" });
+        await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewNote: "expired" });
         throw OpError.validation("This pending action has expired; ask the agent to retry");
       }
       const target = catalog.get(pa.operation);
@@ -87,15 +87,15 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
       let result: unknown;
       try {
         const parsed = target.input.parse(pa.input);
-        result = op.ports.tx(() => target.handler(op, parsed));
+        result = await op.ports.tx(() => target.handler(op, parsed));
       } catch (e) {
-        op.ports.pendingActions.setStatus(id, {
+        await op.ports.pendingActions.setStatus(id, {
           status: "failed",
           reviewedByUserId: op.ctx.userId,
           reviewNote: note ?? null,
           result: { error: toErrorPayload(e) as unknown as Record<string, unknown> },
         });
-        audit(op, {
+        await audit(op, {
           operation: "pendingAction.approve",
           entityType: "pending_action",
           entityId: id,
@@ -104,13 +104,13 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
         });
         throw e;
       }
-      const updated = op.ports.pendingActions.setStatus(id, {
+      const updated = await op.ports.pendingActions.setStatus(id, {
         status: "approved",
         reviewedByUserId: op.ctx.userId,
         reviewNote: note ?? null,
         result: { data: result } as Record<string, unknown>,
       });
-      audit(op, {
+      await audit(op, {
         operation: "pendingAction.approve",
         entityType: "pending_action",
         entityId: id,
@@ -155,7 +155,13 @@ function needsApproval(op: OperationDef, ctx: RequestContext): boolean {
   return !trustAllows(ctx.trust, op.risk);
 }
 
-export function runOperation(catalog: Catalog, ports: Ports, ctx: RequestContext, name: string, rawInput: unknown): OpResult {
+export async function runOperation(
+  catalog: Catalog,
+  ports: Ports,
+  ctx: RequestContext,
+  name: string,
+  rawInput: unknown,
+): Promise<OpResult> {
   const op = catalog.get(name);
   if (!op) return { status: "error", error: { code: "not_found", message: `Unknown operation "${name}"` } };
 
@@ -187,28 +193,33 @@ export function runOperation(catalog: Catalog, ports: Ports, ctx: RequestContext
     if (needsApproval(op, ctx)) {
       let preview: Record<string, unknown> | null = null;
       try {
-        preview = op.preview ? op.preview(opCtx, input) : null;
+        preview = op.preview ? await op.preview(opCtx, input) : null;
       } catch {
         preview = null;
       }
-      const pa = ports.pendingActions.create({
-        operation: op.name,
-        input: input as Record<string, unknown>,
-        preview,
-        riskCategory: op.risk!,
-        actor: actorStamp(ctx),
-        expiresAt: new Date(Date.now() + PENDING_ACTION_TTL_MS).toISOString(),
+      // One transaction per modifying operation (docs/issues/0023): the
+      // approval request and its audit event commit together or not at all.
+      const pa = await ports.tx(async () => {
+        const created = await ports.pendingActions.create({
+          operation: op.name,
+          input: input as Record<string, unknown>,
+          preview,
+          riskCategory: op.risk!,
+          actor: actorStamp(ctx),
+          expiresAt: new Date(Date.now() + PENDING_ACTION_TTL_MS).toISOString(),
+        });
+        await ports.audit.record(
+          {
+            operation: "pendingAction.create",
+            entityType: "pending_action",
+            entityId: created.id,
+            summary: `Agent requested approval for ${op.name}`,
+            meta: { risk: op.risk },
+          },
+          actorStamp(ctx),
+        );
+        return created;
       });
-      ports.audit.record(
-        {
-          operation: "pendingAction.create",
-          entityType: "pending_action",
-          entityId: pa.id,
-          summary: `Agent requested approval for ${op.name}`,
-          meta: { risk: op.risk },
-        },
-        actorStamp(ctx),
-      );
       return {
         status: "pending_approval",
         pendingActionId: pa.id,
@@ -219,7 +230,7 @@ export function runOperation(catalog: Catalog, ports: Ports, ctx: RequestContext
       };
     }
 
-    const data = ports.tx(() => op.handler(opCtx, input));
+    const data = await ports.tx(() => op.handler(opCtx, input));
     return { status: "ok", data };
   } catch (e) {
     return { status: "error", error: toErrorPayload(e) };

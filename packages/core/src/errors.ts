@@ -11,6 +11,8 @@ export type OpErrorCode =
   | "version_conflict"
   | "in_use"
   | "invalid_state"
+  /** Hosted deployments: the workspace's generic access state is locked. */
+  | "workspace_locked"
   | "internal";
 
 export class OpError extends Error {

@@ -6,12 +6,96 @@
  * HTTP = Bearer API key) and injected per server instance.
  */
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodRawShape } from "zod";
 import type { z } from "zod";
 import type { OperationDef, OpResult, RequestContext } from "@emcp/core";
-import type { Runtime } from "@emcp/db";
+import {
+  resolveWorkspaceAccess,
+  WORKSPACE_LOCKED_MESSAGE,
+  workspaceLockedResult,
+  type AnyRuntime,
+  type Runtime,
+} from "@emcp/db";
 
 export const SERVER_INFO = { name: "emcp-crm", version: "0.1.0" } as const;
+
+/**
+ * Both MCP transports authenticate API keys and read the hosted-access lock
+ * from the SQLite store (auth.ts / hosting-access.ts are SQLite-typed), so a
+ * DATABASE_URL that selects another adapter cannot serve MCP yet: fail at
+ * startup with a clear stderr message instead of refusing every request.
+ */
+export function requireSqliteRuntime(runtime: AnyRuntime, transport: string): Runtime {
+  if (runtime.adapter !== "sqlite") {
+    console.error(
+      `[emcp-mcp] The MCP ${transport} transport requires the SQLite adapter (DATABASE_URL unset or file:); ` +
+        `DATABASE_URL selected "${runtime.adapter}". API keys and workspace access state resolve from the SQLite store.`,
+    );
+    process.exit(1);
+  }
+  return runtime;
+}
+
+// ---------------------------------------------------------------------------
+// Hosted access gate (packages/hosting-control/README.md read contract).
+// Key auth may succeed — identification is allowed — but a locked workspace
+// refuses every tool call and resource read. Checked per call so long-lived
+// transports (stdio) pick up lock/unlock without a restart; self-host
+// databases (no hc_workspace_access table) always resolve as active.
+// ---------------------------------------------------------------------------
+
+/** JSON-RPC error code for a locked workspace (implementation-defined range). */
+export const WORKSPACE_LOCKED_RPC_CODE = -32003;
+
+const WORKSPACE_LOCKED_RPC_MESSAGE = `workspace_locked: ${WORKSPACE_LOCKED_MESSAGE}`;
+
+function workspaceLocked(runtime: Runtime, ctx: RequestContext): boolean {
+  return resolveWorkspaceAccess(runtime.db, ctx.workspaceId).mode === "locked";
+}
+
+function lockedMcpError(): McpError {
+  return new McpError(WORKSPACE_LOCKED_RPC_CODE, WORKSPACE_LOCKED_RPC_MESSAGE);
+}
+
+/** Methods that stay available while locked: identification + listings only. */
+const LOCKED_ALLOWED_METHODS = new Set([
+  "initialize",
+  "ping",
+  "tools/list",
+  "resources/list",
+  "resources/templates/list",
+  "prompts/list",
+]);
+
+/**
+ * JSON-RPC rejection for a locked workspace, built from a raw (already
+ * parsed) request body before it reaches the SDK. Returns the error
+ * response(s) to send, or null when nothing in the body needs rejecting
+ * (handshake/listing methods and notifications pass through).
+ */
+export function lockedRpcRejection(body: unknown): unknown | null {
+  const messages = Array.isArray(body) ? body : [body];
+  const rejected = messages.flatMap((message) => {
+    if (typeof message !== "object" || message === null) return [];
+    const { id, method } = message as { id?: unknown; method?: unknown };
+    if (typeof method !== "string" || LOCKED_ALLOWED_METHODS.has(method)) return [];
+    if (id === undefined || id === null) return []; // notifications get no response
+    return [
+      {
+        jsonrpc: "2.0" as const,
+        id: id as string | number,
+        error: {
+          code: WORKSPACE_LOCKED_RPC_CODE,
+          message: WORKSPACE_LOCKED_RPC_MESSAGE,
+          data: { code: "workspace_locked" },
+        },
+      },
+    ];
+  });
+  if (rejected.length === 0) return null;
+  return Array.isArray(body) ? rejected : rejected[0];
+}
 
 function toText(result: OpResult): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
   if (result.status === "ok") {
@@ -75,8 +159,9 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
   const json = (uri: string, data: unknown) => ({
     contents: [{ uri, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
   });
-  const runOrThrow = (name: string, input: Record<string, unknown> = {}): unknown => {
-    const result = runtime.run(ctx, name, input);
+  const runOrThrow = async (name: string, input: Record<string, unknown> = {}): Promise<unknown> => {
+    if (workspaceLocked(runtime, ctx)) throw lockedMcpError();
+    const result = await runtime.run(ctx, name, input);
     if (result.status !== "ok") {
       throw new Error(result.status === "error" ? `${result.error.code}: ${result.error.message}` : result.message);
     }
@@ -91,8 +176,9 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
       description: "Every operation this CRM exposes: name, risk category, required scope/role.",
       mimeType: "application/json",
     },
-    (uri) =>
-      json(
+    (uri) => {
+      if (workspaceLocked(runtime, ctx)) throw lockedMcpError();
+      return json(
         uri.href,
         [...runtime.catalog.values()].map((op) => ({
           name: op.name,
@@ -104,7 +190,8 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
           risk: op.risk ?? null,
           mcpExpose: op.mcpExpose,
         })),
-      ),
+      );
+    },
   );
 
   server.registerResource(
@@ -115,7 +202,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
       description: "Engagement + deal pipelines with their ordered stages (ids needed for stage updates).",
       mimeType: "application/json",
     },
-    (uri) => json(uri.href, runOrThrow("pipeline.list", {})),
+    async (uri) => json(uri.href, await runOrThrow("pipeline.list", {})),
   );
 
   server.registerResource(
@@ -126,7 +213,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
       description: "Saved filters; run one with saved_view_run.",
       mimeType: "application/json",
     },
-    (uri) => json(uri.href, runOrThrow("savedView.list", {})),
+    async (uri) => json(uri.href, await runOrThrow("savedView.list", {})),
   );
 
   server.registerResource(
@@ -137,7 +224,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
       description: "Actions waiting for human review.",
       mimeType: "application/json",
     },
-    (uri) => json(uri.href, runOrThrow("pendingAction.list", { status: "pending" })),
+    async (uri) => json(uri.href, await runOrThrow("pendingAction.list", { status: "pending" })),
   );
 
   const CONTEXT_OPS: Record<string, string> = {
@@ -154,11 +241,12 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
       description: "Full context for one record (type: company | person | engagement | deal).",
       mimeType: "application/json",
     },
-    (uri, variables) => {
+    async (uri, variables) => {
+      if (workspaceLocked(runtime, ctx)) throw lockedMcpError();
       const type = String(variables.type ?? "");
       const opName = CONTEXT_OPS[type];
       if (!opName) throw new Error(`Unknown context type "${type}" (use company|person|engagement|deal)`);
-      return json(uri.href, runOrThrow(opName, { id: String(variables.id ?? "") }));
+      return json(uri.href, await runOrThrow(opName, { id: String(variables.id ?? "") }));
     },
   );
 }
@@ -173,6 +261,11 @@ function registerTool(server: McpServer, runtime: Runtime, ctx: RequestContext, 
       description: op.risk ? `${op.description} [risk: ${op.risk}]` : op.description,
       inputSchema: shape,
     },
-    (args: Record<string, unknown>) => toText(runtime.run(ctx, op.name, args ?? {})),
+    async (args: Record<string, unknown>) => {
+      // Locked workspaces answer with the same catalog error envelope agents
+      // already understand; the operation is never executed.
+      if (workspaceLocked(runtime, ctx)) return toText(workspaceLockedResult());
+      return toText(await runtime.run(ctx, op.name, args ?? {}));
+    },
   );
 }

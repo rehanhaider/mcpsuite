@@ -11,9 +11,18 @@ import { generatePassword, hashPassword } from "./services.ts";
 export interface BootstrapResult {
   workspaceId: string;
   ownerUserId: string;
-  /** Set only when the owner user was created this run (shown once). */
+  /**
+   * Set ONLY when the owner user was created this run AND the password was
+   * generated here (shown once). When a password was supplied externally
+   * (`ownerPassword` option or EMCP_OWNER_PASSWORD) this is always null so no
+   * printer can ever log a caller-supplied secret (docs/issues/0022).
+   */
   ownerOneTimePassword: string | null;
   createdWorkspace: boolean;
+  /** True when the owner user was created this run (regardless of password source). */
+  createdOwner: boolean;
+  /** The owner's login email when created this run, else null. */
+  ownerEmail: string | null;
 }
 
 interface StageSeed {
@@ -77,6 +86,8 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
 
   // Owner user
   let ownerOneTimePassword: string | null = null;
+  let createdOwner = false;
+  let ownerEmail: string | null = null;
   let owner = db
     .select({ userId: t.memberships.userId })
     .from(t.memberships)
@@ -86,8 +97,13 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
     const userId = newId();
     const email = (opts.ownerEmail ?? process.env.EMCP_OWNER_EMAIL ?? "owner@emcp.local").toLowerCase();
     const name = opts.ownerName ?? process.env.EMCP_OWNER_NAME ?? "Owner";
-    const password = opts.ownerPassword ?? process.env.EMCP_OWNER_PASSWORD ?? generatePassword();
-    ownerOneTimePassword = password;
+    const suppliedPassword = opts.ownerPassword ?? process.env.EMCP_OWNER_PASSWORD ?? null;
+    const password = suppliedPassword ?? generatePassword();
+    // Surface the password only when WE generated it. A supplied password is
+    // the caller's secret — it must never reach stdout/logs (docs/issues/0022).
+    ownerOneTimePassword = suppliedPassword == null ? password : null;
+    createdOwner = true;
+    ownerEmail = email;
     db.insert(t.users)
       .values({ id: userId, email, name, passwordHash: hashPassword(password), createdAt: now, updatedAt: now })
       .run();
@@ -121,5 +137,5 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
   seedPipeline("engagement", "Outreach", DEFAULT_ENGAGEMENT_STAGES);
   seedPipeline("deal", "Sales", DEFAULT_DEAL_STAGES);
 
-  return { workspaceId, ownerUserId: owner.userId, ownerOneTimePassword, createdWorkspace };
+  return { workspaceId, ownerUserId: owner.userId, ownerOneTimePassword, createdWorkspace, createdOwner, ownerEmail };
 }

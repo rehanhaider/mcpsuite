@@ -23,9 +23,13 @@ export const offeringOps = [
     input: zGet,
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      const offering = found(ports.offerings.get(id), "offering", id);
-      return { ...offering, links: ports.offerings.linksForOffering(id), customFields: ports.customFields.values("offering", id) };
+    handler: async ({ ports }, { id }) => {
+      const offering = found(await ports.offerings.get(id), "offering", id);
+      return {
+        ...offering,
+        links: await ports.offerings.linksForOffering(id),
+        customFields: await ports.customFields.values("offering", id),
+      };
     },
   }),
 
@@ -36,12 +40,12 @@ export const offeringOps = [
     input: zOfferingCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      const offering = op.ports.offerings.create({
+    handler: async (op, input) => {
+      const offering = await op.ports.offerings.create({
         ...input,
         ownerUserId: input.ownerUserId ?? op.ctx.userId,
       } as Partial<Offering> & { name: string; type: string });
-      audit(op, {
+      await audit(op, {
         operation: "offering.create",
         entityType: "offering",
         entityId: offering.id,
@@ -58,11 +62,11 @@ export const offeringOps = [
     input: zOfferingUpdate,
     minRole: "member",
     scope: "write",
-    handler: (op, { id, expectedVersion, ...patch }) => {
-      const existing = found(op.ports.offerings.get(id), "offering", id);
+    handler: async (op, { id, expectedVersion, ...patch }) => {
+      const existing = found(await op.ports.offerings.get(id), "offering", id);
       checkVersion("offering", id, existing.version, expectedVersion);
-      const updated = op.ports.offerings.update(id, definedOnly(patch));
-      audit(op, {
+      const updated = await op.ports.offerings.update(id, definedOnly(patch));
+      await audit(op, {
         operation: "offering.update",
         entityType: "offering",
         entityId: id,
@@ -79,10 +83,10 @@ export const offeringOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.offerings.get(id), "offering", id);
-      const o = op.ports.offerings.setArchived(id, true);
-      audit(op, { operation: "offering.archive", entityType: "offering", entityId: id, summary: `Archived offering "${o.name}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.offerings.get(id), "offering", id);
+      const o = await op.ports.offerings.setArchived(id, true);
+      await audit(op, { operation: "offering.archive", entityType: "offering", entityId: id, summary: `Archived offering "${o.name}"` });
       return o;
     },
   }),
@@ -94,10 +98,10 @@ export const offeringOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.offerings.get(id), "offering", id);
-      const o = op.ports.offerings.setArchived(id, false);
-      audit(op, { operation: "offering.restore", entityType: "offering", entityId: id, summary: `Restored offering "${o.name}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.offerings.get(id), "offering", id);
+      const o = await op.ports.offerings.setArchived(id, false);
+      await audit(op, { operation: "offering.restore", entityType: "offering", entityId: id, summary: `Restored offering "${o.name}"` });
       return o;
     },
   }),
@@ -110,14 +114,14 @@ export const offeringOps = [
     minRole: "admin",
     scope: "write",
     risk: "destructive",
-    preview: ({ ports }, { id }) => {
-      const o = ports.offerings.get(id);
-      return { offering: o ? { id: o.id, name: o.name } : null, links: o ? ports.offerings.linksForOffering(id).length : 0 };
+    preview: async ({ ports }, { id }) => {
+      const o = await ports.offerings.get(id);
+      return { offering: o ? { id: o.id, name: o.name } : null, links: o ? (await ports.offerings.linksForOffering(id)).length : 0 };
     },
-    handler: (op, { id }) => {
-      const o = found(op.ports.offerings.get(id), "offering", id);
-      op.ports.offerings.hardDelete(id);
-      audit(op, { operation: "offering.delete", entityType: "offering", entityId: id, summary: `Hard-deleted offering "${o.name}"` });
+    handler: async (op, { id }) => {
+      const o = found(await op.ports.offerings.get(id), "offering", id);
+      await op.ports.offerings.hardDelete(id);
+      await audit(op, { operation: "offering.delete", entityType: "offering", entityId: id, summary: `Hard-deleted offering "${o.name}"` });
       return { deleted: id };
     },
   }),
@@ -129,12 +133,12 @@ export const offeringOps = [
     input: zOfferingLinkInput,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      found(op.ports.offerings.get(input.offeringId), "offering", input.offeringId);
-      if (input.entityType === "engagement") found(op.ports.engagements.get(input.entityId), "engagement", input.entityId);
-      else found(op.ports.deals.get(input.entityId), "deal", input.entityId);
-      const link = op.ports.offerings.link(input);
-      audit(op, {
+    handler: async (op, input) => {
+      found(await op.ports.offerings.get(input.offeringId), "offering", input.offeringId);
+      if (input.entityType === "engagement") found(await op.ports.engagements.get(input.entityId), "engagement", input.entityId);
+      else found(await op.ports.deals.get(input.entityId), "deal", input.entityId);
+      const link = await op.ports.offerings.link(input);
+      await audit(op, {
         operation: "offering.link",
         entityType: input.entityType,
         entityId: input.entityId,
@@ -152,9 +156,9 @@ export const offeringOps = [
     input: z.object({ offeringId: zId, entityType: z.enum(["engagement", "deal"]), entityId: zId }),
     minRole: "member",
     scope: "write",
-    handler: (op, { offeringId, entityType, entityId }) => {
-      op.ports.offerings.unlink(offeringId, entityType, entityId);
-      audit(op, {
+    handler: async (op, { offeringId, entityType, entityId }) => {
+      await op.ports.offerings.unlink(offeringId, entityType, entityId);
+      await audit(op, {
         operation: "offering.unlink",
         entityType,
         entityId,

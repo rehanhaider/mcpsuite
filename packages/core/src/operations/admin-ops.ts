@@ -61,17 +61,17 @@ export function buildAdminOps(auth: AuthServices) {
       minRole: "admin",
       scope: "admin",
       risk: "config",
-      handler: (op, input) => {
-        const ws = op.ports.workspace.get();
+      handler: async (op, input) => {
+        const ws = await op.ports.workspace.get();
         const settings = { ...ws.settings };
         if (input.staleEngagementDays) settings.staleEngagementDays = input.staleEngagementDays;
         if (input.staleDealDays) settings.staleDealDays = input.staleDealDays;
         if (input.prefixes) settings.prefixes = { ...settings.prefixes, ...input.prefixes };
-        const updated = op.ports.workspace.update({
+        const updated = await op.ports.workspace.update({
           ...definedOnly({ name: input.name, defaultCurrency: input.defaultCurrency, timezone: input.timezone }),
           settings,
         });
-        audit(op, { operation: "workspace.update", entityType: "workspace", entityId: ws.id, summary: "Updated workspace settings" });
+        await audit(op, { operation: "workspace.update", entityType: "workspace", entityId: ws.id, summary: "Updated workspace settings" });
         return updated;
       },
     }),
@@ -99,19 +99,19 @@ export function buildAdminOps(auth: AuthServices) {
       minRole: "admin",
       scope: "admin",
       risk: "admin",
-      handler: (op, input) => {
+      handler: async (op, input) => {
         if (input.role === "owner") throw OpError.validation("There can only be one owner; use role admin");
-        if (op.ports.users.getByEmail(input.email)) {
+        if (await op.ports.users.getByEmail(input.email)) {
           throw new OpError("conflict", `A user with email ${input.email} already exists`);
         }
         const password = auth.generatePassword();
-        const user = op.ports.users.create({
+        const user = await op.ports.users.create({
           name: input.name,
           email: input.email.toLowerCase(),
           role: input.role as Role,
           passwordHash: auth.hashPassword(password),
         });
-        audit(op, {
+        await audit(op, {
           operation: "user.create",
           entityType: "user",
           entityId: user.id,
@@ -134,17 +134,34 @@ export function buildAdminOps(auth: AuthServices) {
       minRole: "admin",
       scope: "admin",
       risk: "admin",
-      handler: (op, { id, disabled, ...patch }) => {
-        const user = found(op.ports.users.get(id), "user", id);
+      handler: async (op, { id, disabled, ...patch }) => {
+        const user = found(await op.ports.users.get(id), "user", id);
         if (user.role === "owner" && (patch.role || disabled)) {
           throw OpError.validation("The owner account cannot be demoted or disabled");
         }
         if (patch.role === "owner") throw OpError.validation("Ownership transfer is not supported yet");
-        const updated = op.ports.users.update(id, {
+        const updated = await op.ports.users.update(id, {
           ...definedOnly(patch),
           ...(disabled === undefined ? {} : { disabledAt: disabled ? new Date().toISOString() : null }),
         });
-        audit(op, { operation: "user.update", entityType: "user", entityId: id, summary: `Updated user ${user.email}` });
+        // Disabling revokes everything, in the SAME transaction as the update
+        // (the executor wraps this handler in ports.tx): all sessions are
+        // deleted and every MCP client the user created is revoked. Re-enabling
+        // restores none of it (docs/issues/0022).
+        let revocation: { endedSessions: number; revokedMcpClients: number } | null = null;
+        if (disabled === true) {
+          revocation = {
+            endedSessions: (await op.ports.users.deleteSessions?.(id)) ?? 0,
+            revokedMcpClients: (await op.ports.mcpClients.revokeAllForUser?.(id)) ?? 0,
+          };
+        }
+        await audit(op, {
+          operation: "user.update",
+          entityType: "user",
+          entityId: id,
+          summary: `Updated user ${user.email}`,
+          ...(revocation ? { meta: revocation } : {}),
+        });
         return updated;
       },
     }),
@@ -157,12 +174,12 @@ export function buildAdminOps(auth: AuthServices) {
       minRole: "admin",
       scope: "admin",
       risk: "admin",
-      handler: (op, { id }) => {
-        const user = found(op.ports.users.get(id), "user", id);
+      handler: async (op, { id }) => {
+        const user = found(await op.ports.users.get(id), "user", id);
         if (user.role === "owner" && op.ctx.role !== "owner") throw OpError.forbidden("Only the owner can reset the owner password");
         const password = auth.generatePassword();
-        op.ports.users.setPassword(id, auth.hashPassword(password));
-        audit(op, { operation: "user.resetPassword", entityType: "user", entityId: id, summary: `Reset password for ${user.email}` });
+        await op.ports.users.setPassword(id, auth.hashPassword(password));
+        await audit(op, { operation: "user.resetPassword", entityType: "user", entityId: id, summary: `Reset password for ${user.email}` });
         return { oneTimePassword: password };
       },
     }),
@@ -175,8 +192,8 @@ export function buildAdminOps(auth: AuthServices) {
       input: z.object({}),
       minRole: "member",
       scope: "admin",
-      handler: ({ ports, ctx }) => {
-        const all = ports.mcpClients.list();
+      handler: async ({ ports, ctx }) => {
+        const all = await ports.mcpClients.list();
         return roleAtLeast(ctx.role, "admin") ? all : all.filter((c) => c.createdByUserId === ctx.userId);
       },
     }),
@@ -194,11 +211,11 @@ export function buildAdminOps(auth: AuthServices) {
       minRole: "member",
       scope: "admin",
       risk: "admin",
-      handler: (op, input) => {
+      handler: async (op, input) => {
         if (!op.ctx.userId) throw OpError.validation("An agent client must belong to a user");
         assertGrantableScopes(input.scopes, op.ctx.role);
         const { token, hash, prefix } = auth.generateMcpToken();
-        const client = op.ports.mcpClients.create({
+        const client = await op.ports.mcpClients.create({
           name: input.name,
           tokenHash: hash,
           tokenPrefix: prefix,
@@ -206,7 +223,7 @@ export function buildAdminOps(auth: AuthServices) {
           trust: input.trust as TrustProfile,
           createdByUserId: op.ctx.userId,
         });
-        audit(op, {
+        await audit(op, {
           operation: "mcpClient.create",
           entityType: "mcp_client",
           entityId: client.id,
@@ -229,16 +246,16 @@ export function buildAdminOps(auth: AuthServices) {
       minRole: "member",
       scope: "admin",
       risk: "admin",
-      handler: (op, { id, ...patch }) => {
-        const client = found(op.ports.mcpClients.get(id), "MCP client", id);
+      handler: async (op, { id, ...patch }) => {
+        const client = found(await op.ports.mcpClients.get(id), "MCP client", id);
         assertCanManageClient(op, client);
         if (patch.scopes) {
-          const creator = client.createdByUserId ? op.ports.users.get(client.createdByUserId) : null;
+          const creator = client.createdByUserId ? await op.ports.users.get(client.createdByUserId) : null;
           if (!creator) throw OpError.validation("This client's owning user no longer exists — revoke it instead");
           assertGrantableScopes(patch.scopes, creator.role);
         }
-        const updated = op.ports.mcpClients.update(id, definedOnly(patch) as never);
-        audit(op, {
+        const updated = await op.ports.mcpClients.update(id, definedOnly(patch) as never);
+        await audit(op, {
           operation: "mcpClient.update",
           entityType: "mcp_client",
           entityId: id,
@@ -257,11 +274,11 @@ export function buildAdminOps(auth: AuthServices) {
       minRole: "member",
       scope: "admin",
       risk: "admin",
-      handler: (op, { id }) => {
-        const client = found(op.ports.mcpClients.get(id), "MCP client", id);
+      handler: async (op, { id }) => {
+        const client = found(await op.ports.mcpClients.get(id), "MCP client", id);
         assertCanManageClient(op, client);
-        const revoked = op.ports.mcpClients.revoke(id);
-        audit(op, { operation: "mcpClient.revoke", entityType: "mcp_client", entityId: id, summary: `Revoked MCP client "${client.name}"` });
+        const revoked = await op.ports.mcpClients.revoke(id);
+        await audit(op, { operation: "mcpClient.revoke", entityType: "mcp_client", entityId: id, summary: `Revoked MCP client "${client.name}"` });
         return revoked;
       },
     }),

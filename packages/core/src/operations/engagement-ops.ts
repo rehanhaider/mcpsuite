@@ -15,9 +15,9 @@ import { audit, checkVersion, definedOnly, found } from "./helpers.ts";
 
 const zGet = z.object({ id: zId });
 
-function defaultTitle(op: OpCtx, companyId?: string | null, personId?: string | null): string {
-  const company = companyId ? op.ports.companies.get(companyId) : null;
-  const person = personId ? op.ports.people.get(personId) : null;
+async function defaultTitle(op: OpCtx, companyId?: string | null, personId?: string | null): Promise<string> {
+  const company = companyId ? await op.ports.companies.get(companyId) : null;
+  const person = personId ? await op.ports.people.get(personId) : null;
   if (person && company) return `${person.name} @ ${company.name}`;
   if (person) return person.name;
   if (company) return company.name;
@@ -25,13 +25,13 @@ function defaultTitle(op: OpCtx, companyId?: string | null, personId?: string | 
 }
 
 /** Resolve pipeline + first stage defaults, validating stage∈pipeline. */
-function resolvePipelineStage(
+async function resolvePipelineStage(
   op: OpCtx,
   type: "engagement" | "deal",
   pipelineId?: string | null,
   stageId?: string | null,
-): { pipelineId: string; stageId: string } {
-  const pipeline = pipelineId ? op.ports.pipelines.get(pipelineId) : op.ports.pipelines.getDefault(type);
+): Promise<{ pipelineId: string; stageId: string }> {
+  const pipeline = pipelineId ? await op.ports.pipelines.get(pipelineId) : await op.ports.pipelines.getDefault(type);
   if (!pipeline || pipeline.type !== type) {
     throw OpError.validation(`No ${type} pipeline found${pipelineId ? ` with id ${pipelineId}` : ""}`);
   }
@@ -66,14 +66,14 @@ export const engagementOps = [
     input: zGet,
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      const engagement = found(ports.engagements.get(id), "engagement", id);
+    handler: async ({ ports }, { id }) => {
+      const engagement = found(await ports.engagements.get(id), "engagement", id);
       return {
         ...engagement,
-        tags: ports.tags.forEntity("engagement", id),
-        customFields: ports.customFields.values("engagement", id),
-        offerings: ports.offerings.links("engagement", id),
-        lists: ports.lists.forEntity("engagement", id),
+        tags: await ports.tags.forEntity("engagement", id),
+        customFields: await ports.customFields.values("engagement", id),
+        offerings: await ports.offerings.links("engagement", id),
+        lists: await ports.lists.forEntity("engagement", id),
       };
     },
   }),
@@ -86,26 +86,27 @@ export const engagementOps = [
     input: zEngagementCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      if (input.companyId) found(op.ports.companies.get(input.companyId), "company", input.companyId);
-      if (input.personId) found(op.ports.people.get(input.personId), "person", input.personId);
-      if (input.offeringId) found(op.ports.offerings.get(input.offeringId), "offering", input.offeringId);
-      const { pipelineId, stageId } = resolvePipelineStage(op, "engagement", input.pipelineId, input.stageId);
+    handler: async (op, input) => {
+      if (input.companyId) found(await op.ports.companies.get(input.companyId), "company", input.companyId);
+      if (input.personId) found(await op.ports.people.get(input.personId), "person", input.personId);
+      if (input.offeringId) found(await op.ports.offerings.get(input.offeringId), "offering", input.offeringId);
+      const { pipelineId, stageId } = await resolvePipelineStage(op, "engagement", input.pipelineId, input.stageId);
       const { offeringId, ...rest } = input;
-      const engagement = op.ports.tx(() => {
-        const e = op.ports.engagements.create({
+      const title = input.title?.trim() || (await defaultTitle(op, input.companyId, input.personId));
+      const engagement = await op.ports.tx(async () => {
+        const e = await op.ports.engagements.create({
           ...definedOnly(rest),
-          title: input.title?.trim() || defaultTitle(op, input.companyId, input.personId),
+          title,
           pipelineId,
           stageId,
           ownerUserId: input.ownerUserId ?? op.ctx.userId,
         } as Partial<Engagement> & { title: string; pipelineId: string; stageId: string });
         if (offeringId) {
-          op.ports.offerings.link({ offeringId, entityType: "engagement", entityId: e.id, isPrimary: true });
+          await op.ports.offerings.link({ offeringId, entityType: "engagement", entityId: e.id, isPrimary: true });
         }
         return e;
       });
-      audit(op, {
+      await audit(op, {
         operation: "engagement.create",
         entityType: "engagement",
         entityId: engagement.id,
@@ -123,14 +124,14 @@ export const engagementOps = [
     input: zEngagementUpdate,
     minRole: "member",
     scope: "write",
-    handler: (op, { id, expectedVersion, ...patch }) => {
-      const existing = found(op.ports.engagements.get(id), "engagement", id);
+    handler: async (op, { id, expectedVersion, ...patch }) => {
+      const existing = found(await op.ports.engagements.get(id), "engagement", id);
       checkVersion("engagement", id, existing.version, expectedVersion);
-      if (patch.companyId) found(op.ports.companies.get(patch.companyId), "company", patch.companyId);
-      if (patch.personId) found(op.ports.people.get(patch.personId), "person", patch.personId);
-      if (patch.dealId) found(op.ports.deals.get(patch.dealId), "deal", patch.dealId);
-      const updated = op.ports.engagements.update(id, definedOnly(patch));
-      audit(op, {
+      if (patch.companyId) found(await op.ports.companies.get(patch.companyId), "company", patch.companyId);
+      if (patch.personId) found(await op.ports.people.get(patch.personId), "person", patch.personId);
+      if (patch.dealId) found(await op.ports.deals.get(patch.dealId), "deal", patch.dealId);
+      const updated = await op.ports.engagements.update(id, definedOnly(patch));
+      await audit(op, {
         operation: "engagement.update",
         entityType: "engagement",
         entityId: id,
@@ -148,16 +149,16 @@ export const engagementOps = [
     input: z.object({ id: zId, stageId: zId, note: z.string().max(5000).nullish(), expectedVersion: zExpectedVersion }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, stageId, note, expectedVersion }) => {
-      const engagement = found(op.ports.engagements.get(id), "engagement", id);
+    handler: async (op, { id, stageId, note, expectedVersion }) => {
+      const engagement = found(await op.ports.engagements.get(id), "engagement", id);
       checkVersion("engagement", id, engagement.version, expectedVersion);
-      const pipeline = found(op.ports.pipelines.get(engagement.pipelineId), "pipeline", engagement.pipelineId);
+      const pipeline = found(await op.ports.pipelines.get(engagement.pipelineId), "pipeline", engagement.pipelineId);
       const from = pipeline.stages.find((s) => s.id === engagement.stageId);
       const to = pipeline.stages.find((s) => s.id === stageId);
       if (!to) throw OpError.validation(`Stage ${stageId} is not part of pipeline "${pipeline.name}"`);
-      const updated = op.ports.engagements.update(id, { stageId });
+      const updated = await op.ports.engagements.update(id, { stageId });
       const at = nowIso();
-      op.ports.activities.create(
+      await op.ports.activities.create(
         {
           kind: "status_change",
           engagementId: id,
@@ -169,8 +170,8 @@ export const engagementOps = [
         },
         actorStamp(op.ctx),
       );
-      op.ports.engagements.update(id, { lastActivityAt: at });
-      audit(op, {
+      await op.ports.engagements.update(id, { lastActivityAt: at });
+      await audit(op, {
         operation: "engagement.updateStage",
         entityType: "engagement",
         entityId: id,
@@ -188,10 +189,10 @@ export const engagementOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.engagements.get(id), "engagement", id);
-      const e = op.ports.engagements.setArchived(id, true);
-      audit(op, { operation: "engagement.archive", entityType: "engagement", entityId: id, summary: `Archived engagement "${e.title}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.engagements.get(id), "engagement", id);
+      const e = await op.ports.engagements.setArchived(id, true);
+      await audit(op, { operation: "engagement.archive", entityType: "engagement", entityId: id, summary: `Archived engagement "${e.title}"` });
       return e;
     },
   }),
@@ -203,10 +204,10 @@ export const engagementOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.engagements.get(id), "engagement", id);
-      const e = op.ports.engagements.setArchived(id, false);
-      audit(op, { operation: "engagement.restore", entityType: "engagement", entityId: id, summary: `Restored engagement "${e.title}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.engagements.get(id), "engagement", id);
+      const e = await op.ports.engagements.setArchived(id, false);
+      await audit(op, { operation: "engagement.restore", entityType: "engagement", entityId: id, summary: `Restored engagement "${e.title}"` });
       return e;
     },
   }),
@@ -219,14 +220,14 @@ export const engagementOps = [
     minRole: "admin",
     scope: "write",
     risk: "destructive",
-    preview: ({ ports }, { id }) => {
-      const e = ports.engagements.get(id);
+    preview: async ({ ports }, { id }) => {
+      const e = await ports.engagements.get(id);
       return { engagement: e ? { id: e.id, title: e.title } : null };
     },
-    handler: (op, { id }) => {
-      const e = found(op.ports.engagements.get(id), "engagement", id);
-      op.ports.engagements.hardDelete(id);
-      audit(op, { operation: "engagement.delete", entityType: "engagement", entityId: id, summary: `Hard-deleted engagement "${e.title}"` });
+    handler: async (op, { id }) => {
+      const e = found(await op.ports.engagements.get(id), "engagement", id);
+      await op.ports.engagements.hardDelete(id);
+      await audit(op, { operation: "engagement.delete", entityType: "engagement", entityId: id, summary: `Hard-deleted engagement "${e.title}"` });
       return { deleted: id };
     },
   }),
@@ -238,19 +239,19 @@ export const engagementOps = [
     input: zGet,
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      const engagement = found(ports.engagements.get(id), "engagement", id);
-      const activities = ports.activities.list({ engagementId: id, limit: 50, offset: 0 });
-      const openTasks = ports.activities.list({ engagementId: id, kind: "task", open: true, limit: 25, offset: 0 });
+    handler: async ({ ports }, { id }) => {
+      const engagement = found(await ports.engagements.get(id), "engagement", id);
+      const activities = await ports.activities.list({ engagementId: id, limit: 50, offset: 0 });
+      const openTasks = await ports.activities.list({ engagementId: id, kind: "task", open: true, limit: 25, offset: 0 });
       return {
         engagement,
-        company: engagement.companyId ? ports.companies.get(engagement.companyId) : null,
-        person: engagement.personId ? ports.people.get(engagement.personId) : null,
-        deal: engagement.dealId ? ports.deals.get(engagement.dealId) : null,
-        tags: ports.tags.forEntity("engagement", id),
-        customFields: ports.customFields.values("engagement", id),
-        offerings: ports.offerings.links("engagement", id),
-        lists: ports.lists.forEntity("engagement", id),
+        company: engagement.companyId ? await ports.companies.get(engagement.companyId) : null,
+        person: engagement.personId ? await ports.people.get(engagement.personId) : null,
+        deal: engagement.dealId ? await ports.deals.get(engagement.dealId) : null,
+        tags: await ports.tags.forEntity("engagement", id),
+        customFields: await ports.customFields.values("engagement", id),
+        offerings: await ports.offerings.links("engagement", id),
+        lists: await ports.lists.forEntity("engagement", id),
         recentActivities: activities.items,
         openTasks: openTasks.items,
       };

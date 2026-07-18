@@ -23,13 +23,13 @@ export const personOps = [
     input: zGet,
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      const person = found(ports.people.get(id), "person", id);
+    handler: async ({ ports }, { id }) => {
+      const person = found(await ports.people.get(id), "person", id);
       return {
         ...person,
-        companies: ports.people.companies(id),
-        tags: ports.tags.forEntity("person", id),
-        customFields: ports.customFields.values("person", id),
+        companies: await ports.people.companies(id),
+        tags: await ports.tags.forEntity("person", id),
+        customFields: await ports.customFields.values("person", id),
       };
     },
   }),
@@ -41,21 +41,21 @@ export const personOps = [
     input: zPersonCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, { companyId, companyRole, ...input }) => {
-      if (companyId) found(op.ports.companies.get(companyId), "company", companyId);
-      const person = op.ports.people.create({
+    handler: async (op, { companyId, companyRole, ...input }) => {
+      if (companyId) found(await op.ports.companies.get(companyId), "company", companyId);
+      const person = await op.ports.people.create({
         ...input,
         ownerUserId: input.ownerUserId ?? op.ctx.userId,
       } as Partial<Person> & { name: string });
       if (companyId) {
-        op.ports.people.link({
+        await op.ports.people.link({
           companyId,
           personId: person.id,
           roleTitle: companyRole ?? input.title ?? null,
           isPrimary: true,
         });
       }
-      audit(op, {
+      await audit(op, {
         operation: "person.create",
         entityType: "person",
         entityId: person.id,
@@ -72,11 +72,11 @@ export const personOps = [
     input: zPersonUpdate,
     minRole: "member",
     scope: "write",
-    handler: (op, { id, expectedVersion, ...patch }) => {
-      const existing = found(op.ports.people.get(id), "person", id);
+    handler: async (op, { id, expectedVersion, ...patch }) => {
+      const existing = found(await op.ports.people.get(id), "person", id);
       checkVersion("person", id, existing.version, expectedVersion);
-      const updated = op.ports.people.update(id, definedOnly(patch));
-      audit(op, {
+      const updated = await op.ports.people.update(id, definedOnly(patch));
+      await audit(op, {
         operation: "person.update",
         entityType: "person",
         entityId: id,
@@ -94,10 +94,10 @@ export const personOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.people.get(id), "person", id);
-      const p = op.ports.people.setArchived(id, true);
-      audit(op, { operation: "person.archive", entityType: "person", entityId: id, summary: `Archived person "${p.name}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.people.get(id), "person", id);
+      const p = await op.ports.people.setArchived(id, true);
+      await audit(op, { operation: "person.archive", entityType: "person", entityId: id, summary: `Archived person "${p.name}"` });
       return p;
     },
   }),
@@ -109,10 +109,10 @@ export const personOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.people.get(id), "person", id);
-      const p = op.ports.people.setArchived(id, false);
-      audit(op, { operation: "person.restore", entityType: "person", entityId: id, summary: `Restored person "${p.name}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.people.get(id), "person", id);
+      const p = await op.ports.people.setArchived(id, false);
+      await audit(op, { operation: "person.restore", entityType: "person", entityId: id, summary: `Restored person "${p.name}"` });
       return p;
     },
   }),
@@ -125,14 +125,14 @@ export const personOps = [
     minRole: "admin",
     scope: "write",
     risk: "destructive",
-    preview: ({ ports }, { id }) => {
-      const p = ports.people.get(id);
+    preview: async ({ ports }, { id }) => {
+      const p = await ports.people.get(id);
       return { person: p ? { id: p.id, name: p.name } : null };
     },
-    handler: (op, { id }) => {
-      const p = found(op.ports.people.get(id), "person", id);
-      op.ports.people.hardDelete(id);
-      audit(op, { operation: "person.delete", entityType: "person", entityId: id, summary: `Hard-deleted person "${p.name}"` });
+    handler: async (op, { id }) => {
+      const p = found(await op.ports.people.get(id), "person", id);
+      await op.ports.people.hardDelete(id);
+      await audit(op, { operation: "person.delete", entityType: "person", entityId: id, summary: `Hard-deleted person "${p.name}"` });
       return { deleted: id };
     },
   }),
@@ -145,9 +145,9 @@ export const personOps = [
     input: zGet,
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      const person = found(ports.people.get(id), "person", id);
-      const engagements = ports.engagements.list({
+    handler: async ({ ports }, { id }) => {
+      const person = found(await ports.people.get(id), "person", id);
+      const engagements = await ports.engagements.list({
         personId: id,
         includeArchived: false,
         sort: "updatedAt",
@@ -155,7 +155,7 @@ export const personOps = [
         limit: 25,
         offset: 0,
       });
-      const deals = ports.deals.list({
+      const deals = await ports.deals.list({
         personId: id,
         includeArchived: false,
         sort: "updatedAt",
@@ -163,14 +163,14 @@ export const personOps = [
         limit: 25,
         offset: 0,
       });
-      const activities = ports.activities.list({ personId: id, limit: 25, offset: 0 });
-      const openTasks = ports.activities.list({ personId: id, kind: "task", open: true, limit: 25, offset: 0 });
+      const activities = await ports.activities.list({ personId: id, limit: 25, offset: 0 });
+      const openTasks = await ports.activities.list({ personId: id, kind: "task", open: true, limit: 25, offset: 0 });
       return {
         person,
-        companies: ports.people.companies(id),
-        tags: ports.tags.forEntity("person", id),
-        lists: ports.lists.forEntity("person", id),
-        customFields: ports.customFields.values("person", id),
+        companies: await ports.people.companies(id),
+        tags: await ports.tags.forEntity("person", id),
+        lists: await ports.lists.forEntity("person", id),
+        customFields: await ports.customFields.values("person", id),
         engagements: engagements.items,
         deals: deals.items,
         recentActivities: activities.items,

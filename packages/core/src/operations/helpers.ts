@@ -14,8 +14,8 @@ export function checkVersion(entity: string, id: string, current: number, expect
   }
 }
 
-export function audit(op: OpCtx, input: AuditInput): void {
-  op.ports.audit.record(input, actorStamp(op.ctx));
+export async function audit(op: OpCtx, input: AuditInput): Promise<void> {
+  await op.ports.audit.record(input, actorStamp(op.ctx));
 }
 
 /** Strip undefined keys so partial patches don't overwrite with undefined. */

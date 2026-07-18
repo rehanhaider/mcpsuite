@@ -9,8 +9,14 @@ import { resolvePipelineStage } from "./engagement-ops.ts";
 
 const zGet = z.object({ id: zId });
 
-function logDealStageChange(op: OpCtx, deal: Deal, toStageName: string, fromStageName: string | undefined, note?: string | null) {
-  op.ports.activities.create(
+async function logDealStageChange(
+  op: OpCtx,
+  deal: Deal,
+  toStageName: string,
+  fromStageName: string | undefined,
+  note?: string | null,
+): Promise<void> {
+  await op.ports.activities.create(
     {
       kind: "status_change",
       dealId: deal.id,
@@ -42,15 +48,15 @@ export const dealOps = [
     input: zGet,
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      const deal = found(ports.deals.get(id), "deal", id);
+    handler: async ({ ports }, { id }) => {
+      const deal = found(await ports.deals.get(id), "deal", id);
       return {
         ...deal,
-        stakeholders: ports.deals.stakeholders(id),
-        tags: ports.tags.forEntity("deal", id),
-        customFields: ports.customFields.values("deal", id),
-        offerings: ports.offerings.links("deal", id),
-        lists: ports.lists.forEntity("deal", id),
+        stakeholders: await ports.deals.stakeholders(id),
+        tags: await ports.tags.forEntity("deal", id),
+        customFields: await ports.customFields.values("deal", id),
+        offerings: await ports.offerings.links("deal", id),
+        lists: await ports.lists.forEntity("deal", id),
       };
     },
   }),
@@ -63,27 +69,28 @@ export const dealOps = [
     input: zDealCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      if (input.companyId) found(op.ports.companies.get(input.companyId), "company", input.companyId);
-      if (input.primaryPersonId) found(op.ports.people.get(input.primaryPersonId), "person", input.primaryPersonId);
-      if (input.engagementId) found(op.ports.engagements.get(input.engagementId), "engagement", input.engagementId);
-      if (input.offeringId) found(op.ports.offerings.get(input.offeringId), "offering", input.offeringId);
-      const { pipelineId, stageId } = resolvePipelineStage(op, "deal", input.pipelineId, input.stageId);
-      const stage = op.ports.pipelines.getStage(stageId);
+    handler: async (op, input) => {
+      if (input.companyId) found(await op.ports.companies.get(input.companyId), "company", input.companyId);
+      if (input.primaryPersonId) found(await op.ports.people.get(input.primaryPersonId), "person", input.primaryPersonId);
+      if (input.engagementId) found(await op.ports.engagements.get(input.engagementId), "engagement", input.engagementId);
+      if (input.offeringId) found(await op.ports.offerings.get(input.offeringId), "offering", input.offeringId);
+      const { pipelineId, stageId } = await resolvePipelineStage(op, "deal", input.pipelineId, input.stageId);
+      const stage = await op.ports.pipelines.getStage(stageId);
       const { offeringId, ...rest } = input;
-      const deal = op.ports.tx(() => {
-        const d = op.ports.deals.create({
+      const currency = input.currency ?? (await op.ports.workspace.get()).defaultCurrency;
+      const deal = await op.ports.tx(async () => {
+        const d = await op.ports.deals.create({
           ...definedOnly(rest),
           pipelineId,
           stageId,
-          currency: input.currency ?? op.ports.workspace.get().defaultCurrency,
+          currency,
           probability: input.probability ?? stage?.probability ?? null,
           ownerUserId: input.ownerUserId ?? op.ctx.userId,
         } as Partial<Deal> & { title: string; pipelineId: string; stageId: string; currency: string });
-        if (input.engagementId) op.ports.engagements.update(input.engagementId, { dealId: d.id });
-        const carried = input.engagementId ? op.ports.offerings.links("engagement", input.engagementId) : [];
+        if (input.engagementId) await op.ports.engagements.update(input.engagementId, { dealId: d.id });
+        const carried = input.engagementId ? await op.ports.offerings.links("engagement", input.engagementId) : [];
         for (const l of carried) {
-          op.ports.offerings.link({
+          await op.ports.offerings.link({
             offeringId: l.offeringId,
             entityType: "deal",
             entityId: d.id,
@@ -93,7 +100,7 @@ export const dealOps = [
           });
         }
         if (offeringId && !carried.some((l) => l.offeringId === offeringId)) {
-          op.ports.offerings.link({
+          await op.ports.offerings.link({
             offeringId,
             entityType: "deal",
             entityId: d.id,
@@ -102,7 +109,7 @@ export const dealOps = [
         }
         return d;
       });
-      audit(op, {
+      await audit(op, {
         operation: "deal.create",
         entityType: "deal",
         entityId: deal.id,
@@ -119,11 +126,11 @@ export const dealOps = [
     input: zDealUpdate,
     minRole: "member",
     scope: "write",
-    handler: (op, { id, expectedVersion, ...patch }) => {
-      const existing = found(op.ports.deals.get(id), "deal", id);
+    handler: async (op, { id, expectedVersion, ...patch }) => {
+      const existing = found(await op.ports.deals.get(id), "deal", id);
       checkVersion("deal", id, existing.version, expectedVersion);
-      const updated = op.ports.deals.update(id, definedOnly(patch));
-      audit(op, {
+      const updated = await op.ports.deals.update(id, definedOnly(patch));
+      await audit(op, {
         operation: "deal.update",
         entityType: "deal",
         entityId: id,
@@ -142,10 +149,10 @@ export const dealOps = [
     input: z.object({ id: zId, stageId: zId, note: z.string().max(5000).nullish(), expectedVersion: zExpectedVersion }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, stageId, note, expectedVersion }) => {
-      const deal = found(op.ports.deals.get(id), "deal", id);
+    handler: async (op, { id, stageId, note, expectedVersion }) => {
+      const deal = found(await op.ports.deals.get(id), "deal", id);
       checkVersion("deal", id, deal.version, expectedVersion);
-      const pipeline = found(op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
+      const pipeline = found(await op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
       const from = pipeline.stages.find((s) => s.id === deal.stageId);
       const to = pipeline.stages.find((s) => s.id === stageId);
       if (!to) throw OpError.validation(`Stage ${stageId} is not part of pipeline "${pipeline.name}"`);
@@ -157,10 +164,10 @@ export const dealOps = [
         patch.status = "open";
         patch.closedAt = null;
       }
-      const updated = op.ports.deals.update(id, patch);
-      logDealStageChange(op, deal, to.name, from?.name, note);
-      op.ports.deals.update(id, { lastActivityAt: nowIso() });
-      audit(op, {
+      const updated = await op.ports.deals.update(id, patch);
+      await logDealStageChange(op, deal, to.name, from?.name, note);
+      await op.ports.deals.update(id, { lastActivityAt: nowIso() });
+      await audit(op, {
         operation: "deal.updateStage",
         entityType: "deal",
         entityId: id,
@@ -178,20 +185,20 @@ export const dealOps = [
     input: z.object({ id: zId, note: z.string().max(5000).nullish(), expectedVersion: zExpectedVersion }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, note, expectedVersion }) => {
-      const deal = found(op.ports.deals.get(id), "deal", id);
+    handler: async (op, { id, note, expectedVersion }) => {
+      const deal = found(await op.ports.deals.get(id), "deal", id);
       checkVersion("deal", id, deal.version, expectedVersion);
-      const pipeline = found(op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
+      const pipeline = found(await op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
       const wonStage = pipeline.stages.find((s) => s.outcome === "won");
       const from = pipeline.stages.find((s) => s.id === deal.stageId);
-      const updated = op.ports.deals.update(id, {
+      const updated = await op.ports.deals.update(id, {
         status: "won",
         closedAt: nowIso(),
         probability: 100,
         ...(wonStage ? { stageId: wonStage.id } : {}),
       });
-      logDealStageChange(op, deal, wonStage?.name ?? "Won", from?.name, note);
-      audit(op, { operation: "deal.markWon", entityType: "deal", entityId: id, summary: `Won deal "${deal.title}"` });
+      await logDealStageChange(op, deal, wonStage?.name ?? "Won", from?.name, note);
+      await audit(op, { operation: "deal.markWon", entityType: "deal", entityId: id, summary: `Won deal "${deal.title}"` });
       return updated;
     },
   }),
@@ -208,21 +215,21 @@ export const dealOps = [
     }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, lostReason, note, expectedVersion }) => {
-      const deal = found(op.ports.deals.get(id), "deal", id);
+    handler: async (op, { id, lostReason, note, expectedVersion }) => {
+      const deal = found(await op.ports.deals.get(id), "deal", id);
       checkVersion("deal", id, deal.version, expectedVersion);
-      const pipeline = found(op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
+      const pipeline = found(await op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
       const lostStage = pipeline.stages.find((s) => s.outcome === "lost");
       const from = pipeline.stages.find((s) => s.id === deal.stageId);
-      const updated = op.ports.deals.update(id, {
+      const updated = await op.ports.deals.update(id, {
         status: "lost",
         closedAt: nowIso(),
         probability: 0,
         lostReason: lostReason ?? deal.lostReason,
         ...(lostStage ? { stageId: lostStage.id } : {}),
       });
-      logDealStageChange(op, deal, lostStage?.name ?? "Lost", from?.name, note ?? lostReason);
-      audit(op, {
+      await logDealStageChange(op, deal, lostStage?.name ?? "Lost", from?.name, note ?? lostReason);
+      await audit(op, {
         operation: "deal.markLost",
         entityType: "deal",
         entityId: id,
@@ -239,12 +246,12 @@ export const dealOps = [
     input: z.object({ id: zId, expectedVersion: zExpectedVersion }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, expectedVersion }) => {
-      const deal = found(op.ports.deals.get(id), "deal", id);
+    handler: async (op, { id, expectedVersion }) => {
+      const deal = found(await op.ports.deals.get(id), "deal", id);
       checkVersion("deal", id, deal.version, expectedVersion);
       if (deal.status === "open") throw OpError.validation("Deal is already open");
-      const updated = op.ports.deals.update(id, { status: "open", closedAt: null, lostReason: null });
-      audit(op, { operation: "deal.reopen", entityType: "deal", entityId: id, summary: `Reopened deal "${deal.title}"` });
+      const updated = await op.ports.deals.update(id, { status: "open", closedAt: null, lostReason: null });
+      await audit(op, { operation: "deal.reopen", entityType: "deal", entityId: id, summary: `Reopened deal "${deal.title}"` });
       return updated;
     },
   }),
@@ -256,10 +263,10 @@ export const dealOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.deals.get(id), "deal", id);
-      const d = op.ports.deals.setArchived(id, true);
-      audit(op, { operation: "deal.archive", entityType: "deal", entityId: id, summary: `Archived deal "${d.title}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.deals.get(id), "deal", id);
+      const d = await op.ports.deals.setArchived(id, true);
+      await audit(op, { operation: "deal.archive", entityType: "deal", entityId: id, summary: `Archived deal "${d.title}"` });
       return d;
     },
   }),
@@ -271,10 +278,10 @@ export const dealOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.deals.get(id), "deal", id);
-      const d = op.ports.deals.setArchived(id, false);
-      audit(op, { operation: "deal.restore", entityType: "deal", entityId: id, summary: `Restored deal "${d.title}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.deals.get(id), "deal", id);
+      const d = await op.ports.deals.setArchived(id, false);
+      await audit(op, { operation: "deal.restore", entityType: "deal", entityId: id, summary: `Restored deal "${d.title}"` });
       return d;
     },
   }),
@@ -287,14 +294,14 @@ export const dealOps = [
     minRole: "admin",
     scope: "write",
     risk: "destructive",
-    preview: ({ ports }, { id }) => {
-      const d = ports.deals.get(id);
+    preview: async ({ ports }, { id }) => {
+      const d = await ports.deals.get(id);
       return { deal: d ? { id: d.id, title: d.title } : null };
     },
-    handler: (op, { id }) => {
-      const d = found(op.ports.deals.get(id), "deal", id);
-      op.ports.deals.hardDelete(id);
-      audit(op, { operation: "deal.delete", entityType: "deal", entityId: id, summary: `Hard-deleted deal "${d.title}"` });
+    handler: async (op, { id }) => {
+      const d = found(await op.ports.deals.get(id), "deal", id);
+      await op.ports.deals.hardDelete(id);
+      await audit(op, { operation: "deal.delete", entityType: "deal", entityId: id, summary: `Hard-deleted deal "${d.title}"` });
       return { deleted: id };
     },
   }),
@@ -312,11 +319,11 @@ export const dealOps = [
     }),
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      found(op.ports.deals.get(input.dealId), "deal", input.dealId);
-      found(op.ports.people.get(input.personId), "person", input.personId);
-      const sh = op.ports.deals.addStakeholder(input);
-      audit(op, {
+    handler: async (op, input) => {
+      found(await op.ports.deals.get(input.dealId), "deal", input.dealId);
+      found(await op.ports.people.get(input.personId), "person", input.personId);
+      const sh = await op.ports.deals.addStakeholder(input);
+      await audit(op, {
         operation: "deal.addStakeholder",
         entityType: "deal",
         entityId: input.dealId,
@@ -339,8 +346,8 @@ export const dealOps = [
     }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, ...patch }) => {
-      found(op.ports.deals.getStakeholder(id), "stakeholder", id);
+    handler: async (op, { id, ...patch }) => {
+      found(await op.ports.deals.getStakeholder(id), "stakeholder", id);
       return op.ports.deals.updateStakeholder(id, definedOnly(patch));
     },
   }),
@@ -352,9 +359,9 @@ export const dealOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      found(op.ports.deals.getStakeholder(id), "stakeholder", id);
-      op.ports.deals.removeStakeholder(id);
+    handler: async (op, { id }) => {
+      found(await op.ports.deals.getStakeholder(id), "stakeholder", id);
+      await op.ports.deals.removeStakeholder(id);
       return { ok: true };
     },
   }),
@@ -367,19 +374,19 @@ export const dealOps = [
     input: zGet,
     minRole: "viewer",
     scope: "read",
-    handler: ({ ports }, { id }) => {
-      const deal = found(ports.deals.get(id), "deal", id);
-      const activities = ports.activities.list({ dealId: id, limit: 50, offset: 0 });
-      const openTasks = ports.activities.list({ dealId: id, kind: "task", open: true, limit: 25, offset: 0 });
+    handler: async ({ ports }, { id }) => {
+      const deal = found(await ports.deals.get(id), "deal", id);
+      const activities = await ports.activities.list({ dealId: id, limit: 50, offset: 0 });
+      const openTasks = await ports.activities.list({ dealId: id, kind: "task", open: true, limit: 25, offset: 0 });
       return {
         deal,
-        company: deal.companyId ? ports.companies.get(deal.companyId) : null,
-        primaryPerson: deal.primaryPersonId ? ports.people.get(deal.primaryPersonId) : null,
-        stakeholders: ports.deals.stakeholders(id),
-        tags: ports.tags.forEntity("deal", id),
-        customFields: ports.customFields.values("deal", id),
-        offerings: ports.offerings.links("deal", id),
-        lists: ports.lists.forEntity("deal", id),
+        company: deal.companyId ? await ports.companies.get(deal.companyId) : null,
+        primaryPerson: deal.primaryPersonId ? await ports.people.get(deal.primaryPersonId) : null,
+        stakeholders: await ports.deals.stakeholders(id),
+        tags: await ports.tags.forEntity("deal", id),
+        customFields: await ports.customFields.values("deal", id),
+        offerings: await ports.offerings.links("deal", id),
+        lists: await ports.lists.forEntity("deal", id),
         recentActivities: activities.items,
         openTasks: openTasks.items,
       };

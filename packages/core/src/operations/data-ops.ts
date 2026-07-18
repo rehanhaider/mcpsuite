@@ -87,18 +87,21 @@ function normalizeRows(rows: Array<Record<string, string>>, mapping: Record<stri
   return out;
 }
 
-function previewImport(op: OpCtx, csvServices: CsvServices, input: z.infer<typeof zImportPreview>) {
+async function previewImport(op: OpCtx, csvServices: CsvServices, input: z.infer<typeof zImportPreview>) {
   const rows = csvServices.parse(input.csv);
   if (rows.length === 0) throw OpError.validation("CSV has no data rows");
   const headers = Object.keys(rows[0] ?? {});
   const mapping = resolveMapping(headers, input.mapping);
   const normalized = normalizeRows(rows, mapping);
 
-  const companyNames = new Set(
-    op.ports.companies
-      .list({ includeArchived: true, sort: "name", dir: "asc", limit: 500, offset: 0 })
-      .items.map((c) => c.name.trim().toLowerCase()),
-  );
+  const existingCompanies = await op.ports.companies.list({
+    includeArchived: true,
+    sort: "name",
+    dir: "asc",
+    limit: 500,
+    offset: 0,
+  });
+  const companyNames = new Set(existingCompanies.items.map((c) => c.name.trim().toLowerCase()));
   let duplicateCompanies = 0;
   const uniqueNew = new Set<string>();
   for (const row of normalized) {
@@ -141,12 +144,12 @@ export function buildDataOps(csvServices: CsvServices) {
       input: z.object({}),
       minRole: "viewer",
       scope: "read",
-      handler: ({ ports }): HomeStats => {
+      handler: async ({ ports }): Promise<HomeStats> => {
         const today = todayIso();
-        const overdue = ports.activities.list({ kind: "task", open: true, overdue: true, limit: 15, offset: 0 });
-        const todayTasks = ports.activities.list({ kind: "task", open: true, dueWithinDays: 0, limit: 15, offset: 0 });
-        const upcoming = ports.activities.list({ kind: "task", open: true, dueWithinDays: 7, limit: 15, offset: 0 });
-        const staleEng = ports.engagements.list({
+        const overdue = await ports.activities.list({ kind: "task", open: true, overdue: true, limit: 15, offset: 0 });
+        const todayTasks = await ports.activities.list({ kind: "task", open: true, dueWithinDays: 0, limit: 15, offset: 0 });
+        const upcoming = await ports.activities.list({ kind: "task", open: true, dueWithinDays: 7, limit: 15, offset: 0 });
+        const staleEng = await ports.engagements.list({
           stale: true,
           includeArchived: false,
           sort: "lastActivityAt",
@@ -154,7 +157,7 @@ export function buildDataOps(csvServices: CsvServices) {
           limit: 8,
           offset: 0,
         });
-        const staleDeals = ports.deals.list({
+        const staleDeals = await ports.deals.list({
           stale: true,
           status: "open",
           includeArchived: false,
@@ -163,10 +166,10 @@ export function buildDataOps(csvServices: CsvServices) {
           limit: 8,
           offset: 0,
         });
-        const agentEvents = ports.audit.list({ actorType: "agent", limit: 10, offset: 0 });
-        const counts = ports.maintenance.counts();
+        const agentEvents = await ports.audit.list({ actorType: "agent", limit: 10, offset: 0 });
+        const counts = await ports.maintenance.counts();
 
-        const openDeals = ports.deals.list({
+        const openDeals = await ports.deals.list({
           status: "open",
           includeArchived: false,
           sort: "updatedAt",
@@ -190,7 +193,7 @@ export function buildDataOps(csvServices: CsvServices) {
           upcomingTasks: upcomingItems,
           staleEngagements: { count: staleEng.total, sample: staleEng.items },
           staleDeals: { count: staleDeals.total, sample: staleDeals.items },
-          pendingApprovals: ports.pendingActions.countPending(),
+          pendingApprovals: await ports.pendingActions.countPending(),
           recentAgentEvents: agentEvents.items,
           openDealValueByCurrency: valueByCurrency,
         };
@@ -204,10 +207,10 @@ export function buildDataOps(csvServices: CsvServices) {
       input: z.object({ pipelineId: zId.nullish() }),
       minRole: "viewer",
       scope: "read",
-      handler: ({ ports }, { pipelineId }) => {
-        const pipeline = pipelineId ? ports.pipelines.get(pipelineId) : ports.pipelines.getDefault("deal");
+      handler: async ({ ports }, { pipelineId }) => {
+        const pipeline = pipelineId ? await ports.pipelines.get(pipelineId) : await ports.pipelines.getDefault("deal");
         if (!pipeline) throw OpError.validation("No deal pipeline found");
-        const stats = ports.deals.stageStats(pipeline.id);
+        const stats = await ports.deals.stageStats(pipeline.id);
         return {
           pipeline: { id: pipeline.id, name: pipeline.name },
           stages: pipeline.stages.map((s) => {
@@ -234,10 +237,10 @@ export function buildDataOps(csvServices: CsvServices) {
       input: z.object({ pipelineId: zId.nullish() }),
       minRole: "viewer",
       scope: "read",
-      handler: ({ ports }, { pipelineId }) => {
-        const pipeline = pipelineId ? ports.pipelines.get(pipelineId) : ports.pipelines.getDefault("engagement");
+      handler: async ({ ports }, { pipelineId }) => {
+        const pipeline = pipelineId ? await ports.pipelines.get(pipelineId) : await ports.pipelines.getDefault("engagement");
         if (!pipeline) throw OpError.validation("No engagement pipeline found");
-        const counts = ports.engagements.countByStage(pipeline.id);
+        const counts = await ports.engagements.countByStage(pipeline.id);
         return {
           pipeline: { id: pipeline.id, name: pipeline.name },
           stages: pipeline.stages.map((s) => ({
@@ -271,7 +274,7 @@ export function buildDataOps(csvServices: CsvServices) {
       scope: "write",
       risk: "data",
       preview: (op, input) => previewImport(op, csvServices, input),
-      handler: (op, input) => {
+      handler: async (op, input) => {
         const rows = csvServices.parse(input.csv);
         const headers = Object.keys(rows[0] ?? {});
         const mapping = resolveMapping(headers, input.mapping);
@@ -280,7 +283,9 @@ export function buildDataOps(csvServices: CsvServices) {
 
         let pipelineId: string, stageId: string;
         {
-          const pipeline = input.pipelineId ? op.ports.pipelines.get(input.pipelineId) : op.ports.pipelines.getDefault("engagement");
+          const pipeline = input.pipelineId
+            ? await op.ports.pipelines.get(input.pipelineId)
+            : await op.ports.pipelines.getDefault("engagement");
           if (!pipeline) throw OpError.validation("No engagement pipeline found");
           const stage = input.stageId ? pipeline.stages.find((s) => s.id === input.stageId) : pipeline.stages[0];
           if (!stage) throw OpError.validation("Stage not found in pipeline");
@@ -289,9 +294,10 @@ export function buildDataOps(csvServices: CsvServices) {
         }
 
         const sourceLabel = input.sourceLabel?.trim() || `import-${todayIso()}`;
-        const tag = op.ports.tags.getByName(sourceLabel) ?? op.ports.tags.create({ name: sourceLabel, color: "info" });
+        const tag =
+          (await op.ports.tags.getByName(sourceLabel)) ?? (await op.ports.tags.create({ name: sourceLabel, color: "info" }));
 
-        const result = op.ports.tx(() => {
+        const result = await op.ports.tx(async () => {
           let companiesCreated = 0,
             companiesMatched = 0,
             peopleCreated = 0,
@@ -300,12 +306,12 @@ export function buildDataOps(csvServices: CsvServices) {
           for (const row of normalized) {
             let companyId: string | null = null;
             if (row.company.name) {
-              const existing = op.ports.companies.getByName(row.company.name);
+              const existing = await op.ports.companies.getByName(row.company.name);
               if (existing) {
                 companyId = existing.id;
                 companiesMatched++;
               } else {
-                const created = op.ports.companies.create({
+                const created = await op.ports.companies.create({
                   name: row.company.name,
                   industry: row.company.industry ?? null,
                   hq: row.company.hq ?? null,
@@ -321,7 +327,7 @@ export function buildDataOps(csvServices: CsvServices) {
 
             let personId: string | null = null;
             if (row.person.name) {
-              const person = op.ports.people.create({
+              const person = await op.ports.people.create({
                 name: row.person.name,
                 title: row.person.title ?? null,
                 email: row.person.email ?? null,
@@ -331,13 +337,13 @@ export function buildDataOps(csvServices: CsvServices) {
               personId = person.id;
               peopleCreated++;
               if (companyId) {
-                op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary: true });
+                await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary: true });
               }
             }
 
-            const company = companyId ? op.ports.companies.get(companyId) : null;
+            const company = companyId ? await op.ports.companies.get(companyId) : null;
             const personName = row.person.name;
-            const engagement = op.ports.engagements.create({
+            const engagement = await op.ports.engagements.create({
               title: personName && company ? `${personName} @ ${company.name}` : (personName ?? company?.name ?? "Imported lead"),
               companyId,
               personId,
@@ -349,19 +355,19 @@ export function buildDataOps(csvServices: CsvServices) {
               ownerUserId: input.ownerUserId ?? op.ctx.userId,
             });
             engagementsCreated++;
-            op.ports.tags.apply(tag.id, "engagement", engagement.id);
+            await op.ports.tags.apply(tag.id, "engagement", engagement.id);
             if (row.note) {
-              const a = op.ports.activities.create(
+              const a = await op.ports.activities.create(
                 { kind: "note", body: row.note, engagementId: engagement.id, companyId, personId },
                 actorStamp(op.ctx),
               );
-              op.ports.activities.touchLinked(a, nowIso());
+              await op.ports.activities.touchLinked(a, nowIso());
             }
           }
           return { companiesCreated, companiesMatched, peopleCreated, engagementsCreated, tag: sourceLabel };
         });
 
-        audit(op, {
+        await audit(op, {
           operation: "import.run",
           entityType: "workspace",
           entityId: null,
@@ -381,14 +387,16 @@ export function buildDataOps(csvServices: CsvServices) {
       minRole: "member",
       scope: "read",
       risk: "data",
-      preview: ({ ports }, { entityType }) => ({ entityType, counts: ports.maintenance.counts() }),
-      handler: (op, { entityType, includeArchived }) => {
+      preview: async ({ ports }, { entityType }) => ({ entityType, counts: await ports.maintenance.counts() }),
+      handler: async (op, { entityType, includeArchived }) => {
         const base = { includeArchived, sort: "displayId", dir: "asc", limit: 500, offset: 0 } as const;
-        const collect = <T extends object>(fetch: (offset: number) => { items: T[]; total: number }): Array<Record<string, unknown>> => {
+        const collect = async <T extends object>(
+          fetch: (offset: number) => Promise<{ items: T[]; total: number }>,
+        ): Promise<Array<Record<string, unknown>>> => {
           const all: Array<Record<string, unknown>> = [];
           let offset = 0;
           for (;;) {
-            const page = fetch(offset);
+            const page = await fetch(offset);
             all.push(...page.items.map((item) => ({ ...item }) as Record<string, unknown>));
             offset += 500;
             if (all.length >= page.total || page.items.length === 0) return all;
@@ -397,23 +405,23 @@ export function buildDataOps(csvServices: CsvServices) {
         let rows: Array<Record<string, unknown>> = [];
         switch (entityType) {
           case "company":
-            rows = collect((offset) => op.ports.companies.list({ ...base, offset }));
+            rows = await collect((offset) => op.ports.companies.list({ ...base, offset }));
             break;
           case "person":
-            rows = collect((offset) => op.ports.people.list({ ...base, offset }));
+            rows = await collect((offset) => op.ports.people.list({ ...base, offset }));
             break;
           case "engagement":
-            rows = collect((offset) => op.ports.engagements.list({ ...base, offset }));
+            rows = await collect((offset) => op.ports.engagements.list({ ...base, offset }));
             break;
           case "deal":
-            rows = collect((offset) => op.ports.deals.list({ ...base, offset }));
+            rows = await collect((offset) => op.ports.deals.list({ ...base, offset }));
             break;
           case "activity":
-            rows = collect((offset) => op.ports.activities.list({ limit: 500, offset }));
+            rows = await collect((offset) => op.ports.activities.list({ limit: 500, offset }));
             break;
         }
         const csv = csvServices.stringify(rows);
-        audit(op, {
+        await audit(op, {
           operation: "export.csv",
           entityType,
           entityId: null,
@@ -432,9 +440,9 @@ export function buildDataOps(csvServices: CsvServices) {
       minRole: "admin",
       scope: "admin",
       risk: "data",
-      handler: (op) => {
-        const path = op.ports.maintenance.backup();
-        audit(op, { operation: "data.backup", entityType: "workspace", entityId: null, summary: `Database backup written to ${path}` });
+      handler: async (op) => {
+        const path = await op.ports.maintenance.backup();
+        await audit(op, { operation: "data.backup", entityType: "workspace", entityId: null, summary: `Database backup written to ${path}` });
         return { path };
       },
     }),

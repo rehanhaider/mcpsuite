@@ -11,14 +11,16 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { getRuntime, mcpContext, resolveMcpToken } from "@emcp/db";
+import { getRuntimeAsync, mcpContext, resolveMcpToken, resolveWorkspaceAccess } from "@emcp/db";
 import type { RequestContext } from "@emcp/core";
-import { createMcpServer } from "./server.ts";
+import { createMcpServer, lockedRpcRejection, requireSqliteRuntime } from "./server.ts";
 
 const PORT = Number(process.env.MCP_PORT ?? 8765);
 const HOST = process.env.MCP_HOST ?? "127.0.0.1";
 
-const runtime = getRuntime();
+// DATABASE_URL adapter selection happens inside getRuntimeAsync (unset ->
+// SQLite default, file: -> SQLite at that path); Bearer auth needs SQLite.
+const runtime = requireSqliteRuntime(await getRuntimeAsync(), "HTTP");
 
 function resolveContext(req: IncomingMessage): RequestContext | null {
   const header = req.headers.authorization;
@@ -72,6 +74,15 @@ const httpServer = createServer(async (req, res) => {
     }
 
     const body = await readBody(req);
+
+    // Hosted access gate: the key identified a client (auth succeeded), but a
+    // locked workspace refuses tool calls and resource reads at the JSON-RPC
+    // layer. Handshake and listing methods still pass through.
+    if (resolveWorkspaceAccess(runtime.db, ctx.workspaceId).mode === "locked") {
+      const rejection = lockedRpcRejection(body);
+      if (rejection) return json(res, 200, rejection);
+    }
+
     const server = createMcpServer(runtime, ctx);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless

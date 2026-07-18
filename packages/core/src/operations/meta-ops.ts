@@ -41,11 +41,11 @@ export const tagOps = [
     input: zTagCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      const existing = op.ports.tags.getByName(input.name.trim());
+    handler: async (op, input) => {
+      const existing = await op.ports.tags.getByName(input.name.trim());
       if (existing) return existing;
-      const tag = op.ports.tags.create({ name: input.name.trim(), color: input.color });
-      audit(op, { operation: "tag.create", entityType: "tag", entityId: tag.id, summary: `Created tag "${tag.name}"` });
+      const tag = await op.ports.tags.create({ name: input.name.trim(), color: input.color });
+      await audit(op, { operation: "tag.create", entityType: "tag", entityId: tag.id, summary: `Created tag "${tag.name}"` });
       return tag;
     },
   }),
@@ -57,10 +57,10 @@ export const tagOps = [
     input: z.object({ id: zId, name: z.string().min(1).max(80).optional(), color: zSemanticColor.optional() }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, ...patch }) => {
-      found(op.ports.tags.get(id), "tag", id);
-      const tag = op.ports.tags.update(id, definedOnly(patch));
-      audit(op, { operation: "tag.update", entityType: "tag", entityId: id, summary: `Updated tag "${tag.name}"` });
+    handler: async (op, { id, ...patch }) => {
+      found(await op.ports.tags.get(id), "tag", id);
+      const tag = await op.ports.tags.update(id, definedOnly(patch));
+      await audit(op, { operation: "tag.update", entityType: "tag", entityId: id, summary: `Updated tag "${tag.name}"` });
       return tag;
     },
   }),
@@ -73,14 +73,14 @@ export const tagOps = [
     minRole: "admin",
     scope: "write",
     risk: "config",
-    preview: ({ ports }, { id }) => {
-      const t = ports.tags.list().find((x) => x.id === id);
+    preview: async ({ ports }, { id }) => {
+      const t = (await ports.tags.list()).find((x) => x.id === id);
       return { tag: t ? { name: t.name, usage: t.usage } : null };
     },
-    handler: (op, { id }) => {
-      const tag = found(op.ports.tags.get(id), "tag", id);
-      op.ports.tags.delete(id);
-      audit(op, { operation: "tag.delete", entityType: "tag", entityId: id, summary: `Deleted tag "${tag.name}"` });
+    handler: async (op, { id }) => {
+      const tag = found(await op.ports.tags.get(id), "tag", id);
+      await op.ports.tags.delete(id);
+      await audit(op, { operation: "tag.delete", entityType: "tag", entityId: id, summary: `Deleted tag "${tag.name}"` });
       return { deleted: id };
     },
   }),
@@ -92,9 +92,9 @@ export const tagOps = [
     input: zTagApply,
     minRole: "member",
     scope: "write",
-    handler: (op, { tagId, entityType, entityId }) => {
-      found(op.ports.tags.get(tagId), "tag", tagId);
-      op.ports.tags.apply(tagId, entityType, entityId);
+    handler: async (op, { tagId, entityType, entityId }) => {
+      found(await op.ports.tags.get(tagId), "tag", tagId);
+      await op.ports.tags.apply(tagId, entityType, entityId);
       return { ok: true };
     },
   }),
@@ -106,8 +106,8 @@ export const tagOps = [
     input: zTagApply,
     minRole: "member",
     scope: "write",
-    handler: (op, { tagId, entityType, entityId }) => {
-      op.ports.tags.remove(tagId, entityType, entityId);
+    handler: async (op, { tagId, entityType, entityId }) => {
+      await op.ports.tags.remove(tagId, entityType, entityId);
       return { ok: true };
     },
   }),
@@ -136,16 +136,16 @@ export const customFieldOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, input) => {
+    handler: async (op, input) => {
       if ((input.type === "select" || input.type === "multi_select") && !input.options?.length) {
         throw OpError.validation("Select fields need at least one option");
       }
       const key = slugify(input.label);
       if (!key) throw OpError.validation("Label must contain letters or numbers");
-      if (op.ports.customFields.getDefByKey(input.entityType, key)) {
+      if (await op.ports.customFields.getDefByKey(input.entityType, key)) {
         throw new OpError("conflict", `A ${input.entityType} field with key "${key}" already exists`);
       }
-      const def = op.ports.customFields.createDef({
+      const def = await op.ports.customFields.createDef({
         entityType: input.entityType,
         key,
         label: input.label,
@@ -153,7 +153,7 @@ export const customFieldOps = [
         options: input.options ?? null,
         required: input.required,
       });
-      audit(op, {
+      await audit(op, {
         operation: "customField.create",
         entityType: "custom_field",
         entityId: def.id,
@@ -171,13 +171,13 @@ export const customFieldOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { id, ...patch }) => {
-      const def = found(op.ports.customFields.getDef(id), "custom field", id);
+    handler: async (op, { id, ...patch }) => {
+      const def = found(await op.ports.customFields.getDef(id), "custom field", id);
       if ((def.type === "select" || def.type === "multi_select") && patch.options !== undefined && !patch.options?.length) {
         throw OpError.validation("Select fields need at least one option");
       }
-      const updated = op.ports.customFields.updateDef(id, definedOnly(patch));
-      audit(op, {
+      const updated = await op.ports.customFields.updateDef(id, definedOnly(patch));
+      await audit(op, {
         operation: "customField.update",
         entityType: "custom_field",
         entityId: id,
@@ -195,10 +195,10 @@ export const customFieldOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { id }) => {
-      found(op.ports.customFields.getDef(id), "custom field", id);
-      const def = op.ports.customFields.setDefArchived(id, true);
-      audit(op, { operation: "customField.archive", entityType: "custom_field", entityId: id, summary: `Archived field "${def.label}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.customFields.getDef(id), "custom field", id);
+      const def = await op.ports.customFields.setDefArchived(id, true);
+      await audit(op, { operation: "customField.archive", entityType: "custom_field", entityId: id, summary: `Archived field "${def.label}"` });
       return def;
     },
   }),
@@ -211,10 +211,10 @@ export const customFieldOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { id }) => {
-      found(op.ports.customFields.getDef(id), "custom field", id);
-      const def = op.ports.customFields.setDefArchived(id, false);
-      audit(op, { operation: "customField.restore", entityType: "custom_field", entityId: id, summary: `Restored field "${def.label}"` });
+    handler: async (op, { id }) => {
+      found(await op.ports.customFields.getDef(id), "custom field", id);
+      const def = await op.ports.customFields.setDefArchived(id, false);
+      await audit(op, { operation: "customField.restore", entityType: "custom_field", entityId: id, summary: `Restored field "${def.label}"` });
       return def;
     },
   }),
@@ -226,7 +226,7 @@ export const customFieldOps = [
     input: zCustomFieldSetValues,
     minRole: "member",
     scope: "write",
-    handler: (op, { entityType, entityId, values }) => {
+    handler: async (op, { entityType, entityId, values }) => {
       // Validate the target record exists.
       const port = {
         company: () => op.ports.companies.get(entityId),
@@ -235,11 +235,11 @@ export const customFieldOps = [
         deal: () => op.ports.deals.get(entityId),
         offering: () => op.ports.offerings.get(entityId),
       }[entityType];
-      found(port(), entityType, entityId);
+      found(await port(), entityType, entityId);
 
       const results: Record<string, CustomFieldValue> = {};
       for (const [key, raw] of Object.entries(values)) {
-        const def = op.ports.customFields.getDefByKey(entityType, key);
+        const def = await op.ports.customFields.getDefByKey(entityType, key);
         if (!def) throw OpError.validation(`No ${entityType} custom field with key "${key}"`);
         let value: CustomFieldValue;
         try {
@@ -247,10 +247,10 @@ export const customFieldOps = [
         } catch (e) {
           throw OpError.validation(e instanceof Error ? e.message : String(e), { field: key });
         }
-        op.ports.customFields.setValue(def.id, entityType, entityId, value);
+        await op.ports.customFields.setValue(def.id, entityType, entityId, value);
         results[key] = value;
       }
-      audit(op, {
+      await audit(op, {
         operation: "customField.setValues",
         entityType,
         entityId,
@@ -279,10 +279,10 @@ export const savedViewOps = [
     input: zSavedViewCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
+    handler: async (op, input) => {
       const filters = parseFilters(input.entityType, input.filters) as Record<string, unknown>;
-      const view = op.ports.savedViews.create({ ...input, filters, ownerUserId: op.ctx.userId });
-      audit(op, { operation: "savedView.create", entityType: "saved_view", entityId: view.id, summary: `Saved view "${view.name}"` });
+      const view = await op.ports.savedViews.create({ ...input, filters, ownerUserId: op.ctx.userId });
+      await audit(op, { operation: "savedView.create", entityType: "saved_view", entityId: view.id, summary: `Saved view "${view.name}"` });
       return view;
     },
   }),
@@ -299,8 +299,8 @@ export const savedViewOps = [
     }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id, ...patch }) => {
-      const view = found(op.ports.savedViews.get(id), "saved view", id);
+    handler: async (op, { id, ...patch }) => {
+      const view = found(await op.ports.savedViews.get(id), "saved view", id);
       if (view.visibility === "system") throw OpError.validation("System views cannot be edited");
       if (view.visibility === "private" && view.ownerUserId !== op.ctx.userId && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
         throw OpError.forbidden("Not your view");
@@ -316,13 +316,13 @@ export const savedViewOps = [
     input: z.object({ id: zId }),
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      const view = found(op.ports.savedViews.get(id), "saved view", id);
+    handler: async (op, { id }) => {
+      const view = found(await op.ports.savedViews.get(id), "saved view", id);
       if (view.visibility === "system") throw OpError.validation("System views cannot be deleted");
       if (view.visibility === "private" && view.ownerUserId !== op.ctx.userId && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
         throw OpError.forbidden("Not your view");
       }
-      op.ports.savedViews.delete(id);
+      await op.ports.savedViews.delete(id);
       return { deleted: id };
     },
   }),
@@ -334,20 +334,20 @@ export const savedViewOps = [
     input: z.object({ id: zId, limit: z.number().int().min(1).max(500).optional(), offset: z.number().int().min(0).optional() }),
     minRole: "viewer",
     scope: "read",
-    handler: (op, { id, limit, offset }) => {
-      const view = found(op.ports.savedViews.get(id), "saved view", id);
+    handler: async (op, { id, limit, offset }) => {
+      const view = found(await op.ports.savedViews.get(id), "saved view", id);
       const filters = { ...view.filters, ...(limit ? { limit } : {}), ...(offset !== undefined ? { offset } : {}) };
       switch (view.entityType) {
         case "company":
-          return { view, result: op.ports.companies.list(parseFilters("company", filters)) };
+          return { view, result: await op.ports.companies.list(parseFilters("company", filters)) };
         case "person":
-          return { view, result: op.ports.people.list(parseFilters("person", filters)) };
+          return { view, result: await op.ports.people.list(parseFilters("person", filters)) };
         case "engagement":
-          return { view, result: op.ports.engagements.list(parseFilters("engagement", filters)) };
+          return { view, result: await op.ports.engagements.list(parseFilters("engagement", filters)) };
         case "deal":
-          return { view, result: op.ports.deals.list(parseFilters("deal", filters)) };
+          return { view, result: await op.ports.deals.list(parseFilters("deal", filters)) };
         case "activity":
-          return { view, result: op.ports.activities.list(parseFilters("activity", filters)) };
+          return { view, result: await op.ports.activities.list(parseFilters("activity", filters)) };
         default:
           throw OpError.validation(`Unknown view entity ${String(view.entityType)}`);
       }

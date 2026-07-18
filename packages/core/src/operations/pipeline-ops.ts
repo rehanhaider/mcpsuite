@@ -23,9 +23,9 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, input) => {
-      const pipeline = op.ports.pipelines.create(input);
-      audit(op, {
+    handler: async (op, input) => {
+      const pipeline = await op.ports.pipelines.create(input);
+      await audit(op, {
         operation: "pipeline.create",
         entityType: "pipeline",
         entityId: pipeline.id,
@@ -43,10 +43,10 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { id, name }) => {
-      found(op.ports.pipelines.get(id), "pipeline", id);
-      const p = op.ports.pipelines.rename(id, name);
-      audit(op, { operation: "pipeline.rename", entityType: "pipeline", entityId: id, summary: `Renamed pipeline to "${name}"` });
+    handler: async (op, { id, name }) => {
+      found(await op.ports.pipelines.get(id), "pipeline", id);
+      const p = await op.ports.pipelines.rename(id, name);
+      await audit(op, { operation: "pipeline.rename", entityType: "pipeline", entityId: id, summary: `Renamed pipeline to "${name}"` });
       return p;
     },
   }),
@@ -59,10 +59,10 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { id }) => {
-      found(op.ports.pipelines.get(id), "pipeline", id);
-      op.ports.pipelines.setDefault(id);
-      audit(op, { operation: "pipeline.setDefault", entityType: "pipeline", entityId: id, summary: "Set default pipeline" });
+    handler: async (op, { id }) => {
+      found(await op.ports.pipelines.get(id), "pipeline", id);
+      await op.ports.pipelines.setDefault(id);
+      await audit(op, { operation: "pipeline.setDefault", entityType: "pipeline", entityId: id, summary: "Set default pipeline" });
       return { ok: true };
     },
   }),
@@ -75,13 +75,13 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    preview: ({ ports }, { id }) => ({ usage: ports.pipelines.pipelineUsage(id) }),
-    handler: (op, { id }) => {
-      const pipeline = found(op.ports.pipelines.get(id), "pipeline", id);
-      const usage = op.ports.pipelines.pipelineUsage(id);
+    preview: async ({ ports }, { id }) => ({ usage: await ports.pipelines.pipelineUsage(id) }),
+    handler: async (op, { id }) => {
+      const pipeline = found(await op.ports.pipelines.get(id), "pipeline", id);
+      const usage = await op.ports.pipelines.pipelineUsage(id);
       if (usage > 0) throw OpError.inUse("pipeline", id, usage);
-      op.ports.pipelines.delete(id);
-      audit(op, { operation: "pipeline.delete", entityType: "pipeline", entityId: id, summary: `Deleted pipeline "${pipeline.name}"` });
+      await op.ports.pipelines.delete(id);
+      await audit(op, { operation: "pipeline.delete", entityType: "pipeline", entityId: id, summary: `Deleted pipeline "${pipeline.name}"` });
       return { deleted: id };
     },
   }),
@@ -94,10 +94,10 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { pipelineId, ...input }) => {
-      found(op.ports.pipelines.get(pipelineId), "pipeline", pipelineId);
-      const stage = op.ports.pipelines.addStage(pipelineId, input);
-      audit(op, { operation: "stage.add", entityType: "pipeline", entityId: pipelineId, summary: `Added stage "${input.name}"` });
+    handler: async (op, { pipelineId, ...input }) => {
+      found(await op.ports.pipelines.get(pipelineId), "pipeline", pipelineId);
+      const stage = await op.ports.pipelines.addStage(pipelineId, input);
+      await audit(op, { operation: "stage.add", entityType: "pipeline", entityId: pipelineId, summary: `Added stage "${input.name}"` });
       return stage;
     },
   }),
@@ -116,10 +116,10 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { id, ...patch }) => {
-      found(op.ports.pipelines.getStage(id), "stage", id);
-      const stage = op.ports.pipelines.updateStage(id, definedOnly(patch));
-      audit(op, { operation: "stage.update", entityType: "stage", entityId: id, summary: `Updated stage "${stage.name}"` });
+    handler: async (op, { id, ...patch }) => {
+      found(await op.ports.pipelines.getStage(id), "stage", id);
+      const stage = await op.ports.pipelines.updateStage(id, definedOnly(patch));
+      await audit(op, { operation: "stage.update", entityType: "stage", entityId: id, summary: `Updated stage "${stage.name}"` });
       return stage;
     },
   }),
@@ -132,13 +132,13 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    handler: (op, { pipelineId, stageIds }) => {
-      const pipeline = found(op.ports.pipelines.get(pipelineId), "pipeline", pipelineId);
+    handler: async (op, { pipelineId, stageIds }) => {
+      const pipeline = found(await op.ports.pipelines.get(pipelineId), "pipeline", pipelineId);
       if (new Set(stageIds).size !== pipeline.stages.length) {
         throw OpError.validation("stageIds must contain every stage of the pipeline exactly once");
       }
-      op.ports.pipelines.reorderStages(pipelineId, stageIds);
-      audit(op, { operation: "stage.reorder", entityType: "pipeline", entityId: pipelineId, summary: "Reordered stages" });
+      await op.ports.pipelines.reorderStages(pipelineId, stageIds);
+      await audit(op, { operation: "stage.reorder", entityType: "pipeline", entityId: pipelineId, summary: "Reordered stages" });
       return { ok: true };
     },
   }),
@@ -151,13 +151,13 @@ export const pipelineOps = [
     minRole: "admin",
     scope: "admin",
     risk: "config",
-    preview: ({ ports }, { id }) => ({ usage: ports.pipelines.stageUsage(id) }),
-    handler: (op, { id }) => {
-      const stage = found(op.ports.pipelines.getStage(id), "stage", id);
-      const usage = op.ports.pipelines.stageUsage(id);
+    preview: async ({ ports }, { id }) => ({ usage: await ports.pipelines.stageUsage(id) }),
+    handler: async (op, { id }) => {
+      const stage = found(await op.ports.pipelines.getStage(id), "stage", id);
+      const usage = await op.ports.pipelines.stageUsage(id);
       if (usage > 0) throw OpError.inUse("stage", id, usage);
-      op.ports.pipelines.deleteStage(id);
-      audit(op, { operation: "stage.delete", entityType: "stage", entityId: id, summary: `Deleted stage "${stage.name}"` });
+      await op.ports.pipelines.deleteStage(id);
+      await audit(op, { operation: "stage.delete", entityType: "stage", entityId: id, summary: `Deleted stage "${stage.name}"` });
       return { deleted: id };
     },
   }),

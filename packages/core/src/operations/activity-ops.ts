@@ -8,14 +8,14 @@ import { audit, definedOnly, found } from "./helpers.ts";
 
 const zGet = z.object({ id: zId });
 
-function validateLinks(
+async function validateLinks(
   op: OpCtx,
   input: { companyId?: string | null; personId?: string | null; engagementId?: string | null; dealId?: string | null },
-) {
-  if (input.companyId) found(op.ports.companies.get(input.companyId), "company", input.companyId);
-  if (input.personId) found(op.ports.people.get(input.personId), "person", input.personId);
-  if (input.engagementId) found(op.ports.engagements.get(input.engagementId), "engagement", input.engagementId);
-  if (input.dealId) found(op.ports.deals.get(input.dealId), "deal", input.dealId);
+): Promise<void> {
+  if (input.companyId) found(await op.ports.companies.get(input.companyId), "company", input.companyId);
+  if (input.personId) found(await op.ports.people.get(input.personId), "person", input.personId);
+  if (input.engagementId) found(await op.ports.engagements.get(input.engagementId), "engagement", input.engagementId);
+  if (input.dealId) found(await op.ports.deals.get(input.dealId), "deal", input.dealId);
 }
 
 export const activityOps = [
@@ -38,10 +38,10 @@ export const activityOps = [
     input: zActivityLog,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      validateLinks(op, input);
+    handler: async (op, input) => {
+      await validateLinks(op, input);
       const at = input.occurredAt ?? nowIso();
-      const activity = op.ports.activities.create(
+      const activity = await op.ports.activities.create(
         {
           kind: input.kind,
           title: input.title ?? null,
@@ -56,8 +56,8 @@ export const activityOps = [
         },
         actorStamp(op.ctx),
       );
-      op.ports.activities.touchLinked(activity, at);
-      audit(op, {
+      await op.ports.activities.touchLinked(activity, at);
+      await audit(op, {
         operation: "activity.log",
         entityType: "activity",
         entityId: activity.id,
@@ -74,13 +74,13 @@ export const activityOps = [
     input: zActivityUpdate,
     minRole: "member",
     scope: "write",
-    handler: (op, { id, ...patch }) => {
-      const existing = found(op.ports.activities.get(id), "activity", id);
+    handler: async (op, { id, ...patch }) => {
+      const existing = found(await op.ports.activities.get(id), "activity", id);
       if (existing.kind === "status_change" || existing.kind === "agent_action") {
         throw OpError.validation("System-emitted activities cannot be edited");
       }
-      const updated = op.ports.activities.update(id, definedOnly(patch));
-      audit(op, { operation: "activity.update", entityType: "activity", entityId: id, summary: "Updated activity" });
+      const updated = await op.ports.activities.update(id, definedOnly(patch));
+      await audit(op, { operation: "activity.update", entityType: "activity", entityId: id, summary: "Updated activity" });
       return updated;
     },
   }),
@@ -93,14 +93,14 @@ export const activityOps = [
     minRole: "admin",
     scope: "write",
     risk: "destructive",
-    preview: ({ ports }, { id }) => {
-      const a = ports.activities.get(id);
+    preview: async ({ ports }, { id }) => {
+      const a = await ports.activities.get(id);
       return { activity: a ? { id: a.id, kind: a.kind, title: a.title } : null };
     },
-    handler: (op, { id }) => {
-      found(op.ports.activities.get(id), "activity", id);
-      op.ports.activities.hardDelete(id);
-      audit(op, { operation: "activity.delete", entityType: "activity", entityId: id, summary: "Deleted activity" });
+    handler: async (op, { id }) => {
+      found(await op.ports.activities.get(id), "activity", id);
+      await op.ports.activities.hardDelete(id);
+      await audit(op, { operation: "activity.delete", entityType: "activity", entityId: id, summary: "Deleted activity" });
       return { deleted: id };
     },
   }),
@@ -112,9 +112,9 @@ export const activityOps = [
     input: zTaskCreate,
     minRole: "member",
     scope: "write",
-    handler: (op, input) => {
-      validateLinks(op, input);
-      const activity = op.ports.activities.create(
+    handler: async (op, input) => {
+      await validateLinks(op, input);
+      const activity = await op.ports.activities.create(
         {
           kind: "task",
           title: input.title,
@@ -128,8 +128,8 @@ export const activityOps = [
         },
         actorStamp(op.ctx),
       );
-      op.ports.activities.touchLinked(activity, activity.createdAt);
-      audit(op, { operation: "task.create", entityType: "activity", entityId: activity.id, summary: `Created task "${input.title}"` });
+      await op.ports.activities.touchLinked(activity, activity.createdAt);
+      await audit(op, { operation: "task.create", entityType: "activity", entityId: activity.id, summary: `Created task "${input.title}"` });
       return activity;
     },
   }),
@@ -141,11 +141,11 @@ export const activityOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      const task = found(op.ports.activities.get(id), "task", id);
+    handler: async (op, { id }) => {
+      const task = found(await op.ports.activities.get(id), "task", id);
       if (task.kind !== "task") throw OpError.validation("Activity is not a task");
-      const updated = op.ports.activities.update(id, { completedAt: nowIso() });
-      audit(op, { operation: "task.complete", entityType: "activity", entityId: id, summary: `Completed task "${task.title ?? id}"` });
+      const updated = await op.ports.activities.update(id, { completedAt: nowIso() });
+      await audit(op, { operation: "task.complete", entityType: "activity", entityId: id, summary: `Completed task "${task.title ?? id}"` });
       return updated;
     },
   }),
@@ -157,11 +157,11 @@ export const activityOps = [
     input: zGet,
     minRole: "member",
     scope: "write",
-    handler: (op, { id }) => {
-      const task = found(op.ports.activities.get(id), "task", id);
+    handler: async (op, { id }) => {
+      const task = found(await op.ports.activities.get(id), "task", id);
       if (task.kind !== "task") throw OpError.validation("Activity is not a task");
-      const updated = op.ports.activities.update(id, { completedAt: null });
-      audit(op, { operation: "task.reopen", entityType: "activity", entityId: id, summary: `Reopened task "${task.title ?? id}"` });
+      const updated = await op.ports.activities.update(id, { completedAt: null });
+      await audit(op, { operation: "task.reopen", entityType: "activity", entityId: id, summary: `Reopened task "${task.title ?? id}"` });
       return updated;
     },
   }),

@@ -8,10 +8,12 @@
  * NOTE: stdout is the protocol channel; log only to stderr.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { getRuntime, mcpContext, resolveMcpToken } from "@emcp/db";
-import { createMcpServer } from "./server.ts";
+import { getRuntimeAsync, mcpContext, resolveMcpToken } from "@emcp/db";
+import { createMcpServer, requireSqliteRuntime } from "./server.ts";
 
-const runtime = getRuntime();
+// DATABASE_URL adapter selection happens inside getRuntimeAsync (unset ->
+// SQLite default, file: -> SQLite at that path); key auth below needs SQLite.
+const runtime = requireSqliteRuntime(await getRuntimeAsync(), "stdio");
 
 const apiKey = process.env.EMCP_API_KEY?.trim();
 const client = apiKey ? resolveMcpToken(runtime.db, apiKey) : null;

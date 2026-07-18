@@ -31,11 +31,14 @@ export interface OperationDef<I extends z.ZodTypeAny = z.ZodTypeAny, O = unknown
    * Method syntax (not arrow property) on purpose: methods are bivariant, so
    * heterogeneous concrete defs remain assignable to OperationDef[].
    */
-  preview?(op: OpCtx, input: z.infer<I>): Record<string, unknown>;
-  handler(op: OpCtx, input: z.infer<I>): O;
+  preview?(op: OpCtx, input: z.infer<I>): Promise<Record<string, unknown>>;
+  handler(op: OpCtx, input: z.infer<I>): Promise<O>;
 }
 
 // Written to accept any concrete OperationDef while keeping per-op inference.
+// Handlers and previews are async by contract: returning a Promise is the only
+// accepted shape, so a port call can never leak an unawaited Promise into an
+// operation payload without the compiler complaining.
 export function defineOperation<I extends z.ZodTypeAny, O>(def: {
   name: string;
   title: string;
@@ -45,8 +48,8 @@ export function defineOperation<I extends z.ZodTypeAny, O>(def: {
   scope: McpScope;
   risk?: RiskCategory | null;
   mcpExpose?: boolean;
-  preview?: (op: OpCtx, input: z.infer<I>) => Record<string, unknown>;
-  handler: (op: OpCtx, input: z.infer<I>) => O;
+  preview?: (op: OpCtx, input: z.infer<I>) => Promise<Record<string, unknown>>;
+  handler: (op: OpCtx, input: z.infer<I>) => Promise<O>;
 }): OperationDef<I, O> {
   return {
     risk: null,
