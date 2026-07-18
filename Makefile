@@ -70,7 +70,8 @@ autostart: ## Enable + start web UI & MCP on boot (SVC=web|mcp to limit)
 	@loginctl enable-linger "$$USER" >/dev/null 2>&1 || true
 	@for u in $(_units); do \
 		echo ">>> installing $$u"; \
-		install -m 0644 ".scripts/systemd/$$u" "$(SYSTEMD_USER_DIR)/$$u"; \
+		sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
+		chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"; \
 	done
 	systemctl --user daemon-reload
 	systemctl --user enable --now $(_units)

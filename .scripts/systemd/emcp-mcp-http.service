@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/home/rehan/Projects/emcp-crm/.scripts/mcp-http.sh
+ExecStart=@REPO@/.scripts/mcp-http.sh
 Restart=on-failure
 RestartSec=3
 Environment=MCP_PORT=8765

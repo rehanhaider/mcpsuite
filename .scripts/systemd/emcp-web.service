@@ -4,7 +4,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/home/rehan/Projects/emcp-crm/.scripts/web.sh
+ExecStart=@REPO@/.scripts/web.sh
 Restart=on-failure
 RestartSec=3
 # Port is fixed to 2222 in apps/web `start` (srvx --port 2222).
