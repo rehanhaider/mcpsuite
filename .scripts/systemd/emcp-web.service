@@ -1,0 +1,13 @@
+[Unit]
+Description=emcp web app (TanStack Start production server, browser access via WSL localhost)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/rehan/Projects/emcp-crm/.scripts/web.sh
+Restart=on-failure
+RestartSec=3
+# Port is fixed to 2222 in apps/web `start` (srvx --port 2222).
+
+[Install]
+WantedBy=default.target

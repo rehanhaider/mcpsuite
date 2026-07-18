@@ -1,0 +1,21 @@
+{
+  "name": "emcp-crm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "pnpm --filter @emcp/web dev",
+    "build": "pnpm --filter @emcp/web build",
+    "start": "pnpm --filter @emcp/web start",
+    "mcp:stdio": "pnpm --filter @emcp/mcp stdio",
+    "mcp:http": "pnpm --filter @emcp/mcp http",
+    "db:migrate": "pnpm --filter @emcp/db migrate",
+    "test": "pnpm -r --workspace-concurrency=1 test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+**/dist
+data
+*.db
+*.db-*
+.git
+.jj
+.pnpm-store
+docs
+terminals
+.claude
+.agents
+.cursor
+*.log

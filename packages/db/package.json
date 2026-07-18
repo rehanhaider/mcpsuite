@@ -1,0 +1,29 @@
+{
+  "name": "@emcp/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "migrate": "tsx src/scripts/migrate.ts",
+    "smoke": "tsx src/scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@emcp/core": "workspace:*",
+    "better-sqlite3": "^12.11.1",
+    "csv-parse": "^6.1.0",
+    "csv-stringify": "^6.6.0",
+    "drizzle-orm": "^0.45.2",
+    "tsx": "^4.20.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.10"
+  }
+}

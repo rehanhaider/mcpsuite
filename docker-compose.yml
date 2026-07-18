@@ -1,0 +1,19 @@
+# Self-hosting MCP Suite CRM with Docker Compose.
+#   docker compose up -d          → web on :2222, MCP for agents on :8765
+# All state lives in ./data (one SQLite file + WAL sidecars). Back up that dir.
+#
+# Exposing to the internet: don't publish these ports directly. Put a reverse
+# proxy with TLS in front and map hostnames/paths to the two services — see
+# "Deploying behind a domain" in PRODUCTION.md for a ready-made Caddyfile.
+services:
+  emcp:
+    build: .
+    # Official images will be added when the first release is ready.
+    ports:
+      - "2222:2222" # web UI
+      - "8765:8765" # MCP (agents). Auth = per-agent API keys (Admin → Agents).
+    volumes:
+      - ./data:/data
+    environment:
+      DB_PATH: /data/emcp.db
+    restart: unless-stopped

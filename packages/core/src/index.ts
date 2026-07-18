@@ -1,0 +1,10 @@
+export * from "./domain.ts";
+export * from "./policy.ts";
+export * from "./errors.ts";
+export * from "./ids.ts";
+export * from "./context.ts";
+export * from "./ports.ts";
+export { buildCatalog, runOperation, type Catalog, type CatalogDeps } from "./catalog.ts";
+export type { OperationDef, OpResult, OpCtx } from "./operations/define.ts";
+export type { AuthServices } from "./operations/admin-ops.ts";
+export type { CsvServices } from "./operations/data-ops.ts";

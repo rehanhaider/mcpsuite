@@ -1,0 +1,24 @@
+{
+  "name": "@emcp/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "stdio": "tsx src/stdio.ts",
+    "http": "tsx src/http.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@emcp/core": "workspace:*",
+    "@emcp/db": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "tsx": "^4.20.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,0 +1,402 @@
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Dark mode is driven by `data-theme="dark"` on <html> (set pre-paint by the
+   boot script in __root.tsx), so there is never a theme flash. The app is
+   dark-first; light is the escape hatch. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ============================================================================
+   emcp — design tokens (shadcn-style CSS variables on Base UI components).
+   Dark-first, near-black neutral ramp, one loud pink primary. No gradients.
+   ========================================================================== */
+:root {
+  --radius: 0.5rem;
+
+  --background: #fbfbfc;
+  --foreground: #1b1b1f;
+
+  --card: #ffffff;
+  --card-foreground: #1b1b1f;
+
+  --popover: #ffffff;
+  --popover-foreground: #1b1b1f;
+
+  --primary: #c81e78;
+  --primary-foreground: #ffffff;
+
+  --secondary: #f0f0f3;
+  --secondary-foreground: #2b2b31;
+
+  --muted: #f2f2f5;
+  --muted-foreground: #6b6b76;
+
+  --accent: #ececf0;
+  --accent-foreground: #2b2b31;
+
+  --destructive: #d6443c;
+  --destructive-foreground: #ffffff;
+
+  --border: #e5e5ea;
+  --input: #d9d9e0;
+  --ring: #c81e78;
+
+  --sidebar: #f5f5f7;
+  --sidebar-foreground: #2b2b31;
+  --sidebar-primary: #c81e78;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e8e8ec;
+  --sidebar-accent-foreground: #1b1b1f;
+  --sidebar-border: #e5e5ea;
+  --sidebar-ring: #c81e78;
+
+  /* Data-color tones (tags, stages, status dots). Theme-aware, never raw. */
+  --tone-violet: #7c5cd6;
+  --tone-cyan: #0e7f96;
+  --tone-info: #2f6fd0;
+  --tone-success: #1e8a5a;
+  --tone-warning: #b26a06;
+}
+
+[data-theme="dark"] {
+  --background: #131316;
+  --foreground: #ededf0;
+
+  --card: #18181c;
+  --card-foreground: #ededf0;
+
+  --popover: #1b1b20;
+  --popover-foreground: #ededf0;
+
+  --primary: #e5407f;
+  --primary-foreground: #ffffff;
+
+  --secondary: #222228;
+  --secondary-foreground: #ededf0;
+
+  --muted: #1e1e23;
+  --muted-foreground: #96969f;
+
+  --accent: #26262c;
+  --accent-foreground: #ededf0;
+
+  --destructive: #ff6b66;
+  --destructive-foreground: #1a0b0a;
+
+  --border: #29292f;
+  --input: #34343c;
+  --ring: #e5407f;
+
+  --sidebar: #101013;
+  --sidebar-foreground: #d5d5db;
+  --sidebar-primary: #e5407f;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #232329;
+  --sidebar-accent-foreground: #f0f0f3;
+  --sidebar-border: #232329;
+  --sidebar-ring: #e5407f;
+
+  --tone-violet: #a48afc;
+  --tone-cyan: #4cc4dd;
+  --tone-info: #6ba3f5;
+  --tone-success: #4ade80;
+  --tone-warning: #f5b04c;
+}
+
+@theme inline {
+  --font-sans:
+    "Geist Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+  --font-mono:
+    "Geist Mono Variable", ui-monospace, SFMono-Regular, "JetBrains Mono",
+    Consolas, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --color-violet: var(--tone-violet);
+  --color-cyan: var(--tone-cyan);
+  --color-info: var(--tone-info);
+  --color-success: var(--tone-success);
+  --color-warning: var(--tone-warning);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* Tight, low-opacity elevation. No color cast, no spread. */
+  --shadow-2xs: 0 1px 2px 0 rgb(9 9 11 / 0.04);
+  --shadow-xs: 0 1px 2px 0 rgb(9 9 11 / 0.05);
+  --shadow-sm:
+    0 1px 2px 0 rgb(9 9 11 / 0.06), 0 1px 1px -1px rgb(9 9 11 / 0.04);
+  --shadow: 0 1px 3px 0 rgb(9 9 11 / 0.07), 0 1px 2px -1px rgb(9 9 11 / 0.05);
+  --shadow-md:
+    0 2px 4px -1px rgb(9 9 11 / 0.06), 0 4px 8px -2px rgb(9 9 11 / 0.07);
+  --shadow-lg:
+    0 4px 8px -3px rgb(9 9 11 / 0.09), 0 12px 20px -6px rgb(9 9 11 / 0.12);
+  --shadow-xl:
+    0 8px 16px -6px rgb(9 9 11 / 0.12), 0 24px 40px -12px rgb(9 9 11 / 0.2);
+  --shadow-2xl: 0 16px 40px -12px rgb(9 9 11 / 0.3);
+  --font-heading: var(--font-sans);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    font-family: var(--font-sans);
+    font-variant-numeric: tabular-nums;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent)
+      transparent;
+    @apply font-sans;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    min-height: 100svh;
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.006em;
+  }
+
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.02em;
+  }
+}
+
+/* Thin, theme-aware scrollbars. */
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 18%, transparent)
+      transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 9999px;
+    background-color: color-mix(in oklab, var(--foreground) 18%, transparent);
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, var(--foreground) 30%, transparent);
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Utility: tabular numbers for ids/amounts. */
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Skeleton placeholder (kept as a utility so loaders stay one-liners). */
+@utility skeleton {
+  animation: var(
+    --animate-pulse,
+    pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite
+  );
+  background-color: var(--color-muted);
+  border-radius: var(--radius-md);
+}
+
+/* Kanban column scroll shadow. */
+@utility scroll-fade-y {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    black 12px,
+    black calc(100% - 12px),
+    transparent 100%
+  );
+}
+
+/* ============================================================================
+   Enter/exit animations — dependency-free `animate-in`/`animate-out`
+   utilities used by the overlay components (dialog, dropdown, tooltip, sheet,
+   toast). Modifiers set CSS variables the shared keyframes read, so classes
+   compose: `animate-in fade-in-0 zoom-in-95 slide-in-from-top-2`.
+   ========================================================================== */
+@utility animate-in {
+  animation-name: enter;
+  animation-duration: var(--tw-duration, 150ms);
+}
+@utility animate-out {
+  animation-name: exit;
+  animation-duration: var(--tw-duration, 150ms);
+}
+
+@utility fade-in-0 {
+  --tw-enter-opacity: 0;
+}
+@utility fade-out-0 {
+  --tw-exit-opacity: 0;
+}
+@utility zoom-in-95 {
+  --tw-enter-scale: 0.95;
+}
+@utility zoom-out-95 {
+  --tw-exit-scale: 0.95;
+}
+@utility slide-in-from-top-2 {
+  --tw-enter-translate-y: -0.5rem;
+}
+@utility slide-in-from-bottom-2 {
+  --tw-enter-translate-y: 0.5rem;
+}
+@utility slide-in-from-left-2 {
+  --tw-enter-translate-x: -0.5rem;
+}
+@utility slide-in-from-right-2 {
+  --tw-enter-translate-x: 0.5rem;
+}
+
+@keyframes enter {
+  from {
+    opacity: var(--tw-enter-opacity, 1);
+    transform: translate3d(
+        var(--tw-enter-translate-x, 0),
+        var(--tw-enter-translate-y, 0),
+        0
+      )
+      scale3d(var(--tw-enter-scale, 1), var(--tw-enter-scale, 1), 1)
+      rotate(var(--tw-enter-rotate, 0));
+  }
+}
+
+@keyframes exit {
+  to {
+    opacity: var(--tw-exit-opacity, 1);
+    transform: translate3d(
+        var(--tw-exit-translate-x, 0),
+        var(--tw-exit-translate-y, 0),
+        0
+      )
+      scale3d(var(--tw-exit-scale, 1), var(--tw-exit-scale, 1), 1)
+      rotate(var(--tw-exit-rotate, 0));
+  }
+}
+
+/* Small pop used by inline popovers/menus that aren't Base UI overlays. */
+@keyframes emcp-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@utility animate-pop {
+  animation: emcp-pop 120ms ease-out;
+}
+
+/* ============================================================================
+   Sidebar rail flyout — when the sidebar is pinned collapsed, hovering or
+   focusing the icon rail previews the full sidebar as an overlay (the
+   provider flips `open` on, so the panel renders with its real expanded
+   styling). The layout gap stays pinned to the rail width so page content
+   never shifts under the flyout. Desktop only — mobile uses a sheet.
+   ========================================================================== */
+@media (min-width: 768px) {
+  [data-slot="sidebar-wrapper"][data-hover-preview="true"]
+    [data-slot="sidebar-gap"] {
+    width: var(--sidebar-width-icon) !important;
+  }
+  [data-slot="sidebar-wrapper"][data-hover-preview="true"]
+    [data-slot="sidebar-container"] {
+    z-index: 30;
+  }
+  [data-slot="sidebar-wrapper"][data-hover-preview="true"]
+    [data-slot="sidebar-inner"] {
+    box-shadow: var(--shadow-xl);
+  }
+}
+
+/* Dotted background used on the login screen. */
+@utility bg-dots {
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--foreground) 7%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 24px 24px;
+}
+
+/* Focus ring consistent with the theme (non-Base-UI elements). Lives in the
+   base layer so utilities (e.g. `outline-none` on inputs whose wrapper draws
+   the focus ring) can override it. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--color-ring) 65%, transparent);
+    outline-offset: 1px;
+  }
+}
+
+/* Neutralize animations under reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

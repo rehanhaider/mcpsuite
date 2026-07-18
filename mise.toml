@@ -1,0 +1,8 @@
+[tools]
+node = "22"
+pnpm = "10"
+
+[env]
+# Single shared SQLite file for the web app, MCP server, and db scripts,
+# regardless of which directory the process is launched from.
+DB_PATH = "{{config_root}}/data/emcp.db"

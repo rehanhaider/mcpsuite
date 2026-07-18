@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "emcp-crm": {
+      "command": "bash",
+      "args": [".scripts/mcp-stdio.sh"],
+      "env": { "EMCP_API_KEY": "${EMCP_API_KEY}" }
+    }
+  }
+}

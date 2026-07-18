@@ -1,0 +1,15 @@
+[Unit]
+Description=emcp MCP HTTP server (agents connect via Bearer API key)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/rehan/Projects/emcp-crm/.scripts/mcp-http.sh
+Restart=on-failure
+RestartSec=3
+Environment=MCP_PORT=8765
+# Binds 127.0.0.1 only. Every request must send `Authorization: Bearer <key>`
+# with an API key created in Admin -> Agents.
+
+[Install]
+WantedBy=default.target
