@@ -80,6 +80,17 @@ export interface UserPort {
   update(id: string, patch: { name?: string; role?: Role; disabledAt?: string | null }): Promise<User>;
   setPassword(id: string, passwordHash: string): Promise<void>;
   count(): Promise<number>;
+  /** Creates a `pending` user + membership (no credential); email must be free; role may not be owner. */
+  createPending(input: { email: string; name: string; role: Role }): Promise<{ userId: string }>;
+  /**
+   * Permanently deletes a non-owner user: user row, credentials/subject link,
+   * sessions, memberships, MCP clients and private saved views go; business
+   * records remain (actors render as "Deleted user") with ownerships/task
+   * assignments cleared (docs/issues/0022).
+   */
+  deletePermanently(userId: string): Promise<void>;
+  /** Atomically makes `toUserId` (active, same workspace) the owner and demotes the previous owner to admin. */
+  transferOwnership(fromUserId: string, toUserId: string): Promise<void>;
   /**
    * Hard-delete every login session belonging to the user; returns the number
    * of rows removed. Called by `user.update` inside the same transaction when
@@ -87,8 +98,8 @@ export interface UserPort {
    * re-enabling restores nothing (docs/issues/0022). Optional only until every
    * adapter implements it; the SQLite adapter does.
    */
-  // TODO(pg): mirror disable-revocation (0029 #2)
-  deleteSessions?(userId: string): Promise<number>;
+  /** Hard-delete every session row for the user (disable/delete sweep). */
+  deleteSessions(userId: string): Promise<number>;
 }
 
 export interface CompanyPort {
@@ -345,9 +356,20 @@ export interface McpClientPort {
    * re-enabling the user does NOT un-revoke (docs/issues/0022). Optional only
    * until every adapter implements it; the SQLite adapter does.
    */
-  // TODO(pg): mirror disable-revocation (0029 #2)
-  revokeAllForUser?(userId: string): Promise<number>;
+  /** Revoke (never delete) all still-active clients created by the user. */
+  revokeAllForUser(userId: string): Promise<number>;
   touchLastUsed(id: string): Promise<void>;
+}
+
+/**
+ * Credential lifecycle seam (docs/issues/0022): passwords live in OpenAuth's
+ * storage, the CRM only brokers single-use codes and the forced-change flag.
+ */
+export interface CredentialsPort {
+  /** Issues a hashed single-use setup/reset code (invalidates prior codes of that purpose; `reset` also ends the user's sessions). Returns the raw code exactly once. */
+  issueCode(userId: string, purpose: "setup" | "reset"): Promise<{ code: string }>;
+  /** Sets/clears `password_must_change`; while set, every operation except password change/logout/whoami is refused. */
+  mustChangePassword(userId: string, flag: boolean): Promise<void>;
 }
 
 export interface SearchPort {
@@ -378,6 +400,7 @@ export interface Ports {
   pendingActions: PendingActionPort;
   audit: AuditPort;
   mcpClients: McpClientPort;
+  credentials: CredentialsPort;
   search: SearchPort;
   maintenance: MaintenancePort;
   /**

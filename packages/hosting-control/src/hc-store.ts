@@ -11,6 +11,11 @@
  *   hc_idempotency_receipts — one row per (Idempotency-Key) mutation identity.
  *   hc_workspace_access     — generic hosting access state per workspace.
  *   hc_service_audit        — permanent service-action audit trail.
+ *   hc_auth_delivery_outbox — committed intent to deliver a setup/reset code.
+ *                             Holds NO email address and NO code — only the
+ *                             user reference and purpose, so an acknowledged
+ *                             delivery survives a crash without credential
+ *                             material ever entering storage.
  */
 import { nowIso } from "@emcp/core";
 import type { Db } from "@emcp/db";
@@ -56,6 +61,19 @@ CREATE TABLE IF NOT EXISTS hc_service_audit (
 );
 CREATE INDEX IF NOT EXISTS hc_service_audit_ws_ix ON hc_service_audit(workspace_id);
 CREATE INDEX IF NOT EXISTS hc_service_audit_hash_ix ON hc_service_audit(target_hash);
+CREATE TABLE IF NOT EXISTS hc_auth_delivery_outbox (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  user_id      TEXT NOT NULL,
+  purpose      TEXT NOT NULL,
+  state        TEXT NOT NULL DEFAULT 'pending',
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS hc_auth_outbox_state_ix ON hc_auth_delivery_outbox(state);
+CREATE INDEX IF NOT EXISTS hc_auth_outbox_ws_ix ON hc_auth_delivery_outbox(workspace_id);
 `;
 
 /** Idempotent — safe to run on every process start. */
@@ -288,4 +306,62 @@ export function writeAudit(db: Db, a: ServiceAuditInput): void {
  */
 export function redactAuditForWorkspace(db: Db, workspaceId: string): void {
   db.$client.prepare("UPDATE hc_service_audit SET workspace_id = NULL WHERE workspace_id = ?").run(workspaceId);
+}
+
+// --- Auth-code delivery outbox ----------------------------------------------
+
+export interface OutboxRow {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  purpose: "setup" | "reset";
+  state: "pending" | "sent" | "abandoned";
+  attempts: number;
+}
+
+/**
+ * Commit the intent to deliver a setup/reset code (call inside the mutation
+ * transaction, per the contract's outbox rule: the acknowledgement and the
+ * queued delivery share one commit). The row stores no email and no code.
+ */
+export function insertOutbox(db: Db, row: { id: string; workspaceId: string; userId: string; purpose: string }): void {
+  const now = nowIso();
+  db.$client
+    .prepare(
+      `INSERT INTO hc_auth_delivery_outbox (id, workspace_id, user_id, purpose, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)`,
+    )
+    .run(row.id, row.workspaceId, row.userId, row.purpose, now, now);
+}
+
+export function markOutbox(db: Db, id: string, state: "sent" | "abandoned" | "pending", lastError?: string): void {
+  db.$client
+    .prepare(
+      `UPDATE hc_auth_delivery_outbox
+       SET state = ?, attempts = attempts + 1, last_error = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(state, lastError ?? null, nowIso(), id);
+}
+
+export function listPendingOutbox(db: Db): OutboxRow[] {
+  const rows = db.$client
+    .prepare(
+      `SELECT id, workspace_id, user_id, purpose, state, attempts
+       FROM hc_auth_delivery_outbox WHERE state = 'pending' ORDER BY created_at`,
+    )
+    .all() as Array<{ id: string; workspace_id: string; user_id: string; purpose: string; state: string; attempts: number }>;
+  return rows.map((r) => ({
+    id: r.id,
+    workspaceId: r.workspace_id,
+    userId: r.user_id,
+    purpose: r.purpose === "reset" ? "reset" : "setup",
+    state: r.state === "sent" ? "sent" : r.state === "abandoned" ? "abandoned" : "pending",
+    attempts: r.attempts,
+  }));
+}
+
+/** Permanent workspace deletion removes its queued deliveries too. */
+export function deleteOutboxForWorkspace(db: Db, workspaceId: string): void {
+  db.$client.prepare("DELETE FROM hc_auth_delivery_outbox WHERE workspace_id = ?").run(workspaceId);
 }

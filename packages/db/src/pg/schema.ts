@@ -89,6 +89,11 @@ export const users = crm.table("users", {
   email: text("email").notNull(),
   name: text("name").notNull(),
   passwordHash: text("password_hash"),
+  /** 'pending' | 'active' | 'disabled' (0004; CHECK-constrained, coherent with disabledAt). */
+  status: text("status").notNull(),
+  /** Verified OpenAuth `sub`; globally unique when set (partial unique index, 0004). */
+  authSubject: text("auth_subject"),
+  passwordMustChange: boolean("password_must_change").notNull(),
   disabledAt: ts("disabled_at"),
   createdAt: ts("created_at").notNull(),
   updatedAt: ts("updated_at").notNull(),
@@ -110,9 +115,44 @@ export const memberships = crm.table("memberships", {
 export const sessions = crm.table("sessions", {
   id: uuid("id").primaryKey(),
   tokenHash: text("token_hash").notNull(),
-  userId: uuid("user_id").notNull(),
+  /** NULL while a verified identity awaits hosted provisioning (0005). */
+  userId: uuid("user_id"),
+  /** Adoption key for user-less sessions (0005). */
+  email: text("email"),
+  /** OpenAuth subject the session was minted for (0004). */
+  authSubject: text("auth_subject"),
+  /** Refresh token for logout-time revocation (0004). */
+  authRefresh: text("auth_refresh"),
   expiresAt: ts("expires_at").notNull(),
   createdAt: ts("created_at").notNull(),
+});
+
+/**
+ * OpenAuth issuer key-value storage and setup/reset code bookkeeping (0004).
+ * Identity-level, NOT workspace-scoped: like crm.sessions they carry
+ * RLS-on/no-runtime-policy and zero grants for crm_app/crm_operator, and are
+ * reachable only through the fixed SECURITY DEFINER functions
+ * (crm.openauth_kv_*, crm.issue_auth_code, crm.consume_auth_code,
+ * crm.delete_user_sessions, crm.purge_openauth_subject). These drizzle tables
+ * exist for the schema mirror and admin-side tests — the adapter never
+ * queries them directly.
+ */
+export const openauthKv = crm.table("openauth_kv", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").$type<unknown>().notNull(),
+  expiresAt: ts("expires_at"),
+});
+
+export const authCodes = crm.table("auth_codes", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  email: text("email").notNull(),
+  purpose: text("purpose").notNull(),
+  codeHash: text("code_hash").notNull(),
+  attempts: integer("attempts").notNull(),
+  createdAt: ts("created_at").notNull(),
+  expiresAt: ts("expires_at").notNull(),
+  usedAt: ts("used_at"),
 });
 
 export const mcpClients = crm.table("mcp_clients", {

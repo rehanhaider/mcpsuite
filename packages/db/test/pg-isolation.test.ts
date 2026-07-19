@@ -85,8 +85,13 @@ const WORKSPACE_OWNED_TABLES = [
 ];
 /** RLS'd via `id` instead of `workspace_id`. */
 const WORKSPACE_ROOT_TABLE = "workspaces";
-/** RLS on, no policy, no grants: unreachable by runtime roles. */
-const DENIED_TABLES = ["sessions", "schema_migrations"];
+/**
+ * RLS on, no runtime policy, no runtime grants: unreachable by crm_app and
+ * crm_operator. sessions/openauth_kv/auth_codes are identity-level auth
+ * storage reachable only via the SECURITY DEFINER functions in 0004_auth.sql
+ * (covered in pg-auth.test.ts); schema_migrations is deployment-only.
+ */
+const DENIED_TABLES = ["sessions", "schema_migrations", "openauth_kv", "auth_codes"];
 
 describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)", () => {
   let admin: PgHandle;
@@ -260,8 +265,22 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     admin = await connectPg({ databaseUrl: adminUrl, max: 2 });
 
     // Fresh schema every run; roles are cluster-global and guarded in 0002.
+    // pg-auth.test.ts migrates its own database in parallel, so on a virgin
+    // cluster two runs of 0002's guarded CREATE ROLE can race — retrying is
+    // safe because every migration file is idempotent per database.
     await admin.pool.query("DROP SCHEMA IF EXISTS crm CASCADE");
-    await applyPgMigrations(admin.pool);
+    let migrationError: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await applyPgMigrations(admin.pool);
+        migrationError = null;
+        break;
+      } catch (e) {
+        migrationError = e;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    if (migrationError) throw migrationError;
     await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
 
     const appUrl = new URL(adminUrl);
@@ -338,12 +357,18 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     const direct = await app.pool.query("SELECT count(*)::int AS n FROM crm.users");
     expect(direct.rows[0]?.n).toBe(0);
     // …but the narrow resolver returns exactly the fixed identity fields.
-    const resolved = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", [A.email]);
+    // Since 0004 it keys on the verified OpenAuth subject, not the email
+    // (subject linking + pending/disabled semantics live in pg-auth.test.ts).
+    await admin.pool.query("UPDATE crm.users SET auth_subject = $1 WHERE id = $2", ["sub-alpha-owner", A.userId]);
+    const resolved = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-alpha-owner"]);
     expect(resolved.rows).toHaveLength(1);
-    expect(resolved.rows[0]).toMatchObject({ user_id: A.userId, workspace_id: wsA, role: "owner", enabled: true });
-    expect(Object.keys(resolved.rows[0]!).sort()).toEqual(["enabled", "role", "user_id", "workspace_id"]);
-    const unknown = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["nobody@example.test"]);
+    expect(resolved.rows[0]).toMatchObject({ user_id: A.userId, workspace_id: wsA, role: "owner", password_must_change: false });
+    expect(Object.keys(resolved.rows[0]!).sort()).toEqual(["password_must_change", "role", "user_id", "workspace_id"]);
+    const unknown = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-nobody"]);
     expect(unknown.rows).toHaveLength(0);
+    // Emails are no longer a resolution key for authentication.
+    const byEmail = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", [A.email]);
+    expect(byEmail.rows).toHaveLength(0);
 
     const key = await app.pool.query("SELECT * FROM crm.resolve_mcp_key($1)", [B.clientTokenHash]);
     expect(key.rows[0]).toMatchObject({ client_id: B.clientId, workspace_id: wsB, enabled: true });

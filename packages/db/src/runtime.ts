@@ -36,6 +36,7 @@ import { getDb, openDatabase, resolveDbPath, type Db } from "./connection.ts";
 import { createPorts } from "./repositories.ts";
 import { bootstrap, type BootstrapResult } from "./bootstrap.ts";
 import { authServices, csvServices } from "./services.ts";
+import { passwordChangeRequiredResult, userMustChangePassword } from "./auth.ts";
 
 /**
  * The narrow adapter-independent surface: what every caller may rely on no
@@ -78,11 +79,15 @@ let processRuntime: Promise<AnyRuntime> | null = null;
 export function createRuntime(db: Db = getDb()): Runtime {
   const catalog = buildCatalog({ auth: authServices, csv: csvServices });
   const bootstrapResult = bootstrap(db);
-  if (bootstrapResult.ownerOneTimePassword) {
-    // Shown once, on the very first boot against an empty database.
+  if (bootstrapResult.ownerSetupCode) {
+    // Shown once, on the very first boot against an empty database. This is a
+    // one-time SETUP CODE — bootstrap never creates or prints a password
+    // (docs/issues/0022; regenerate with `pnpm --filter @emcp/db reset-owner`).
+    const base = process.env.EMCP_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:2222";
     console.log(
-      `\n[emcp] Created owner account — email: ${process.env.EMCP_OWNER_EMAIL ?? "owner@emcp.local"} ` +
-        `password: ${bootstrapResult.ownerOneTimePassword}\n[emcp] Change it after first login.\n`,
+      `\n[emcp] First run: created a pending owner account — email: ${bootstrapResult.ownerEmail}\n` +
+        `[emcp] Set the owner password at ${base}/set-password\n` +
+        `[emcp] One-time setup code: ${bootstrapResult.ownerSetupCode}\n`,
     );
   }
   return {
@@ -91,7 +96,15 @@ export function createRuntime(db: Db = getDb()): Runtime {
     catalog,
     bootstrapResult,
     portsFor: (workspaceId: string) => createPorts(db, workspaceId),
-    run(ctx, operation, input) {
+    async run(ctx, operation, input) {
+      // Forced password change (docs/issues/0022 addendum): while set, the op
+      // layer refuses every catalog operation — for the user's own sessions
+      // AND for agents acting on their behalf — with a stable typed error.
+      // Password change, logout and whoami are not catalog operations, so
+      // they stay reachable. Mirrors the workspace_locked gate pattern.
+      if (ctx.userId && userMustChangePassword(db, ctx.userId)) {
+        return passwordChangeRequiredResult();
+      }
       return runOperation(catalog, this.portsFor(ctx.workspaceId), ctx, operation, input);
     },
   };

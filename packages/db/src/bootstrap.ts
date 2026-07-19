@@ -1,25 +1,31 @@
 /**
- * First-run seeding: one workspace, one owner user, and default pipelines.
- * Idempotent — safe to run on every process start.
+ * First-run seeding: one workspace, one PENDING owner user, and default
+ * pipelines. Idempotent — safe to run on every process start.
+ *
+ * The owner is created without any credential (docs/issues/0022): bootstrap
+ * issues a one-time SETUP CODE (returned once, printed by the caller) with
+ * which the owner sets their own password at /set-password. There is no
+ * generated password and no EMCP_OWNER_PASSWORD support — an owner password
+ * must never transit environment variables.
  */
 import { eq } from "drizzle-orm";
 import { newId, nowIso, DEFAULT_WORKSPACE_SETTINGS, type SemanticColor } from "@emcp/core";
 import type { Db } from "./connection.ts";
 import * as t from "./schema.ts";
-import { generatePassword, hashPassword } from "./services.ts";
+import { issueAuthCodeSync } from "./openauth.ts";
 
 export interface BootstrapResult {
   workspaceId: string;
   ownerUserId: string;
   /**
-   * Set ONLY when the owner user was created this run AND the password was
-   * generated here (shown once). When a password was supplied externally
-   * (`ownerPassword` option or EMCP_OWNER_PASSWORD) this is always null so no
-   * printer can ever log a caller-supplied secret (docs/issues/0022).
+   * Set ONLY when the owner user was created this run: the one-time setup
+   * code for /set-password. Surfaced exactly once by the caller's printer and
+   * regenerable via `pnpm --filter @emcp/db reset-owner`. Bootstrap never
+   * creates or prints a password (docs/issues/0022).
    */
-  ownerOneTimePassword: string | null;
+  ownerSetupCode: string | null;
   createdWorkspace: boolean;
-  /** True when the owner user was created this run (regardless of password source). */
+  /** True when the owner user was created this run. */
   createdOwner: boolean;
   /** The owner's login email when created this run, else null. */
   ownerEmail: string | null;
@@ -56,7 +62,6 @@ export interface BootstrapOptions {
   workspaceName?: string;
   ownerEmail?: string;
   ownerName?: string;
-  ownerPassword?: string;
   defaultCurrency?: string;
   timezone?: string;
 }
@@ -84,8 +89,8 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
   }
   const workspaceId = workspace.id;
 
-  // Owner user
-  let ownerOneTimePassword: string | null = null;
+  // Owner user: created PENDING with a one-time setup code, never a password.
+  let ownerSetupCode: string | null = null;
   let createdOwner = false;
   let ownerEmail: string | null = null;
   let owner = db
@@ -97,18 +102,14 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
     const userId = newId();
     const email = (opts.ownerEmail ?? process.env.EMCP_OWNER_EMAIL ?? "owner@emcp.local").toLowerCase();
     const name = opts.ownerName ?? process.env.EMCP_OWNER_NAME ?? "Owner";
-    const suppliedPassword = opts.ownerPassword ?? process.env.EMCP_OWNER_PASSWORD ?? null;
-    const password = suppliedPassword ?? generatePassword();
-    // Surface the password only when WE generated it. A supplied password is
-    // the caller's secret — it must never reach stdout/logs (docs/issues/0022).
-    ownerOneTimePassword = suppliedPassword == null ? password : null;
     createdOwner = true;
     ownerEmail = email;
     db.insert(t.users)
-      .values({ id: userId, email, name, passwordHash: hashPassword(password), createdAt: now, updatedAt: now })
+      .values({ id: userId, email, name, passwordHash: null, status: "pending", createdAt: now, updatedAt: now })
       .run();
     db.insert(t.memberships).values({ id: newId(), workspaceId, userId, role: "owner", createdAt: now }).run();
     owner = { userId };
+    ownerSetupCode = issueAuthCodeSync(db, { userId, purpose: "setup" }).code;
   }
 
   // Default pipelines
@@ -137,5 +138,5 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
   seedPipeline("engagement", "Outreach", DEFAULT_ENGAGEMENT_STAGES);
   seedPipeline("deal", "Sales", DEFAULT_DEAL_STAGES);
 
-  return { workspaceId, ownerUserId: owner.userId, ownerOneTimePassword, createdWorkspace, createdOwner, ownerEmail };
+  return { workspaceId, ownerUserId: owner.userId, ownerSetupCode, createdWorkspace, createdOwner, ownerEmail };
 }

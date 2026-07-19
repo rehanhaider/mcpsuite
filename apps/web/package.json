@@ -17,6 +17,7 @@
     "@emcp/db": "workspace:*",
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/geist-mono": "^5.2.8",
+    "@openauthjs/openauth": "^0.4.3",
     "@tanstack/react-query": "^5.101.2",
     "@tanstack/react-router": "^1.170.17",
     "@tanstack/react-router-ssr-query": "^1.167.1",

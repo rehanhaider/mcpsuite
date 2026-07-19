@@ -37,8 +37,14 @@
  *   cascade); SQLite leaves those rows orphaned.
  * - Association storage is typed-per-entity (company_tags, …); the generic
  *   port API is preserved by dispatching on the validated entity type.
+ * - Identity-level auth storage (sessions, openauth_kv, auth_codes) carries
+ *   zero crm_app grants: session sweeps, code issuance and issuer-state purges
+ *   go through the fixed SECURITY DEFINER functions from 0004_auth.sql, called
+ *   inside the same workspace transaction as the triggering mutation
+ *   (disable-revocation and permanent user deletion per docs/issues/0022).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash, randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
@@ -94,6 +100,7 @@ import {
   type WorkspaceSettings,
 } from "@emcp/core";
 import * as t from "./schema.ts";
+import { generateAuthCode, normalizeAuthCode } from "../openauth.ts";
 
 // ---------------------------------------------------------------------------
 // Async port surface
@@ -106,7 +113,34 @@ import * as t from "./schema.ts";
 type AsyncMethod<F> = F extends (...args: infer A) => infer R ? (...args: A) => Promise<Awaited<R>> : never;
 type AsyncPort<T> = { [K in keyof T]: AsyncMethod<T[K]> };
 
+/**
+ * Pg-only additions on top of the core port contract. `createPending`,
+ * `deletePermanently`, `transferOwnership` and the credentials seam are core
+ * `Ports` members now; these two remain adapter-level:
+ *
+ * - `activate` is the subject-binding step of the issuer success callback
+ *   (docs/auth-api.md §password/authorize): the SQLite adapter binds subjects
+ *   in its own auth module, the pg deployment does it through this seam.
+ * - `deleteSessions` / `revokeAllForUser` are optional in core only until
+ *   every adapter implements them — this adapter does, so they are declared
+ *   required here (the pg mirror of disable-revocation, docs/issues/0022).
+ */
+export interface PgUserAuthExtensions {
+  /**
+   * Bind a verified OpenAuth subject to a not-yet-linked, non-disabled user:
+   * a `pending` invite becomes `active` (activation), an `active` user
+   * without a subject gets it on first OpenAuth login (e.g. after owner
+   * recovery). Conflict when the subject is linked elsewhere; not_found
+   * otherwise (including cross-workspace ids).
+   */
+  activate(id: string, authSubject: string): Promise<User>;
+  /** Disable-revocation sweep: hard-deletes the user's sessions; returns count. */
+  deleteSessions(userId: string): Promise<number>;
+}
+
 export type PgPorts = { [K in Exclude<keyof Ports, "tx">]: AsyncPort<Ports[K]> } & {
+  users: AsyncPort<Ports["users"]> & PgUserAuthExtensions;
+  mcpClients: AsyncPort<Ports["mcpClients"]> & { revokeAllForUser(userId: string): Promise<number> };
   /** Run fn atomically in a workspace-scoped transaction. Nested calls join it. */
   tx<T>(fn: () => T | Promise<T>): Promise<Awaited<T>>;
 };
@@ -253,6 +287,21 @@ const uid = (v: string): string => (UUID_RE.test(v) ? v : NIL_UUID);
 const uidList = (ids: string[]): string[] => ids.map(uid);
 
 const num = (v: unknown): number => (v == null ? 0 : Number(v));
+
+/** Walks err.cause chains for the SQLSTATE the pg driver attaches. */
+const pgErrorCode = (e: unknown): string | undefined => {
+  let cur = e as { code?: unknown; cause?: unknown } | undefined;
+  for (let depth = 0; cur && depth < 8; depth += 1) {
+    if (typeof cur.code === "string") return cur.code;
+    cur = cur.cause as { code?: unknown; cause?: unknown } | undefined;
+  }
+  return undefined;
+};
+
+const sha256Hex = (value: string): string => createHash("sha256").update(value).digest("hex");
+
+/** Single-use code lifetimes: invites are handed over out-of-band (long), resets are hot (short). */
+const AUTH_CODE_TTL_MS = { setup: 7 * 86_400_000, reset: 3_600_000 } as const;
 
 // ---------------------------------------------------------------------------
 // Row mappers (Date -> ISO string, jsonb passes through)
@@ -457,15 +506,21 @@ const mapMcpClient = (r: Row<typeof t.mcpClients>): McpClient => ({
   revokedAt: isoN(r.revokedAt),
 });
 
-const mapUser = (r: Row<typeof t.users>, role: Role): User => ({
-  id: r.id,
-  email: r.email,
-  name: r.name,
-  role,
-  hasPassword: r.passwordHash != null,
-  disabledAt: isoN(r.disabledAt),
-  createdAt: iso(r.createdAt),
-});
+// status/passwordMustChange are asserted through `as User` until the core
+// domain type lands them (stream S1); the extra properties are exactly what
+// operations/admin-ops.ts already reads (`user.status`).
+const mapUser = (r: Row<typeof t.users>, role: Role): User =>
+  ({
+    id: r.id,
+    email: r.email,
+    name: r.name,
+    role,
+    hasPassword: r.passwordHash != null,
+    status: r.status,
+    passwordMustChange: r.passwordMustChange,
+    disabledAt: isoN(r.disabledAt),
+    createdAt: iso(r.createdAt),
+  }) as User;
 
 // ---------------------------------------------------------------------------
 
@@ -650,7 +705,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
     return (m?.role ?? "member") as Role;
   };
 
-  const usersPort: AsyncPort<Ports["users"]> = {
+  const usersPort: AsyncPort<Ports["users"]> & PgUserAuthExtensions = {
     async list() {
       return run(async (x) => {
         const rows = await x
@@ -693,6 +748,9 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
           email: input.email.toLowerCase(),
           name: input.name,
           passwordHash: input.passwordHash,
+          status: "active",
+          authSubject: null,
+          passwordMustChange: false,
           createdAt: now,
           updatedAt: now,
         });
@@ -707,7 +765,18 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
             .update(t.users)
             .set({
               ...(patch.name !== undefined ? { name: patch.name } : {}),
-              ...(patch.disabledAt !== undefined ? { disabledAt: toDateN(patch.disabledAt) } : {}),
+              // status stays coherent with disabledAt (users_status_disabled_ck):
+              // disabling forces 'disabled'; re-enabling restores 'active' but
+              // never resurrects a pre-activation 'pending' to 'active'.
+              ...(patch.disabledAt !== undefined
+                ? {
+                    disabledAt: toDateN(patch.disabledAt),
+                    status:
+                      patch.disabledAt != null
+                        ? "disabled"
+                        : sql`CASE WHEN ${t.users.status} = 'disabled' THEN 'active' ELSE ${t.users.status} END`,
+                  }
+                : {}),
               updatedAt: new Date(),
             })
             .where(and(eq(t.users.workspaceId, ws), eq(t.users.id, uid(id))));
@@ -735,6 +804,194 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
       return run(async (x) => {
         const [row] = await x.select({ n: count() }).from(t.users).where(eq(t.users.workspaceId, ws));
         return row?.n ?? 0;
+      });
+    },
+    async deleteSessions(userId) {
+      // crm.sessions carries no runtime grants (0003): the sweep goes through
+      // the fixed SECURITY DEFINER path, workspace-guarded inside the function.
+      return run(async (x) => {
+        const rows = await execRows<{ n: number }>(
+          x,
+          sql`SELECT crm.delete_user_sessions(${uid(userId)}::uuid) AS n`,
+        );
+        return num(rows[0]?.n);
+      });
+    },
+    async createPending(input) {
+      return run(async (x) => {
+        if (input.role === "owner") throw OpError.validation("There can only be one owner");
+        const id = newId();
+        const now = new Date();
+        try {
+          await x.insert(t.users).values({
+            id,
+            workspaceId: ws,
+            email: input.email.toLowerCase(),
+            name: input.name,
+            passwordHash: null,
+            status: "pending",
+            authSubject: null,
+            passwordMustChange: false,
+            createdAt: now,
+            updatedAt: now,
+          });
+        } catch (e) {
+          // Deployment-global email uniqueness; never identify the other
+          // workspace (isolation doc §Uniqueness and information disclosure).
+          if (pgErrorCode(e) === "23505") throw new OpError("conflict", "That email is unavailable");
+          throw e;
+        }
+        await x.insert(t.memberships).values({ id: newId(), workspaceId: ws, userId: id, role: input.role, createdAt: now });
+        return { userId: id };
+      });
+    },
+    async activate(id, authSubject) {
+      return run(async (x) => {
+        let updated: Array<{ id: string }>;
+        try {
+          updated = await x
+            .update(t.users)
+            .set({ authSubject, status: "active", updatedAt: new Date() })
+            .where(
+              and(
+                eq(t.users.workspaceId, ws),
+                eq(t.users.id, uid(id)),
+                sql`${t.users.status} <> 'disabled'`,
+                isNull(t.users.authSubject),
+              ),
+            )
+            .returning({ id: t.users.id });
+        } catch (e) {
+          if (pgErrorCode(e) === "23505") {
+            throw new OpError("conflict", "That login identity is already linked to another user");
+          }
+          throw e;
+        }
+        if (updated.length === 0) throw OpError.notFound("user", id);
+        return (await usersPort.get(id))!;
+      });
+    },
+    async deletePermanently(id) {
+      await run(async (x) => {
+        const target = uid(id);
+        const [row] = await x
+          .select({ id: t.users.id })
+          .from(t.users)
+          .where(and(eq(t.users.workspaceId, ws), eq(t.users.id, target)))
+          .limit(1);
+        if (!row) throw OpError.notFound("user", id);
+        if ((await roleOf(x, id)) === "owner") {
+          throw OpError.validation("The owner cannot be deleted — transfer ownership first");
+        }
+        // 1. OpenAuth issuer state — refresh tokens and authorization rows
+        //    keyed by the subject, password hash and email→subject binding
+        //    keyed by the email (workspace-guarded SECURITY DEFINER; must run
+        //    while the user row still exists).
+        await execRows(x, sql`SELECT crm.purge_openauth_identity(${target}::uuid)`);
+        // 2. Login sessions (same fixed path as deleteSessions).
+        await execRows(x, sql`SELECT crm.delete_user_sessions(${target}::uuid)`);
+        // 3. The user's MCP clients are credentials, not business records —
+        //    they die with the user. History referencing them (activities,
+        //    audit, pending actions) survives via ON DELETE SET NULL (col).
+        await x
+          .delete(t.mcpClients)
+          .where(and(eq(t.mcpClients.workspaceId, ws), eq(t.mcpClients.createdByUserId, target)));
+        // 4. Private saved views are personal configuration; shared views
+        //    survive with owner cleared by the FK.
+        await x
+          .delete(t.savedViews)
+          .where(
+            and(
+              eq(t.savedViews.workspaceId, ws),
+              eq(t.savedViews.ownerUserId, target),
+              eq(t.savedViews.visibility, "private"),
+            ),
+          );
+        // 5. The user row. FKs do the rest inside this transaction:
+        //    memberships + auth_codes + sessions CASCADE (referential actions
+        //    are exempt from RLS by design); every business reference
+        //    (owner/assignee/actor/reviewer) is SET NULL (col) so records
+        //    survive and render "Deleted user" — no email or name remains.
+        await x.delete(t.users).where(and(eq(t.users.workspaceId, ws), eq(t.users.id, target)));
+      });
+    },
+    async transferOwnership(fromUserId, toUserId) {
+      await run(async (x) => {
+        const from = uid(fromUserId);
+        const to = uid(toUserId);
+        if (from === to) throw OpError.validation("This user already owns the workspace");
+        const [target] = await x
+          .select({ id: t.users.id })
+          .from(t.users)
+          .where(and(eq(t.users.workspaceId, ws), eq(t.users.id, to), eq(t.users.status, "active")))
+          .limit(1);
+        if (!target) throw OpError.notFound("user", toUserId);
+        // Demote strictly from 'owner': a concurrent transfer that got there
+        // first makes this hit 0 rows → conflict, transaction rolls back.
+        const demoted = await x
+          .update(t.memberships)
+          .set({ role: "admin" })
+          .where(
+            and(
+              eq(t.memberships.workspaceId, ws),
+              eq(t.memberships.userId, from),
+              eq(t.memberships.role, "owner"),
+            ),
+          )
+          .returning({ id: t.memberships.id });
+        if (demoted.length !== 1) {
+          throw new OpError("conflict", "Workspace ownership changed concurrently — reload and retry");
+        }
+        const promoted = await x
+          .update(t.memberships)
+          .set({ role: "owner" })
+          .where(and(eq(t.memberships.workspaceId, ws), eq(t.memberships.userId, to)))
+          .returning({ id: t.memberships.id });
+        if (promoted.length !== 1) throw OpError.notFound("user", toUserId);
+        // memberships_one_owner_ux is the DB backstop: if another transaction
+        // slipped an owner in between, the promote raised 23505 and everything
+        // above rolled back — the workspace can never observe two owners.
+      });
+    },
+  };
+
+  // --- credentials (setup/reset codes; storage model in 0004_auth.sql) ------
+
+  const credentialsPort: AsyncPort<Ports["credentials"]> = {
+    async issueCode(userId, purpose) {
+      if (purpose !== "setup" && purpose !== "reset") {
+        throw OpError.validation(`Unknown credential code purpose: ${String(purpose)}`);
+      }
+      return run(async (x) => {
+        // Same display format and normalized-hash form as the SQLite adapter
+        // (packages/db/src/openauth.ts) so codes redeem identically on every
+        // surface: XXXX-XXXX-XXXX shown once, SHA-256(normalized) at rest.
+        const code = generateAuthCode();
+        const expiresAt = new Date(Date.now() + AUTH_CODE_TTL_MS[purpose]);
+        // Workspace-guarded definer function: stores only the hash, deletes
+        // the user's earlier codes of this purpose, NULL when the user is not
+        // in this workspace (or disabled) — indistinguishable from random ids.
+        const rows = await execRows<{ id: string | null }>(
+          x,
+          sql`SELECT crm.issue_auth_code(${uid(userId)}::uuid, ${purpose}, ${sha256Hex(normalizeAuthCode(code))}, ${expiresAt.toISOString()}::timestamptz) AS id`,
+        );
+        if (!rows[0]?.id) throw OpError.notFound("user", userId);
+        if (purpose === "reset") {
+          // user.resetPassword contract: issuing a reset code ends every
+          // session, in the same transaction.
+          await execRows(x, sql`SELECT crm.delete_user_sessions(${uid(userId)}::uuid)`);
+        }
+        return { code };
+      });
+    },
+    async mustChangePassword(userId, mustChange) {
+      await run(async (x) => {
+        const rows = await x
+          .update(t.users)
+          .set({ passwordMustChange: mustChange, updatedAt: new Date() })
+          .where(and(eq(t.users.workspaceId, ws), eq(t.users.id, uid(userId))))
+          .returning({ id: t.users.id });
+        if (rows.length === 0) throw OpError.notFound("user", userId);
       });
     },
   };
@@ -2542,7 +2799,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
 
   // --- MCP clients ------------------------------------------------------------------
 
-  const mcpClientsPort: AsyncPort<Ports["mcpClients"]> = {
+  const mcpClientsPort: AsyncPort<Ports["mcpClients"]> & { revokeAllForUser(userId: string): Promise<number> } = {
     async list() {
       return run(async (x) => {
         const rows = await x
@@ -2616,6 +2873,25 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         const c = await mcpClientsPort.get(id);
         if (!c) throw OpError.notFound("MCP client", id);
         return c;
+      });
+    },
+    async revokeAllForUser(userId) {
+      // Disable-revocation (docs/issues/0022): same semantics as revoke() —
+      // flag with revokedAt, never delete — and only still-active clients, so
+      // earlier revocation timestamps survive. Returns the number revoked.
+      return run(async (x) => {
+        const rows = await x
+          .update(t.mcpClients)
+          .set({ revokedAt: new Date() })
+          .where(
+            and(
+              eq(t.mcpClients.workspaceId, ws),
+              eq(t.mcpClients.createdByUserId, uid(userId)),
+              isNull(t.mcpClients.revokedAt),
+            ),
+          )
+          .returning({ id: t.mcpClients.id });
+        return rows.length;
       });
     },
     async touchLastUsed(id) {
@@ -2783,6 +3059,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
   return {
     workspace: workspacePort,
     users: usersPort,
+    credentials: credentialsPort,
     companies: companiesPort,
     people: peoplePort,
     pipelines: pipelinesPort,

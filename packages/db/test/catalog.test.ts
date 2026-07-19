@@ -21,7 +21,7 @@ import { createPorts } from "../src/repositories.ts";
 import { createSession, resolveMcpToken, resolveSession } from "../src/auth.ts";
 import { resolveWorkspaceAccess } from "../src/hosting-access.ts";
 import { bootstrap } from "../src/bootstrap.ts";
-import { authServices, csvServices, verifyPassword } from "../src/services.ts";
+import { authServices, csvServices } from "../src/services.ts";
 
 let db: Db;
 let catalog: Catalog;
@@ -62,18 +62,30 @@ function agentCtx(overrides: Partial<RequestContext> = {}): RequestContext {
   };
 }
 
+/**
+ * Flip a user's lifecycle status directly, simulating the auth-side setup
+ * completion (or first-run pending owner). The activation flow itself belongs
+ * to the credentials seam — catalog tests only need the resulting state.
+ */
+function setUserStatus(userId: string, status: "pending" | "active" | "disabled"): void {
+  db.$client.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, userId);
+}
+
 beforeEach(() => {
   db = makeDb();
-  const boot = bootstrap(db, { ownerEmail: "test@local", ownerName: "Test", ownerPassword: "pw12345678" });
+  const boot = bootstrap(db, { ownerEmail: "test@local", ownerName: "Test" });
   workspaceId = boot.workspaceId;
   ownerUserId = boot.ownerUserId;
+  // Bootstrap creates the owner PENDING; catalog tests act as the owner, so
+  // simulate the completed /set-password + first-login activation.
+  setUserStatus(ownerUserId, "active");
   catalog = buildCatalog({ auth: authServices, csv: csvServices });
   ports = createPorts(db, workspaceId);
   owner = { ...systemContext(workspaceId), actorType: "human", userId: ownerUserId, surface: "web" };
 });
 
 describe("bootstrap", () => {
-  it("seeds workspace, owner and default pipelines", async () => {
+  it("seeds workspace, pending owner and default pipelines", async () => {
     const ws = await ok(run(owner, "workspace.get"));
     expect(ws.name).toBeTruthy();
     const pipelines = await ok(run(owner, "pipeline.list"));
@@ -81,52 +93,55 @@ describe("bootstrap", () => {
     expect(types).toEqual(["deal", "engagement"]);
     const engagement = pipelines.find((p: any) => p.type === "engagement");
     expect(engagement.stages.length).toBeGreaterThanOrEqual(5);
-    const row = db.$client.prepare("SELECT password_hash h FROM users").get() as { h: string };
-    expect(verifyPassword("pw12345678", row.h)).toBe(true);
+    // The CRM stores no login password — credentials live in OpenAuth storage.
+    const row = db.$client.prepare("SELECT password_hash h FROM users").get() as { h: string | null };
+    expect(row.h).toBeNull();
   });
 
-  it("never returns a supplied password (option or env) — only generated ones", () => {
-    // Supplied via option (the beforeEach db): owner created, password silent.
-    const viaOption = bootstrap(makeDb(), { ownerEmail: "Boss@Example.COM", ownerPassword: "option-secret-1" });
-    expect(viaOption.createdOwner).toBe(true);
-    expect(viaOption.ownerEmail).toBe("boss@example.com");
-    expect(viaOption.ownerOneTimePassword).toBeNull();
-
-    // Supplied via EMCP_OWNER_PASSWORD: same contract.
+  it("creates a pending owner with a one-time setup code — never a password", () => {
+    // EMCP_OWNER_PASSWORD support is removed: even when set it must neither
+    // create a credential nor leak anywhere (docs/issues/0022).
     const prev = process.env.EMCP_OWNER_PASSWORD;
-    process.env.EMCP_OWNER_PASSWORD = "env-secret-1";
+    process.env.EMCP_OWNER_PASSWORD = "must-be-ignored-1";
     try {
-      const envDb = makeDb();
-      const viaEnv = bootstrap(envDb);
-      expect(viaEnv.createdOwner).toBe(true);
-      expect(viaEnv.ownerOneTimePassword).toBeNull();
-      const row = envDb.$client.prepare("SELECT password_hash h FROM users").get() as { h: string };
-      expect(verifyPassword("env-secret-1", row.h)).toBe(true);
+      const fresh = makeDb();
+      const boot = bootstrap(fresh, { ownerEmail: "Boss@Example.COM" });
+      expect(boot.createdOwner).toBe(true);
+      expect(boot.ownerEmail).toBe("boss@example.com");
+      expect((boot as any).ownerOneTimePassword).toBeUndefined();
+      expect(boot.ownerSetupCode).toBeTruthy();
+
+      const user = fresh.$client
+        .prepare("SELECT status, password_hash ph, auth_subject subj FROM users")
+        .get() as { status: string; ph: string | null; subj: string | null };
+      expect(user.status).toBe("pending");
+      expect(user.ph).toBeNull();
+      expect(user.subj).toBeNull();
+
+      // Only the hash of the setup code is stored.
+      const code = fresh.$client
+        .prepare("SELECT purpose, code_hash, used_at FROM auth_codes")
+        .get() as { purpose: string; code_hash: string; used_at: string | null };
+      expect(code.purpose).toBe("setup");
+      expect(code.used_at).toBeNull();
+      expect(code.code_hash).not.toContain(boot.ownerSetupCode!);
     } finally {
       if (prev === undefined) delete process.env.EMCP_OWNER_PASSWORD;
       else process.env.EMCP_OWNER_PASSWORD = prev;
     }
   });
 
-  it("returns the one-time password only when generated, and only on the creating run", () => {
-    const prev = process.env.EMCP_OWNER_PASSWORD;
-    delete process.env.EMCP_OWNER_PASSWORD; // ensure the generated path
-    try {
-      const fresh = makeDb();
-      const generated = bootstrap(fresh);
-      expect(generated.createdOwner).toBe(true);
-      expect(generated.ownerOneTimePassword).toBeTruthy();
-      const row = fresh.$client.prepare("SELECT password_hash h FROM users").get() as { h: string };
-      expect(verifyPassword(generated.ownerOneTimePassword!, row.h)).toBe(true);
+  it("returns the setup code only on the creating run", () => {
+    const fresh = makeDb();
+    const first = bootstrap(fresh);
+    expect(first.createdOwner).toBe(true);
+    expect(first.ownerSetupCode).toBeTruthy();
 
-      // Idempotent re-run: owner already exists — nothing created, nothing shown.
-      const rerun = bootstrap(fresh);
-      expect(rerun.createdOwner).toBe(false);
-      expect(rerun.ownerEmail).toBeNull();
-      expect(rerun.ownerOneTimePassword).toBeNull();
-    } finally {
-      if (prev !== undefined) process.env.EMCP_OWNER_PASSWORD = prev;
-    }
+    // Idempotent re-run: owner already exists — nothing created, nothing shown.
+    const rerun = bootstrap(fresh);
+    expect(rerun.createdOwner).toBe(false);
+    expect(rerun.ownerEmail).toBeNull();
+    expect(rerun.ownerSetupCode).toBeNull();
   });
 });
 
@@ -598,10 +613,12 @@ describe("search + import/export", () => {
 });
 
 describe("admin", () => {
-  it("user create/update, password reset, mcp client lifecycle", async () => {
+  it("user create/update, setup code, mcp client lifecycle", async () => {
     const created = await ok(run(owner, "user.create", { name: "Sam", email: "sam@example.com", role: "member" }));
-    expect(created.oneTimePassword).toBeTruthy();
+    expect(created.setupCode).toBeTruthy();
+    expect(created.oneTimePassword).toBeUndefined(); // admin-supplied passwords are gone
     expect(created.user.role).toBe("member");
+    expect(created.user.status).toBe("pending");
 
     const updated = await ok(run(owner, "user.update", { id: created.user.id, role: "admin" }));
     expect(updated.role).toBe("admin");
@@ -631,6 +648,7 @@ describe("agent authority mirrors the owning user", () => {
 
   async function createUser(role: "member" | "admin"): Promise<RequestContext> {
     const created = await ok(run(owner, "user.create", { name: `u-${role}`, email: `${role}-${Math.random().toString(36).slice(2)}@example.com`, role }));
+    setUserStatus(created.user.id, "active"); // simulate completed setup
     return humanCtx(created.user.id, role);
   }
 
@@ -704,6 +722,7 @@ describe("disable revokes everything; re-enable restores nothing", () => {
   async function memberWithSessionAndAgent(): Promise<{ userId: string; sessionToken: string; mcpToken: string; clientId: string }> {
     const created = await ok(run(owner, "user.create", { name: "Dee", email: "dee@example.com", role: "member" }));
     const userId = created.user.id as string;
+    setUserStatus(userId, "active"); // simulate completed setup
     const memberCtx: RequestContext = { ...owner, userId, role: "member" };
     const session = createSession(db, userId);
     const client = await ok(run(memberCtx, "mcpClient.create", { name: "Dee bot", scopes: ["read", "write"] }));
@@ -739,6 +758,7 @@ describe("disable revokes everything; re-enable restores nothing", () => {
 
   it("a role change applies on the next request without ending the session", async () => {
     const created = await ok(run(owner, "user.create", { name: "Rae", email: "rae@example.com", role: "member" }));
+    setUserStatus(created.user.id, "active");
     const session = createSession(db, created.user.id);
     expect(resolveSession(db, session.token)!.role).toBe("member");
 
@@ -747,6 +767,226 @@ describe("disable revokes everything; re-enable restores nothing", () => {
     const after = resolveSession(db, session.token);
     expect(after).not.toBeNull(); // still logged in — role changes never log the user out
     expect(after!.role).toBe("admin");
+  });
+});
+
+describe("user lifecycle: setup codes, deletion, ownership (docs/issues/0022)", () => {
+  async function invite(
+    role: "admin" | "member" | "viewer" = "member",
+    email = `${role}-${Math.random().toString(36).slice(2)}@example.com`,
+  ): Promise<{ user: any; setupCode: string }> {
+    return await ok(run(owner, "user.create", { name: `u-${role}`, email, role }));
+  }
+
+  it("user.create returns a pending user + setup code once; the raw code is never audited", async () => {
+    const created = await invite("member", "codes@example.com");
+    expect(created.user.status).toBe("pending");
+    expect(created.setupCode).toBeTruthy();
+    expect((created as any).oneTimePassword).toBeUndefined();
+
+    const dupe = await run(owner, "user.create", { name: "Dupe", email: "CODES@example.com" });
+    expect(dupe.status).toBe("error");
+    expect((dupe as any).error.code).toBe("conflict");
+
+    const asOwner = await run(owner, "user.create", { name: "O", email: "o2@example.com", role: "owner" });
+    expect(asOwner.status).toBe("error");
+
+    // The one-time code exists only in the returned result — the audit trail
+    // never contains it (only a hash is stored at rest).
+    const audit = await ok(run(owner, "audit.list", {}));
+    expect(JSON.stringify(audit)).not.toContain(created.setupCode);
+  });
+
+  it("user.regenerateSetupCode returns a fresh code for pending users only", async () => {
+    const created = await invite("member");
+    const regen = await ok(run(owner, "user.regenerateSetupCode", { id: created.user.id }));
+    expect(regen.setupCode).toBeTruthy();
+    expect(regen.setupCode).not.toBe(created.setupCode); // priors invalidated by the second issue
+
+    setUserStatus(created.user.id, "active");
+    const late = await run(owner, "user.regenerateSetupCode", { id: created.user.id });
+    expect(late.status).toBe("error");
+    expect((late as any).error.code).toBe("invalid_state");
+  });
+
+  it("user.resetPassword issues a reset code and ends every session; pending users are rejected", async () => {
+    const created = await invite("member");
+    const early = await run(owner, "user.resetPassword", { id: created.user.id });
+    expect(early.status).toBe("error");
+    expect((early as any).error.code).toBe("invalid_state");
+
+    setUserStatus(created.user.id, "active");
+    const session = createSession(db, created.user.id);
+    expect(resolveSession(db, session.token)).not.toBeNull();
+
+    const reset = await ok(run(owner, "user.resetPassword", { id: created.user.id }));
+    expect(reset.resetCode).toBeTruthy();
+    expect((reset as any).oneTimePassword).toBeUndefined(); // no temporary passwords
+    expect(resolveSession(db, session.token)).toBeNull(); // reset ends sessions
+  });
+
+  it("only the owner can reset the owner's password", async () => {
+    const created = await invite("admin");
+    setUserStatus(created.user.id, "active");
+    const adminCtx: RequestContext = { ...owner, userId: created.user.id, role: "admin" };
+    const denied = await run(adminCtx, "user.resetPassword", { id: ownerUserId });
+    expect(denied.status).toBe("error");
+    expect((denied as any).error.code).toBe("forbidden");
+    expect((await run(owner, "user.resetPassword", { id: ownerUserId })).status).toBe("ok");
+  });
+
+  it("user.delete removes login, sessions and MCP keys; audit records counts but no name/email", async () => {
+    const ownerDel = await run(owner, "user.delete", { id: ownerUserId });
+    expect(ownerDel.status).toBe("error"); // the owner is never deletable
+    expect((ownerDel as any).error.code).toBe("validation");
+
+    const created = await invite("member", "doomed@example.com");
+    setUserStatus(created.user.id, "active");
+    const memberCtx: RequestContext = { ...owner, userId: created.user.id, role: "member" };
+    const session = createSession(db, created.user.id);
+    const client = await ok(run(memberCtx, "mcpClient.create", { name: "Doomed bot", scopes: ["read", "write"] }));
+    expect(resolveMcpToken(db, client.token)).not.toBeNull();
+
+    const del = await ok(run(owner, "user.delete", { id: created.user.id }));
+    expect(del.deleted).toBe(true);
+    expect(del.endedSessions).toBeGreaterThanOrEqual(1);
+    expect(del.removedMcpClients).toBe(1);
+
+    // Observable cascade: nothing resolves, nothing remains, user is gone.
+    expect(resolveSession(db, session.token)).toBeNull();
+    expect(resolveMcpToken(db, client.token)).toBeNull();
+    const sessionRows = db.$client.prepare("SELECT COUNT(*) n FROM sessions WHERE user_id = ?").get(created.user.id) as { n: number };
+    expect(sessionRows.n).toBe(0);
+    expect((await ok<any[]>(run(owner, "user.list"))).some((u) => u.id === created.user.id)).toBe(false);
+
+    // Audit meta has counts; neither the name nor the email is retained.
+    const audit = await ok(run(owner, "audit.list", {}));
+    const event = audit.items.find((e: any) => e.operation === "user.delete");
+    expect(event).toBeTruthy();
+    expect(event.meta.removedMcpClients).toBe(1);
+    expect(event.meta.endedSessions).toBeGreaterThanOrEqual(1);
+    expect(JSON.stringify(event)).not.toContain("doomed@example.com");
+    expect(JSON.stringify(event)).not.toContain("u-member");
+  });
+
+  it("self-deletion is blocked for the last active administrator", async () => {
+    const created = await invite("admin");
+    setUserStatus(created.user.id, "active");
+    const adminCtx: RequestContext = { ...owner, userId: created.user.id, role: "admin" };
+
+    // Simulate a first-run workspace whose owner is still pending: the admin
+    // is then the last ACTIVE administrator and cannot delete themself.
+    setUserStatus(ownerUserId, "pending");
+    const denied = await run(adminCtx, "user.delete", { id: created.user.id });
+    expect(denied.status).toBe("error");
+    expect((denied as any).error.code).toBe("invalid_state");
+
+    // With an active owner around, self-deletion is allowed.
+    setUserStatus(ownerUserId, "active");
+    expect((await run(adminCtx, "user.delete", { id: created.user.id })).status).toBe("ok");
+  });
+
+  it("user.delete is destructive-risk: default-trust agents queue for approval", async () => {
+    const created = await invite("viewer");
+    setUserStatus(created.user.id, "active");
+    const agent = agentCtx({ role: "admin", scopes: ["read", "write", "admin"] });
+    const gated = await run(agent, "user.delete", { id: created.user.id });
+    expect(gated.status).toBe("pending_approval");
+    expect((gated as any).riskCategory).toBe("destructive");
+    expect((await ok<any[]>(run(owner, "user.list"))).some((u) => u.id === created.user.id)).toBe(true);
+
+    await ok(run(owner, "pendingAction.approve", { id: (gated as any).pendingActionId }));
+    expect((await ok<any[]>(run(owner, "user.list"))).some((u) => u.id === created.user.id)).toBe(false);
+  });
+
+  it("user.transferOwnership swaps both roles and keeps exactly one protected owner", async () => {
+    const created = await invite("admin");
+    setUserStatus(created.user.id, "active");
+    const targetId = created.user.id as string;
+
+    // Admin (not owner) cannot transfer — even to themself.
+    const adminCtx: RequestContext = { ...owner, userId: targetId, role: "admin" };
+    const denied = await run(adminCtx, "user.transferOwnership", { toUserId: targetId });
+    expect(denied.status).toBe("error");
+    expect((denied as any).error.code).toBe("forbidden");
+
+    // Pending targets and self-transfer are rejected.
+    const pending = await invite("member");
+    expect((await run(owner, "user.transferOwnership", { toUserId: pending.user.id })).status).toBe("error");
+    expect((await run(owner, "user.transferOwnership", { toUserId: ownerUserId })).status).toBe("error");
+
+    const result = await ok(run(owner, "user.transferOwnership", { toUserId: targetId }));
+    expect(result.to.role).toBe("owner");
+    expect(result.from.role).toBe("admin");
+    const users = await ok<any[]>(run(owner, "user.list"));
+    expect(users.filter((u) => u.role === "owner")).toHaveLength(1);
+
+    // Owner-protection continuity: the NEW owner is protected now…
+    const asNewOwner: RequestContext = { ...owner, userId: targetId, role: "owner" };
+    expect((await run(asNewOwner, "user.update", { id: targetId, role: "member" })).status).toBe("error");
+    // …while the previous owner is a normal admin (can be disabled)…
+    expect((await run(asNewOwner, "user.update", { id: ownerUserId, disabled: true })).status).toBe("ok");
+    // …and can no longer transfer ownership.
+    const oldOwnerCtx: RequestContext = { ...owner, role: "admin" };
+    expect((await run(oldOwnerCtx, "user.transferOwnership", { toUserId: ownerUserId })).status).toBe("error");
+  });
+
+  it("transfer is atomic: a failure inside the transaction leaves both roles unchanged", async () => {
+    const created = await invite("admin");
+    setUserStatus(created.user.id, "active");
+    const failingPorts: Ports = {
+      ...ports,
+      audit: {
+        ...ports.audit,
+        record: async () => {
+          throw new Error("audit store down");
+        },
+      },
+    };
+    const result = await runOperation(catalog, failingPorts, owner, "user.transferOwnership", { toUserId: created.user.id });
+    expect(result.status).toBe("error");
+    const users = await ok<any[]>(run(owner, "user.list"));
+    expect(users.find((u) => u.id === ownerUserId).role).toBe("owner");
+    expect(users.find((u) => u.id === created.user.id).role).toBe("admin");
+  });
+
+  it("transfer is admin-risk for agents, and a non-owner approver cannot execute it", async () => {
+    const created = await invite("admin");
+    setUserStatus(created.user.id, "active");
+
+    // Agent acting for the owner, default trust → queued (admin risk).
+    const agent = agentCtx({ role: "owner", scopes: ["read", "write", "admin"] });
+    const gated = await run(agent, "user.transferOwnership", { toUserId: created.user.id });
+    expect(gated.status).toBe("pending_approval");
+    expect((gated as any).riskCategory).toBe("admin");
+
+    // An ADMIN approving executes as themself and is rejected — the op is
+    // owner-only even past the approval gate.
+    const adminCtx: RequestContext = { ...owner, userId: created.user.id, role: "admin" };
+    const approve = await run(adminCtx, "pendingAction.approve", { id: (gated as any).pendingActionId });
+    expect(approve.status).toBe("error");
+    const users = await ok<any[]>(run(owner, "user.list"));
+    expect(users.find((u) => u.id === ownerUserId).role).toBe("owner");
+    expect(users.find((u) => u.id === created.user.id).role).toBe("admin");
+  });
+
+  it("admins manage other admins fully; only the owner is protected from them", async () => {
+    const a1 = await invite("admin");
+    const a2 = await invite("admin");
+    setUserStatus(a1.user.id, "active");
+    setUserStatus(a2.user.id, "active");
+    const a1Ctx: RequestContext = { ...owner, userId: a1.user.id, role: "admin" };
+
+    // Demote, re-promote, disable, delete another admin — all allowed.
+    expect((await ok(run(a1Ctx, "user.update", { id: a2.user.id, role: "member" }))).role).toBe("member");
+    expect((await ok(run(a1Ctx, "user.update", { id: a2.user.id, role: "admin" }))).role).toBe("admin");
+    expect((await run(a1Ctx, "user.update", { id: a2.user.id, disabled: true })).status).toBe("ok");
+    expect((await run(a1Ctx, "user.delete", { id: a2.user.id })).status).toBe("ok");
+
+    // The owner stays out of reach.
+    expect((await run(a1Ctx, "user.update", { id: ownerUserId, role: "member" })).status).toBe("error");
+    expect((await run(a1Ctx, "user.resetPassword", { id: ownerUserId })).status).toBe("error");
+    expect((await run(a1Ctx, "user.delete", { id: ownerUserId })).status).toBe("error");
   });
 });
 

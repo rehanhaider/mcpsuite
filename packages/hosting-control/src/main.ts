@@ -6,6 +6,10 @@
  *   HC_HOST                   default 127.0.0.1 (keep it on the private network)
  *   HC_PORT                   default 8787
  *   DB_PATH                   the shared CRM SQLite file (mise sets it)
+ *   EMCP_AUTH_DELIVERY_URL    hosted mode: setup/reset codes POST here and
+ *                             never appear in responses or logs; unset =
+ *                             display mode (the response may show a code once)
+ *   EMCP_AUTH_DELIVERY_KEY    optional bearer key for the delivery endpoint
  *
  * Normal self-hosted installations do not start this process.
  */

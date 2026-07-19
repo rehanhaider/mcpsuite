@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "tsx src/scripts/migrate.ts",
-    "smoke": "tsx src/scripts/smoke.ts"
+    "smoke": "tsx src/scripts/smoke.ts",
+    "reset-owner": "tsx src/scripts/reset-owner.ts"
   },
   "dependencies": {
     "@emcp/core": "workspace:*",

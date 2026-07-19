@@ -14,9 +14,20 @@ if (!membership) throw new Error("no owner membership — run pnpm db:migrate fi
 const owner = runtime.db.select().from(users).where(eq(users.id, membership.userId)).get();
 if (!owner) throw new Error("owner user missing");
 const ctx = webContext({
-  user: { id: owner.id, email: owner.email, name: owner.name, role: membership.role as never, hasPassword: true, disabledAt: null, createdAt: owner.createdAt },
+  user: {
+    id: owner.id,
+    email: owner.email,
+    name: owner.name,
+    role: membership.role as never,
+    status: "active",
+    hasPassword: true,
+    disabledAt: null,
+    createdAt: owner.createdAt,
+  },
   workspaceId: membership.workspaceId,
   role: membership.role as never,
+  passwordMustChange: false,
+  authSubject: null,
 });
 
 let pass = 0;

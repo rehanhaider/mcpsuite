@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Copy, KeyRound, Plus, UserX } from "lucide-react";
+import { Copy, Crown, KeyRound, Plus, RotateCw, Trash2, UserX } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import type { User } from "@emcp/core/domain";
@@ -23,13 +23,30 @@ const ROLE_HINT: Record<string, string> = {
   viewer: "Read-only",
 };
 
+const STATUS_TONE: Record<string, string> = {
+  active: "success",
+  pending: "warning",
+  disabled: "ghost",
+};
+
+/** One-time code handed to the admin exactly once (setup or reset). */
+interface CodeInfo {
+  email: string;
+  code: string;
+  kind: "setup" | "reset";
+}
+
 function UsersAdmin() {
   const users = useQuery(opQuery<User[]>("user.list"));
   const auth = useQuery(whoamiQuery).data;
+  const isOwner = auth?.role === "owner";
   const [createOpen, setCreateOpen] = useState(false);
-  const [oneTime, setOneTime] = useState<{ email: string; password: string } | null>(null);
+  const [codeInfo, setCodeInfo] = useState<CodeInfo | null>(null);
+  const [deleting, setDeleting] = useState<User | null>(null);
+  const [transferring, setTransferring] = useState<User | null>(null);
   const update = useOp("user.update", { successToast: "User updated" });
   const reset = useOp("user.resetPassword");
+  const regenerate = useOp("user.regenerateSetupCode");
 
   return (
     <div>
@@ -50,12 +67,12 @@ function UsersAdmin() {
                 <th className="px-3 py-2 font-medium">Role</th>
                 <th className="px-3 py-2 font-medium">Since</th>
                 <th className="px-3 py-2 font-medium">Status</th>
-                <th className="w-40 px-3 py-2" />
+                <th className="w-48 px-3 py-2" />
               </tr>
             </thead>
             <tbody>
               {(users.data ?? []).map((u) => (
-                <tr key={u.id} className={`border-b border-border/60 last:border-0 ${u.disabledAt ? "opacity-50" : ""}`}>
+                <tr key={u.id} className={`border-b border-border/60 last:border-0 ${u.status === "disabled" ? "opacity-50" : ""}`}>
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2.5">
                       <Avatar name={u.name} />
@@ -87,34 +104,75 @@ function UsersAdmin() {
                   </td>
                   <td className="px-3 py-2 text-xs text-muted-foreground">{formatDate(u.createdAt)}</td>
                   <td className="px-3 py-2">
-                    {u.disabledAt ? <span className={chipClass("ghost", "xs")}>disabled</span> : <span className={chipClass("success", "xs")}>active</span>}
+                    <span className={chipClass(STATUS_TONE[u.status] ?? "ghost", "xs")}>{u.status}</span>
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        title="Reset password"
-                        onClick={() =>
-                          reset.mutate(
-                            { id: u.id },
-                            {
-                              onSuccess: (r) => setOneTime({ email: u.email, password: (r as { oneTimePassword: string }).oneTimePassword }),
-                            },
-                          )
-                        }
-                      >
-                        <KeyRound className="size-3.5" />
-                      </Button>
+                      {u.status === "pending" ? (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          title="Show setup code (regenerates — earlier codes stop working)"
+                          onClick={() =>
+                            regenerate.mutate(
+                              { id: u.id },
+                              {
+                                onSuccess: (r) =>
+                                  setCodeInfo({ email: u.email, code: (r as { setupCode: string }).setupCode, kind: "setup" }),
+                              },
+                            )
+                          }
+                        >
+                          <RotateCw className="size-3.5" />
+                        </Button>
+                      ) : u.role !== "owner" || isOwner ? (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          title="Reset password (signs the user out everywhere)"
+                          onClick={() =>
+                            reset.mutate(
+                              { id: u.id },
+                              {
+                                onSuccess: (r) =>
+                                  setCodeInfo({ email: u.email, code: (r as { resetCode: string }).resetCode, kind: "reset" }),
+                              },
+                            )
+                          }
+                        >
+                          <KeyRound className="size-3.5" />
+                        </Button>
+                      ) : null}
+                      {isOwner && u.role !== "owner" && u.status === "active" ? (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          title="Transfer ownership to this user"
+                          onClick={() => setTransferring(u)}
+                        >
+                          <Crown className="size-3.5" />
+                        </Button>
+                      ) : null}
+                      {u.role !== "owner" && u.status !== "pending" ? (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className={u.status === "disabled" ? "" : "text-destructive"}
+                          title={u.status === "disabled" ? "Re-enable login" : "Disable login"}
+                          onClick={() => update.mutate({ id: u.id, disabled: u.status !== "disabled" })}
+                        >
+                          <UserX className="size-3.5" />
+                        </Button>
+                      ) : null}
                       {u.role !== "owner" ? (
                         <Button
                           variant="ghost"
                           size="icon-xs"
-                          className={u.disabledAt ? "" : "text-destructive"}
-                          title={u.disabledAt ? "Re-enable login" : "Disable login"}
-                          onClick={() => update.mutate({ id: u.id, disabled: !u.disabledAt })}
+                          className="text-destructive"
+                          title="Delete permanently"
+                          onClick={() => setDeleting(u)}
                         >
-                          <UserX className="size-3.5" />
+                          <Trash2 className="size-3.5" />
                         </Button>
                       ) : null}
                     </div>
@@ -126,21 +184,15 @@ function UsersAdmin() {
         </TableShell>
       )}
 
-      <InviteModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={setOneTime} />
-      {oneTime ? <OneTimePasswordModal info={oneTime} onClose={() => setOneTime(null)} /> : null}
+      <InviteModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={setCodeInfo} />
+      {codeInfo ? <CodeModal info={codeInfo} onClose={() => setCodeInfo(null)} /> : null}
+      {deleting ? <DeleteUserModal user={deleting} onClose={() => setDeleting(null)} /> : null}
+      {transferring ? <TransferOwnershipModal user={transferring} onClose={() => setTransferring(null)} /> : null}
     </div>
   );
 }
 
-function InviteModal({
-  open,
-  onClose,
-  onCreated,
-}: {
-  open: boolean;
-  onClose(): void;
-  onCreated(info: { email: string; password: string }): void;
-}) {
+function InviteModal({ open, onClose, onCreated }: { open: boolean; onClose(): void; onCreated(info: CodeInfo): void }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("member");
@@ -162,6 +214,9 @@ function InviteModal({
             <option value="viewer">viewer</option>
           </Select>
         </Field>
+        <p className="text-xs text-muted-foreground">
+          They get a one-time setup code to choose their own password — no passwords change hands.
+        </p>
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="ghost" size="sm" onClick={onClose}>
@@ -175,35 +230,40 @@ function InviteModal({
               { name: name.trim(), email: email.trim(), role },
               {
                 onSuccess: (r) => {
-                  const res = r as { user: User; oneTimePassword: string };
+                  const res = r as { user: User; setupCode: string };
                   onClose();
-                  onCreated({ email: res.user.email, password: res.oneTimePassword });
+                  setName("");
+                  setEmail("");
+                  setRole("member");
+                  onCreated({ email: res.user.email, code: res.setupCode, kind: "setup" });
                 },
               },
             )
           }
         >
-          Create
+          Invite
         </Button>
       </div>
     </Modal>
   );
 }
 
-function OneTimePasswordModal({ info, onClose }: { info: { email: string; password: string }; onClose(): void }) {
+/** Display-once modal for setup/reset codes (mirrors the old password modal). */
+function CodeModal({ info, onClose }: { info: CodeInfo; onClose(): void }) {
   return (
-    <Modal open onClose={onClose} title="One-time password">
+    <Modal open onClose={onClose} title={info.kind === "setup" ? "One-time setup code" : "One-time reset code"}>
       <p className="mb-3 text-sm text-muted-foreground">
-        Share this with <span className="font-medium text-foreground">{info.email}</span>. It is shown once — they should change it after
-        signing in.
+        Share this code with <span className="font-medium text-foreground">{info.email}</span>. It is shown once and works once — they
+        use it to {info.kind === "setup" ? "set their password and activate their account" : "choose a new password"}.
+        {info.kind === "reset" ? " They have been signed out everywhere." : " Any earlier code no longer works."}
       </p>
       <div className="flex items-center gap-2 rounded-lg bg-muted p-3">
-        <code className="flex-1 font-mono text-sm">{info.password}</code>
+        <code className="flex-1 font-mono text-sm">{info.code}</code>
         <Button
           variant="ghost"
           size="icon-xs"
           onClick={() => {
-            navigator.clipboard.writeText(info.password);
+            navigator.clipboard.writeText(info.code);
             toast.success("Copied");
           }}
         >
@@ -213,6 +273,57 @@ function OneTimePasswordModal({ info, onClose }: { info: { email: string; passwo
       <div className="mt-4 flex justify-end">
         <Button size="sm" onClick={onClose}>
           Done
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+function DeleteUserModal({ user, onClose }: { user: User; onClose(): void }) {
+  const [confirmText, setConfirmText] = useState("");
+  const del = useOp("user.delete", { successToast: "User permanently deleted", onSuccess: onClose });
+  const confirmed = confirmText.trim().toLowerCase() === user.email.toLowerCase();
+
+  return (
+    <Modal open onClose={onClose} title="Delete user permanently">
+      <p className="text-sm text-muted-foreground">
+        This permanently deletes <span className="font-medium text-foreground">{user.name}</span> ({user.email}): their login, sessions,
+        agent keys and private views are removed. Records they worked on remain and show{" "}
+        <span className="font-medium text-foreground">Deleted user</span>. This cannot be undone.
+      </p>
+      <div className="mt-3">
+        <Field label="Confirm" hint={`Type ${user.email} to confirm`}>
+          <Input value={confirmText} autoFocus placeholder={user.email} onChange={(e) => setConfirmText(e.target.value)} />
+        </Field>
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button variant="destructive" size="sm" disabled={!confirmed || del.isPending} onClick={() => del.mutate({ id: user.id })}>
+          Delete permanently
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+function TransferOwnershipModal({ user, onClose }: { user: User; onClose(): void }) {
+  const transfer = useOp("user.transferOwnership", { successToast: "Ownership transferred", onSuccess: onClose });
+
+  return (
+    <Modal open onClose={onClose} title="Transfer ownership">
+      <p className="text-sm text-muted-foreground">
+        Make <span className="font-medium text-foreground">{user.name}</span> ({user.email}) the workspace owner. Both changes happen
+        together: they become <span className="font-medium text-foreground">owner</span> and you become{" "}
+        <span className="font-medium text-foreground">admin</span>. Only the new owner can transfer ownership back.
+      </p>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button size="sm" disabled={transfer.isPending} onClick={() => transfer.mutate({ toUserId: user.id })}>
+          <Crown className="size-3.5" /> Transfer ownership
         </Button>
       </div>
     </Modal>

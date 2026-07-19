@@ -106,6 +106,10 @@ beforeAll(async () => {
   db = openDatabase(dbPath);
   runtime = createRuntime(db);
   workspaceId = runtime.bootstrapResult.workspaceId;
+  // Bootstrap creates the owner PENDING (OpenAuth setup-code flow); an MCP
+  // key is only live while its creating user is active — simulate the
+  // completed first login before minting the key.
+  db.$client.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(runtime.bootstrapResult.ownerUserId);
   const owner: RequestContext = {
     workspaceId,
     actorType: "human",

@@ -2,6 +2,7 @@
  * Drizzle schema (SQLite dialect). Timestamps are ISO-8601 TEXT in UTC.
  * JSON columns use text with JSON.stringify (typed at the repository layer).
  */
+import { sql } from "drizzle-orm";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 // --- Global (not workspace-scoped) ------------------------------------------
@@ -22,12 +23,19 @@ export const users = sqliteTable(
     id: text("id").primaryKey(),
     email: text("email").notNull(),
     name: text("name").notNull(),
+    /** Legacy pre-OpenAuth hash; login credentials live in openauth_kv now. */
     passwordHash: text("password_hash"),
+    /** Lifecycle: pending (invited, no credential yet) | active | disabled. */
+    status: text("status").notNull().default("active"),
+    /** OpenAuth subject, bound once on first successful login (unique). */
+    authSubject: text("auth_subject"),
+    /** While 1, every operation except password change/logout/whoami is refused. */
+    passwordMustChange: integer("password_must_change").notNull().default(0),
     disabledAt: text("disabled_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
-  (t) => [uniqueIndex("users_email_ux").on(t.email)],
+  (t) => [uniqueIndex("users_email_ux").on(t.email), uniqueIndex("users_auth_subject_ux").on(t.authSubject)],
 );
 
 export const memberships = sqliteTable(
@@ -39,7 +47,13 @@ export const memberships = sqliteTable(
     role: text("role").notNull(),
     createdAt: text("created_at").notNull(),
   },
-  (t) => [uniqueIndex("memberships_ws_user_ux").on(t.workspaceId, t.userId)],
+  (t) => [
+    uniqueIndex("memberships_ws_user_ux").on(t.workspaceId, t.userId),
+    // pg-parity invariants (docs/issues/0022): one membership per user…
+    uniqueIndex("memberships_user_ux").on(t.userId),
+    // …and exactly one owner per workspace (partial unique index).
+    uniqueIndex("memberships_owner_ux").on(t.workspaceId).where(sql`role = 'owner'`),
+  ],
 );
 
 export const sessions = sqliteTable(
@@ -47,7 +61,14 @@ export const sessions = sqliteTable(
   {
     id: text("id").primaryKey(),
     tokenHash: text("token_hash").notNull(),
-    userId: text("user_id").notNull(),
+    /** NULL while a verified identity awaits hosted provisioning (v6). */
+    userId: text("user_id"),
+    /** Adoption key for user-less sessions: the verified, normalized email. */
+    email: text("email"),
+    /** OpenAuth subject this session was minted for (claims are never authority). */
+    authSubject: text("auth_subject"),
+    /** OpenAuth refresh token backing this session, revoked on logout. */
+    authRefresh: text("auth_refresh"),
     expiresAt: text("expires_at").notNull(),
     createdAt: text("created_at").notNull(),
   },
@@ -489,6 +510,41 @@ export const auditEvents = sqliteTable(
     index("audit_ws_ix").on(t.workspaceId, t.createdAt),
     index("audit_entity_ix").on(t.entityType, t.entityId),
   ],
+);
+
+// --- Authentication (OpenAuth issuer + CRM code bookkeeping) ----------------
+
+/**
+ * OpenAuth's StorageAdapter backing table. Keys are OpenAuth's segment arrays
+ * joined with 0x1f; values are JSON; expiry is epoch millis (null = none).
+ * OpenAuth owns everything in here: password hashes, signing/encryption keys,
+ * authorization codes, refresh tokens, email→subject bindings.
+ */
+export const openauthKv = sqliteTable("openauth_kv", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  expiry: integer("expiry"),
+}, (t) => [index("openauth_kv_expiry_ix").on(t.expiry)]);
+
+/**
+ * CRM-issued single-use setup/reset codes (docs/auth-api.md): hashed at rest,
+ * expiring, attempt-capped; regeneration invalidates earlier codes of the
+ * same purpose (used_at is also set when a code is superseded).
+ */
+export const authCodes = sqliteTable(
+  "auth_codes",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    email: text("email").notNull(),
+    purpose: text("purpose").notNull(), // 'setup' | 'reset'
+    codeHash: text("code_hash").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    usedAt: text("used_at"),
+  },
+  (t) => [index("auth_codes_user_ix").on(t.userId, t.purpose), index("auth_codes_email_ix").on(t.email, t.createdAt)],
 );
 
 export const schemaMigrations = sqliteTable("schema_migrations", {

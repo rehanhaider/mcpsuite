@@ -59,11 +59,13 @@ import {
   type TaggableType,
   type TrustProfile,
   type User,
+  type UserStatus,
   type Workspace,
   type WorkspaceSettings,
 } from "@emcp/core";
 import type { Db } from "./connection.ts";
 import * as t from "./schema.ts";
+import { endUserSessions, issueAuthCode, removeOpenAuthCredential, invalidateSubjectRefreshTokens } from "./openauth.ts";
 
 type Row<T> = T extends { $inferSelect: infer R } ? R : never;
 
@@ -295,7 +297,9 @@ const mapUser = (r: Row<typeof t.users>, role: Role): User => ({
   email: r.email,
   name: r.name,
   role,
-  hasPassword: r.passwordHash != null,
+  status: r.status as UserStatus,
+  // Pre-OpenAuth column; a bound auth subject means a live OpenAuth credential.
+  hasPassword: r.passwordHash != null || r.authSubject != null,
   disabledAt: r.disabledAt,
   createdAt: r.createdAt,
 });
@@ -446,10 +450,19 @@ export function createPorts(db: Db, workspaceId: string): Ports {
     async update(id, patch) {
       const now = nowIso();
       if (patch.name !== undefined || patch.disabledAt !== undefined) {
+        const current = patch.disabledAt !== undefined ? db.select().from(t.users).where(eq(t.users.id, id)).get() : null;
         db.update(t.users)
           .set({
             ...(patch.name !== undefined ? { name: patch.name } : {}),
-            ...(patch.disabledAt !== undefined ? { disabledAt: patch.disabledAt } : {}),
+            ...(patch.disabledAt !== undefined
+              ? {
+                  disabledAt: patch.disabledAt,
+                  // Keep status in lockstep: disabling wins; re-enabling goes
+                  // back to active only once an auth subject was ever bound,
+                  // otherwise the user is still pending setup.
+                  status: patch.disabledAt != null ? "disabled" : current?.authSubject ? "active" : "pending",
+                }
+              : {}),
             updatedAt: now,
           })
           .where(eq(t.users.id, id))
@@ -472,9 +485,109 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return db.select({ n: count() }).from(t.users).get()?.n ?? 0;
     },
     async deleteSessions(userId) {
-      // Hard delete: a disabled user's sessions are gone for good — re-enabling
-      // the user restores nothing (docs/issues/0022).
-      return db.delete(t.sessions).where(eq(t.sessions.userId, userId)).run().changes;
+      // Hard delete: a disabled user's sessions (and the OpenAuth refresh
+      // tokens behind them) are gone for good — re-enabling the user restores
+      // nothing (docs/issues/0022).
+      return endUserSessions(db, userId);
+    },
+    // Creates a `pending` user + membership (no credential); email must be free; role may not be owner.
+    async createPending(input) {
+      const email = input.email.trim().toLowerCase();
+      if (input.role === "owner") {
+        throw OpError.validation("A pending user cannot be created as owner — transfer ownership after activation");
+      }
+      if (db.select().from(t.users).where(eq(t.users.email, email)).get()) {
+        throw new OpError("conflict", `A user with email ${email} already exists`);
+      }
+      const id = newId();
+      const now = nowIso();
+      return tx(async () => {
+        db.insert(t.users)
+          .values({ id, email, name: input.name, passwordHash: null, status: "pending", createdAt: now, updatedAt: now })
+          .run();
+        db.insert(t.memberships).values({ id: newId(), workspaceId: ws, userId: id, role: input.role, createdAt: now }).run();
+        return { userId: id };
+      });
+    },
+    // Permanent deletion cascade (docs/issues/0022): user, credentials/subject
+    // link, sessions, memberships, MCP clients, private saved views; business
+    // records remain (actors render as "Deleted user"); ownerships/tasks unassigned.
+    async deletePermanently(userId) {
+      const user = db.select().from(t.users).where(eq(t.users.id, userId)).get();
+      if (!user) throw OpError.notFound("user", userId);
+      const membership = db.select().from(t.memberships).where(eq(t.memberships.userId, userId)).get();
+      if (membership?.role === "owner") {
+        throw new OpError("invalid_state", "The workspace owner cannot be deleted — transfer ownership first");
+      }
+      await tx(async () => {
+        endUserSessions(db, userId);
+        db.delete(t.mcpClients).where(eq(t.mcpClients.createdByUserId, userId)).run();
+        db.delete(t.memberships).where(eq(t.memberships.userId, userId)).run();
+        db.delete(t.authCodes).where(eq(t.authCodes.userId, userId)).run();
+        // Private saved views go; shared ones survive without an owner.
+        db.delete(t.savedViews).where(and(eq(t.savedViews.ownerUserId, userId), eq(t.savedViews.visibility, "private"))).run();
+        db.update(t.savedViews).set({ ownerUserId: null }).where(eq(t.savedViews.ownerUserId, userId)).run();
+        // Unassign ownerships and task assignments; historical actor ids stay
+        // and render as "Deleted user" (no name/email is retained anywhere).
+        db.update(t.companies).set({ ownerUserId: null }).where(eq(t.companies.ownerUserId, userId)).run();
+        db.update(t.people).set({ ownerUserId: null }).where(eq(t.people.ownerUserId, userId)).run();
+        db.update(t.engagements).set({ ownerUserId: null }).where(eq(t.engagements.ownerUserId, userId)).run();
+        db.update(t.deals).set({ ownerUserId: null }).where(eq(t.deals.ownerUserId, userId)).run();
+        db.update(t.offerings).set({ ownerUserId: null }).where(eq(t.offerings.ownerUserId, userId)).run();
+        db.update(t.activities).set({ assigneeUserId: null }).where(eq(t.activities.assigneeUserId, userId)).run();
+        // OpenAuth credential + subject binding + refresh tokens.
+        await removeOpenAuthCredential(db, user.email);
+        if (user.authSubject) await invalidateSubjectRefreshTokens(db, user.authSubject);
+        db.delete(t.users).where(eq(t.users.id, userId)).run();
+      });
+    },
+    // Atomic owner transfer: target must be an active same-workspace user;
+    // previous owner becomes admin; exactly one owner holds throughout.
+    async transferOwnership(fromUserId, toUserId) {
+      await tx(async () => {
+        const from = db
+          .select()
+          .from(t.memberships)
+          .where(and(eq(t.memberships.workspaceId, ws), eq(t.memberships.userId, fromUserId)))
+          .get();
+        if (!from || from.role !== "owner") {
+          throw new OpError("invalid_state", "Ownership can only be transferred from the current owner");
+        }
+        const to = db
+          .select()
+          .from(t.memberships)
+          .where(and(eq(t.memberships.workspaceId, ws), eq(t.memberships.userId, toUserId)))
+          .get();
+        if (!to) throw OpError.notFound("user", toUserId);
+        const target = db.select().from(t.users).where(eq(t.users.id, toUserId)).get();
+        if (!target || target.status !== "active" || target.disabledAt) {
+          throw new OpError("invalid_state", "Ownership can only be transferred to an active user");
+        }
+        // Demote first so the one-owner-per-workspace unique index holds.
+        db.update(t.memberships).set({ role: "admin" }).where(eq(t.memberships.id, from.id)).run();
+        db.update(t.memberships).set({ role: "owner" }).where(eq(t.memberships.id, to.id)).run();
+      });
+    },
+  };
+
+  // --- credentials ---------------------------------------------------------
+
+  const credentialsPort: Ports["credentials"] = {
+    // Issues a hashed single-use setup/reset code (invalidates prior codes of
+    // that purpose; reset also ends the user's sessions). Raw code returned once.
+    async issueCode(userId, purpose) {
+      const { code } = await issueAuthCode(db, { userId, purpose });
+      return { code };
+    },
+    // Sets/clears password_must_change; the op layer refuses everything except
+    // password change/logout/whoami while set (password_change_required).
+    async mustChangePassword(userId, flag) {
+      const changed = db
+        .update(t.users)
+        .set({ passwordMustChange: flag ? 1 : 0, updatedAt: nowIso() })
+        .where(eq(t.users.id, userId))
+        .run().changes;
+      if (changed === 0) throw OpError.notFound("user", userId);
     },
   };
 
@@ -2434,6 +2547,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
     pendingActions: pendingPort,
     audit: auditPort,
     mcpClients: mcpClientsPort,
+    credentials: credentialsPort,
     search: searchPort,
     maintenance: maintenancePort,
     tx,

@@ -424,4 +424,73 @@ UPDATE mcp_clients SET created_by_user_id = (
   LIMIT 1
 ) WHERE created_by_user_id IS NULL;`,
   },
+  {
+    version: 5,
+    // Database-backed OpenAuth identity (docs/issues/0022, docs/auth-api.md):
+    // user lifecycle status + one-time auth-subject binding + forced password
+    // change; OpenAuth's KV storage (credentials/keys/tokens — the CRM stops
+    // storing login passwords); CRM-issued setup/reset code bookkeeping;
+    // sessions linked to the OpenAuth subject; and the pg-parity invariants —
+    // one membership per user, one owner per workspace.
+    name: "v5-openauth-identity",
+    sql: `
+ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE users ADD COLUMN auth_subject TEXT;
+ALTER TABLE users ADD COLUMN password_must_change INTEGER NOT NULL DEFAULT 0;
+UPDATE users SET status = 'disabled' WHERE disabled_at IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_auth_subject_ux ON users(auth_subject);
+
+ALTER TABLE sessions ADD COLUMN auth_subject TEXT;
+ALTER TABLE sessions ADD COLUMN auth_refresh TEXT;
+
+CREATE TABLE IF NOT EXISTS openauth_kv (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  expiry INTEGER
+);
+CREATE INDEX IF NOT EXISTS openauth_kv_expiry_ix ON openauth_kv(expiry);
+
+CREATE TABLE IF NOT EXISTS auth_codes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS auth_codes_user_ix ON auth_codes(user_id, purpose);
+CREATE INDEX IF NOT EXISTS auth_codes_email_ix ON auth_codes(email, created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS memberships_user_ux ON memberships(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS memberships_owner_ux ON memberships(workspace_id) WHERE role = 'owner';`,
+  },
+  {
+    version: 6,
+    // Hosted open registration (docs/auth-api.md §Hosted open registration):
+    // a verified OpenAuth identity may hold a session BEFORE its CRM user
+    // exists (trial-first signup provisions the workspace after email
+    // verification). user_id becomes nullable; email is the adoption key the
+    // session resolver uses to bind the user once provisioning creates it.
+    name: "v6-unprovisioned-sessions",
+    sql: `
+ALTER TABLE sessions RENAME TO sessions_v5;
+CREATE TABLE sessions (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL,
+  user_id TEXT,
+  email TEXT,
+  auth_subject TEXT,
+  auth_refresh TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+INSERT INTO sessions (id, token_hash, user_id, email, auth_subject, auth_refresh, expires_at, created_at)
+  SELECT id, token_hash, user_id, NULL, auth_subject, auth_refresh, expires_at, created_at FROM sessions_v5;
+DROP TABLE sessions_v5;
+CREATE INDEX IF NOT EXISTS sessions_token_ix ON sessions(token_hash);
+CREATE INDEX IF NOT EXISTS sessions_user_ix ON sessions(user_id);`,
+  },
 ];

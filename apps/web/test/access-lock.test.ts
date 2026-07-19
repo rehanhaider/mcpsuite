@@ -33,6 +33,9 @@ let workspaceId: string;
 beforeAll(() => {
   const runtime = getRuntime(); // opens the temp DB and bootstraps the owner
   workspaceId = runtime.bootstrapResult.workspaceId;
+  // Bootstrap creates the owner PENDING (OpenAuth setup-code flow); sessions
+  // only resolve for active users — simulate the completed first login.
+  runtime.db.$client.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(runtime.bootstrapResult.ownerUserId);
   const { token } = createSession(runtime.db, runtime.bootstrapResult.ownerUserId);
   cookie = `emcp_session=${encodeURIComponent(token)}`;
 });

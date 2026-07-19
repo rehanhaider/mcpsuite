@@ -7,7 +7,7 @@
  *   curl -b "emcp_session=…" http://localhost:2222/api/me
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntimeAsync, resolveSession, resolveWorkspaceAccess } from "@emcp/db";
+import { getRuntimeAsync, isUnprovisionedSession, resolveSessionAny, resolveWorkspaceAccess } from "@emcp/db";
 
 export const Route = createFileRoute("/api/me")({
   server: {
@@ -19,21 +19,39 @@ export const Route = createFileRoute("/api/me")({
           // cannot authenticate this surface (hosted identity is separate).
           return Response.json({ error: "unauthorized" }, { status: 401 });
         }
-        const session = resolveSession(runtime.db, cookieValue(request.headers.get("cookie"), "emcp_session"));
+        const session = resolveSessionAny(runtime.db, cookieValue(request.headers.get("cookie"), "emcp_session"));
         if (!session) {
           return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+        if (isUnprovisionedSession(session)) {
+          // Hosted open registration (docs/auth-api.md): verified identity,
+          // workspace not provisioned yet — the signup page reads this state
+          // to drive provisioning. Workspace facts are null by contract.
+          return Response.json({
+            userId: null,
+            subject: session.authSubject,
+            email: session.email,
+            name: null,
+            role: null,
+            workspaceId: null,
+            accessMode: "active",
+            accessExpiresAt: null,
+            provisioned: false,
+          });
         }
         // Stays available while the workspace is locked; carries the generic
         // access state so first-party pages (e.g. /account) can react.
         const access = resolveWorkspaceAccess(runtime.db, session.workspaceId);
         return Response.json({
           userId: session.user.id,
+          subject: session.authSubject,
           email: session.user.email,
           name: session.user.name,
           role: session.role,
           workspaceId: session.workspaceId,
           accessMode: access.mode,
           accessExpiresAt: access.expiresAt,
+          provisioned: true,
         });
       },
     },

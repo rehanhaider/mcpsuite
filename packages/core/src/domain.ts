@@ -124,11 +124,20 @@ export const zWorkspaceUpdate = z.object({
   prefixes: z.record(z.string().min(1).max(12)).optional(),
 });
 
+/**
+ * User lifecycle (docs/issues/0022): `pending` = invited/bootstrapped, has a
+ * setup code but no credential yet; `active` = completed first login (auth
+ * subject bound); `disabled` = administratively disabled (sessions and MCP
+ * keys revoked; nothing restored on re-enable).
+ */
+export type UserStatus = "pending" | "active" | "disabled";
+
 export interface User {
   id: string;
   email: string;
   name: string;
   role: Role;
+  status: UserStatus;
   hasPassword: boolean;
   disabledAt: string | null;
   createdAt: string;

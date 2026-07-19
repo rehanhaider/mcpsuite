@@ -35,8 +35,14 @@ function assertCanManageClient(op: OpCtx, client: McpClient): void {
 }
 
 export interface AuthServices {
-  hashPassword(password: string): string;
-  generatePassword(): string;
+  /**
+   * Legacy password helpers. User creation and password recovery now flow
+   * through single-use setup/reset codes (`ports.credentials.issueCode`), so
+   * catalog operations no longer consume these; they remain optional for
+   * bootstrap-side callers (first-run owner provisioning).
+   */
+  hashPassword?(password: string): string;
+  generatePassword?(): string;
   /** Returns { token, hash, prefix } for a new MCP API key. */
   generateMcpToken(): { token: string; hash: string; prefix: string };
 }
@@ -88,9 +94,9 @@ export function buildAdminOps(auth: AuthServices) {
 
     defineOperation({
       name: "user.create",
-      title: "Create user",
+      title: "Invite user",
       description:
-        "Create a team user with a role. Returns a generated one-time password (shown once) the user must change.",
+        "Invite a team user with a role. Creates a PENDING user and returns a single-use setup code (shown once) with which the user sets their own password. There is no admin-supplied initial password.",
       input: z.object({
         name: z.string().min(1).max(120),
         email: z.string().email().max(320),
@@ -100,24 +106,52 @@ export function buildAdminOps(auth: AuthServices) {
       scope: "admin",
       risk: "admin",
       handler: async (op, input) => {
-        if (input.role === "owner") throw OpError.validation("There can only be one owner; use role admin");
-        if (await op.ports.users.getByEmail(input.email)) {
-          throw new OpError("conflict", `A user with email ${input.email} already exists`);
+        if (input.role === "owner") {
+          throw OpError.validation("There can only be one owner; invite an admin and use user.transferOwnership");
         }
-        const password = auth.generatePassword();
-        const user = await op.ports.users.create({
-          name: input.name,
-          email: input.email.toLowerCase(),
-          role: input.role as Role,
-          passwordHash: auth.hashPassword(password),
-        });
+        const email = input.email.toLowerCase();
+        if (await op.ports.users.getByEmail(email)) {
+          throw new OpError("conflict", `A user with email ${email} already exists`);
+        }
+        const { userId } = await op.ports.users.createPending({ email, name: input.name, role: input.role as Role });
+        const { code } = await op.ports.credentials.issueCode(userId, "setup");
+        const user = found(await op.ports.users.get(userId), "user", userId);
         await audit(op, {
           operation: "user.create",
           entityType: "user",
-          entityId: user.id,
-          summary: `Created user ${input.email} (${input.role})`,
+          entityId: userId,
+          summary: `Invited user ${email} (${input.role})`,
         });
-        return { user, oneTimePassword: password };
+        // The raw code lives ONLY in this result so a self-host admin can hand
+        // it over manually; hosted deployments deliver it via the configured
+        // mailer at the credentials seam instead of displaying it. It is never
+        // audited or logged, and only its hash is stored.
+        return { user, setupCode: code };
+      },
+    }),
+
+    defineOperation({
+      name: "user.regenerateSetupCode",
+      title: "Regenerate setup code",
+      description:
+        "Issue a fresh single-use setup code for a still-pending user. All previously issued codes are invalidated. Returns the new code once.",
+      input: z.object({ id: zId }),
+      minRole: "admin",
+      scope: "admin",
+      risk: "admin",
+      handler: async (op, { id }) => {
+        const user = found(await op.ports.users.get(id), "user", id);
+        if (user.status !== "pending") {
+          throw new OpError("invalid_state", "Only pending users have setup codes — use user.resetPassword for users who already completed setup");
+        }
+        const { code } = await op.ports.credentials.issueCode(id, "setup");
+        await audit(op, {
+          operation: "user.regenerateSetupCode",
+          entityType: "user",
+          entityId: id,
+          summary: `Regenerated setup code for ${user.email}`,
+        });
+        return { setupCode: code };
       },
     }),
 
@@ -136,10 +170,12 @@ export function buildAdminOps(auth: AuthServices) {
       risk: "admin",
       handler: async (op, { id, disabled, ...patch }) => {
         const user = found(await op.ports.users.get(id), "user", id);
+        // Only the owner role is protected: admins manage everyone else,
+        // including other admins (docs/issues/0022).
         if (user.role === "owner" && (patch.role || disabled)) {
           throw OpError.validation("The owner account cannot be demoted or disabled");
         }
-        if (patch.role === "owner") throw OpError.validation("Ownership transfer is not supported yet");
+        if (patch.role === "owner") throw OpError.validation("Use user.transferOwnership to change the workspace owner");
         const updated = await op.ports.users.update(id, {
           ...definedOnly(patch),
           ...(disabled === undefined ? {} : { disabledAt: disabled ? new Date().toISOString() : null }),
@@ -169,7 +205,8 @@ export function buildAdminOps(auth: AuthServices) {
     defineOperation({
       name: "user.resetPassword",
       title: "Reset user password",
-      description: "Generate a new one-time password for a user (shown once).",
+      description:
+        "Issue a single-use password-reset code for a user (shown once). Ends all of the user's sessions and invalidates earlier codes; the user chooses their new password with the code. There is no temporary password.",
       input: z.object({ id: zId }),
       minRole: "admin",
       scope: "admin",
@@ -177,10 +214,93 @@ export function buildAdminOps(auth: AuthServices) {
       handler: async (op, { id }) => {
         const user = found(await op.ports.users.get(id), "user", id);
         if (user.role === "owner" && op.ctx.role !== "owner") throw OpError.forbidden("Only the owner can reset the owner password");
-        const password = auth.generatePassword();
-        await op.ports.users.setPassword(id, auth.hashPassword(password));
-        await audit(op, { operation: "user.resetPassword", entityType: "user", entityId: id, summary: `Reset password for ${user.email}` });
-        return { oneTimePassword: password };
+        if (user.status === "pending") {
+          throw new OpError("invalid_state", "This user has not completed setup — use user.regenerateSetupCode instead");
+        }
+        // The credentials seam invalidates prior codes and ends every session.
+        // Self-host shows the code once to the admin; hosted delivery mails it.
+        const { code } = await op.ports.credentials.issueCode(id, "reset");
+        await audit(op, { operation: "user.resetPassword", entityType: "user", entityId: id, summary: `Issued password reset code for ${user.email}` });
+        return { resetCode: code };
+      },
+    }),
+
+    defineOperation({
+      name: "user.delete",
+      title: "Delete user permanently",
+      description:
+        "PERMANENTLY delete a user. Removes their login, sessions, MCP clients and private data; business records and history survive and show \"Deleted user\". Cannot be undone. The owner cannot be deleted — transfer ownership first.",
+      input: z.object({ id: zId }),
+      minRole: "admin",
+      scope: "admin",
+      risk: "destructive",
+      handler: async (op, { id }) => {
+        const user = found(await op.ports.users.get(id), "user", id);
+        if (user.role === "owner") {
+          throw OpError.validation("The owner cannot be deleted — transfer ownership first with user.transferOwnership");
+        }
+        if (op.ctx.userId === id) {
+          const otherAdmins = (await op.ports.users.list()).filter(
+            (u) => u.id !== id && u.status === "active" && roleAtLeast(u.role, "admin"),
+          );
+          if (otherAdmins.length === 0) {
+            throw new OpError("invalid_state", "You are the last active administrator — you cannot delete your own account");
+          }
+        }
+        const ownedClients = (await op.ports.mcpClients.list()).filter((c) => c.createdByUserId === id && !c.revokedAt);
+        const endedSessions = (await op.ports.users.deleteSessions?.(id)) ?? 0;
+        await op.ports.users.deletePermanently(id);
+        // Deliberately no name/email here: after deletion nothing may retain
+        // them, and historical actor references render as "Deleted user"
+        // (docs/issues/0022).
+        await audit(op, {
+          operation: "user.delete",
+          entityType: "user",
+          entityId: id,
+          summary: `Permanently deleted a ${user.role} user`,
+          meta: { role: user.role, endedSessions, removedMcpClients: ownedClients.length },
+        });
+        return { deleted: true, endedSessions, removedMcpClients: ownedClients.length };
+      },
+    }),
+
+    defineOperation({
+      name: "user.transferOwnership",
+      title: "Transfer ownership",
+      description:
+        "Transfer the workspace owner role to another ACTIVE user. Only the current owner can do this. Both role changes happen atomically: the target becomes owner and the previous owner becomes admin.",
+      input: z.object({ toUserId: zId }),
+      minRole: "owner",
+      scope: "admin",
+      risk: "admin",
+      handler: async (op, { toUserId }) => {
+        // The actor must BE the owner — admin is not enough. This also holds on
+        // the approval path: an approving admin executes as themselves and is
+        // rejected here. (The audited hosting-control recovery seam runs as a
+        // system actor with the owner role and a null userId.)
+        if (op.ctx.role !== "owner") throw OpError.forbidden("Only the current owner can transfer ownership");
+        const current = (await op.ports.users.list()).find((u) => u.role === "owner");
+        if (!current) throw new OpError("invalid_state", "This workspace has no owner user");
+        if (op.ctx.userId && op.ctx.userId !== current.id) {
+          throw OpError.forbidden("Only the current owner can transfer ownership");
+        }
+        const target = found(await op.ports.users.get(toUserId), "user", toUserId);
+        if (target.id === current.id) throw OpError.validation("This user already owns the workspace");
+        if (target.status !== "active") {
+          throw OpError.validation(`Ownership can only be transferred to an active user (${target.email} is ${target.status})`);
+        }
+        await op.ports.users.transferOwnership(current.id, toUserId);
+        await audit(op, {
+          operation: "user.transferOwnership",
+          entityType: "user",
+          entityId: toUserId,
+          summary: `Transferred workspace ownership to ${target.email}`,
+          meta: { fromUserId: current.id, toUserId },
+        });
+        return {
+          from: found(await op.ports.users.get(current.id), "user", current.id),
+          to: found(await op.ports.users.get(toUserId), "user", toUserId),
+        };
       },
     }),
 

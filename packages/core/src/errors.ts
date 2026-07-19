@@ -13,6 +13,13 @@ export type OpErrorCode =
   | "invalid_state"
   /** Hosted deployments: the workspace's generic access state is locked. */
   | "workspace_locked"
+  /**
+   * The caller's account has `password_must_change` set: authentication
+   * succeeded but every operation except changing the password, logout and
+   * whoami is refused until the user sets their own password
+   * (docs/issues/0022 addendum).
+   */
+  | "password_change_required"
   | "internal";
 
 export class OpError extends Error {
