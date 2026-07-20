@@ -2,8 +2,8 @@
  * Hosting-control's own SQLite tables and row helpers.
  *
  * These tables live in the same database file as the CRM but are owned and
- * created by THIS package on open — packages/db's versioned migrations are
- * never touched. All access goes through the raw better-sqlite3 client
+ * created by THIS package on open — packages/db's schema is never touched.
+ * All access goes through the raw better-sqlite3 client
  * (`db.$client`) so this package stays compatible with the sync drizzle
  * handle regardless of how the ports/catalog layer evolves.
  *

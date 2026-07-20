@@ -10,7 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "migrate": "tsx src/scripts/migrate.ts",
+    "setup": "tsx src/scripts/setup.ts",
     "smoke": "tsx src/scripts/smoke.ts",
     "reset-owner": "tsx src/scripts/reset-owner.ts"
   },

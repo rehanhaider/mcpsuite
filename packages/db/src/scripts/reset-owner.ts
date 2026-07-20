@@ -15,7 +15,7 @@ const db = getDb();
 
 const ownerMembership = db.select().from(t.memberships).where(eq(t.memberships.role, "owner")).get();
 if (!ownerMembership) {
-  console.error(`[emcp] no owner found in ${resolveDbPath()} — run \`pnpm --filter @emcp/db migrate\` first`);
+  console.error(`[emcp] no owner found in ${resolveDbPath()} — run \`pnpm db:setup\` first`);
   process.exit(1);
 }
 const owner = db.select().from(t.users).where(eq(t.users.id, ownerMembership.userId)).get();

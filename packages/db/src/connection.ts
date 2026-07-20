@@ -3,7 +3,7 @@ import { drizzle, type BetterSQLite3Database } from "drizzle-orm/better-sqlite3"
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MIGRATIONS } from "./migrations.ts";
+import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema-sql.ts";
 import * as schema from "./schema.ts";
 
 export type Db = BetterSQLite3Database<typeof schema> & { $client: Database.Database };
@@ -39,7 +39,7 @@ export function openDatabase(path: string): Db {
   sqlite.pragma("synchronous = NORMAL");
   sqlite.pragma("foreign_keys = ON");
 
-  runMigrations(sqlite);
+  initSchema(sqlite);
   return drizzle(sqlite, { schema }) as Db;
 }
 
@@ -56,22 +56,22 @@ export function closeDb(): void {
   }
 }
 
-export function runMigrations(sqlite: Database.Database): void {
-  sqlite.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    applied_at TEXT NOT NULL
-  )`);
-  const applied = new Set(
-    (sqlite.prepare("SELECT version FROM schema_migrations").all() as { version: number }[]).map((r) => r.version),
-  );
-  const insert = sqlite.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)");
-  for (const m of [...MIGRATIONS].sort((a, b) => a.version - b.version)) {
-    if (applied.has(m.version)) continue;
-    const apply = sqlite.transaction(() => {
-      sqlite.exec(m.sql);
-      insert.run(m.version, m.name, new Date().toISOString());
-    });
-    apply();
+/**
+ * Create the full schema when the database is empty (no `workspaces` table),
+ * stamping `PRAGMA user_version = SCHEMA_VERSION`. A non-empty database is
+ * left completely untouched — no upgrade steps exist yet; they ship with the
+ * first post-release schema change, keyed off the user_version stamp. The only
+ * exception: a pre-stamp database (user_version 0) is stamped with version 1.
+ * Legacy dev databases may still contain a `schema_migrations` table from the
+ * retired migration runner — it is ignored entirely (never read nor dropped).
+ */
+export function initSchema(sqlite: Database.Database): void {
+  const hasWorkspaces = sqlite
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'")
+    .get();
+  if (!hasWorkspaces) {
+    sqlite.transaction(() => sqlite.exec(SCHEMA_SQL))();
   }
+  const stamped = Number(sqlite.pragma("user_version", { simple: true }));
+  if (stamped === 0) sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
 }

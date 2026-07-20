@@ -13,7 +13,7 @@
  * - Nested calls (ports.tx(...), or port methods invoking other port methods)
  *   join the ambient transaction via AsyncLocalStorage and cannot replace its
  *   workspace.
- * - Row-level security (migrations/0003_rls.sql) enforces the same predicate
+ * - Row-level security (schema.sql) enforces the same predicate
  *   independently; this adapter STILL writes an explicit workspace predicate
  *   into every query and subquery — two independent layers, per the doc.
  * - Caller-supplied ids that are not uuid-shaped are normalized to the nil
@@ -32,14 +32,14 @@
  * - `maintenance.backup()` throws `forbidden`: hosted physical backups happen
  *   only through private operational credentials, never app surfaces.
  * - `mcpClients.getByTokenHash` is workspace-scoped here; global key
- *   resolution goes through `crm.resolve_mcp_key` (0003), not a port.
+ *   resolution goes through `crm.resolve_mcp_key` (schema.sql), not a port.
  * - Hard deletes also clear company/person list memberships (typed FKs
  *   cascade); SQLite leaves those rows orphaned.
  * - Association storage is typed-per-entity (company_tags, …); the generic
  *   port API is preserved by dispatching on the validated entity type.
  * - Identity-level auth storage (sessions, openauth_kv, auth_codes) carries
  *   zero crm_app grants: session sweeps, code issuance and issuer-state purges
- *   go through the fixed SECURITY DEFINER functions from 0004_auth.sql, called
+ *   go through the fixed SECURITY DEFINER functions from schema.sql, called
  *   inside the same workspace transaction as the triggering mutation
  *   (disable-revocation and permanent user deletion per docs/issues/0022).
  */
@@ -807,7 +807,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
       });
     },
     async deleteSessions(userId) {
-      // crm.sessions carries no runtime grants (0003): the sweep goes through
+      // crm.sessions carries no runtime grants (schema.sql): the sweep goes through
       // the fixed SECURITY DEFINER path, workspace-guarded inside the function.
       return run(async (x) => {
         const rows = await execRows<{ n: number }>(
@@ -955,7 +955,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
     },
   };
 
-  // --- credentials (setup/reset codes; storage model in 0004_auth.sql) ------
+  // --- credentials (setup/reset codes; storage model in schema.sql) ------
 
   const credentialsPort: AsyncPort<Ports["credentials"]> = {
     async issueCode(userId, purpose) {

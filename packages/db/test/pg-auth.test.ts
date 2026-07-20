@@ -1,5 +1,5 @@
 /**
- * OpenAuth identity-model tests for the PostgreSQL adapter (0004_auth.sql):
+ * OpenAuth identity-model tests for the PostgreSQL adapter (schema.sql):
  * user lifecycle status, subject linking, setup/reset code bookkeeping,
  * disable/delete revocation, ownership transfer, and the RLS posture of the
  * identity-level tables (sessions / openauth_kv / auth_codes).
@@ -14,7 +14,7 @@
  *
  * DATABASE_URL must be a superuser/deployment credential (see the isolation
  * suite header for why). To stay parallel-safe with pg-isolation.test.ts in
- * one vitest run, this suite creates and migrates its OWN database
+ * one vitest run, this suite creates and initializes its OWN database
  * (emcp_pg_auth) on the same server and drops it afterwards. Roles are
  * cluster-global and both suites set the same throwaway crm_app password.
  * Without PG_TESTS=1 and DATABASE_URL the whole file self-skips.
@@ -29,7 +29,7 @@ import {
   type PgHandle,
   type PgPorts,
 } from "../src/pg/repositories.ts";
-import { applyPgMigrations } from "../src/pg/migrate.ts";
+import { initPgSchema } from "../src/pg/init.ts";
 import { normalizeAuthCode } from "../src/openauth.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
@@ -112,17 +112,17 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     adminUrl.pathname = `/${AUTH_DB}`;
     admin = await connectPg({ databaseUrl: adminUrl.toString(), max: 2 });
     // Roles are cluster-global; a parallel pg-isolation run may race the
-    // guarded CREATE ROLE blocks in 0002 — retrying is safe (all files are
-    // idempotent per database).
+    // guarded CREATE ROLE block in schema.sql — retrying is safe (the file is
+    // one transaction and the guard is idempotent per database).
     let lastError: unknown = null;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        await applyPgMigrations(admin.pool);
+        await initPgSchema(admin.pool);
         lastError = null;
         break;
       } catch (e) {
         lastError = e;
-        await new Promise((r) => setTimeout(r, 250));
+        await new Promise((r) => setTimeout(r, 500));
       }
     }
     if (lastError) throw lastError;
@@ -436,7 +436,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     ]);
     await app.pool.query("SELECT crm.openauth_kv_remove($1)", ["oauth:refresh:sub-kv:t1"]);
 
-    // Privilege hygiene for every 0004 function: resolver-owned, no PUBLIC
+    // Privilege hygiene for every credential function: resolver-owned, no PUBLIC
     // execute, crm_app only (crm_operator has no credential access).
     const fns = [
       "resolve_user_identity",

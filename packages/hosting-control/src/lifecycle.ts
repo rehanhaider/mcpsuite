@@ -203,7 +203,7 @@ type UserStateRow = {
 /**
  * Resolve a user's auth state: `users.status` (pending | active | disabled)
  * is authoritative, with `disabled_at` honored as a hard override and a
- * legacy fallback (no credential ⇒ pending) for rows read before migration.
+ * legacy fallback (no credential ⇒ pending) for rows predating the status column.
  * Unknown status values count as ineligible.
  */
 export function userAuthState(row: UserStateRow): "pending" | "active" | "disabled" {
@@ -470,7 +470,7 @@ export function initiateOwnerRecovery(db: Db, workspaceId: string, reason: strin
 /**
  * Physically removes every row belonging to the workspace: all
  * workspace-scoped CRM tables (discovered dynamically by their workspace_id
- * column, so tables added by future migrations are covered), users whose only
+ * column, so tables added by future schema changes are covered), users whose only
  * membership was this workspace, and their sessions. The hc_workspace_access
  * row and any queued hc_auth_delivery_outbox rows disappear too;
  * hc_service_audit keeps only one-way hashes.
@@ -517,7 +517,11 @@ export function deleteWorkspacePermanently(db: Db, workspaceId: string): { exist
   return { existed: true };
 }
 
-/** Every non-hc table carrying a workspace_id column, discovered at runtime. */
+/**
+ * Every non-hc table carrying a workspace_id column, discovered at runtime.
+ * (schema_migrations is the retired migration runner's bookkeeping table —
+ * old databases may still carry it; it is ignored, never dropped.)
+ */
 function workspaceScopedTables(db: Db): string[] {
   const tables = db.$client
     .prepare(

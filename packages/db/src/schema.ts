@@ -546,9 +546,3 @@ export const authCodes = sqliteTable(
   },
   (t) => [index("auth_codes_user_ix").on(t.userId, t.purpose), index("auth_codes_email_ix").on(t.email, t.createdAt)],
 );
-
-export const schemaMigrations = sqliteTable("schema_migrations", {
-  version: integer("version").primaryKey(),
-  name: text("name").notNull(),
-  appliedAt: text("applied_at").notNull(),
-});

@@ -1,20 +1,16 @@
 /**
  * OpenAuth identity plumbing (docs/auth-api.md, docs/issues/0022):
- * v5 migration (fresh + from-v4), the KV storage adapter, scrypt credential
- * interop, setup/reset code lifecycle, pending→active subject linking,
- * subject-linked sessions, and the forced-password-change gate.
+ * the KV storage adapter, scrypt credential interop, setup/reset code
+ * lifecycle, pending→active subject linking, subject-linked sessions, and
+ * the forced-password-change gate.
  */
-import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { systemContext } from "@emcp/core";
-import { MIGRATIONS } from "../src/migrations.ts";
-import { openDatabase, runMigrations, type Db } from "../src/connection.ts";
+import { initSchema, type Db } from "../src/connection.ts";
 import * as schema from "../src/schema.ts";
 import { bootstrap } from "../src/bootstrap.ts";
 import { createPorts } from "../src/repositories.ts";
@@ -38,77 +34,16 @@ import {
   verifyOpenAuthPassword,
 } from "../src/openauth.ts";
 
-const tmp = mkdtempSync(join(tmpdir(), "emcp-auth-test-"));
-afterAll(() => rmSync(tmp, { recursive: true, force: true }));
-
 function memoryDb(): Db {
   const sqlite = new Database(":memory:");
   sqlite.pragma("foreign_keys = ON");
-  runMigrations(sqlite);
+  initSchema(sqlite);
   return drizzle(sqlite, { schema }) as Db;
 }
 
 let db: Db;
 beforeEach(() => {
   db = memoryDb();
-});
-
-// ---------------------------------------------------------------------------
-
-describe("v5 migration", () => {
-  it("applies on a fresh database (temp file)", () => {
-    const database = openDatabase(join(tmp, `fresh-${Date.now()}.db`));
-    const versions = database.$client
-      .prepare("SELECT version FROM schema_migrations ORDER BY version")
-      .all() as Array<{ version: number }>;
-    expect(versions.map((v) => v.version)).toEqual([1, 2, 3, 4, 5, 6]);
-    // The new tables and columns exist.
-    database.$client.prepare("SELECT key, value, expiry FROM openauth_kv").all();
-    database.$client.prepare("SELECT id, user_id, email, purpose, code_hash, attempts, expires_at, used_at FROM auth_codes").all();
-    database.$client.prepare("SELECT status, auth_subject, password_must_change FROM users").all();
-    database.$client.prepare("SELECT auth_subject, auth_refresh FROM sessions").all();
-    database.$client.close();
-  });
-
-  it("applies on an existing v4 database, backfilling status from disabled_at", () => {
-    const path = join(tmp, `v4-${Date.now()}.db`);
-    const sqlite = new Database(path);
-    // Build a real v4 database…
-    const upToV4 = MIGRATIONS.filter((m) => m.version <= 4);
-    sqlite.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)");
-    for (const m of upToV4) {
-      sqlite.exec(m.sql);
-      sqlite.prepare("INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(m.version, m.name, "t");
-    }
-    // …with pre-OpenAuth users: one enabled (legacy password), one disabled.
-    sqlite
-      .prepare("INSERT INTO users (id, email, name, password_hash, disabled_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?)")
-      .run("u1", "a@x.test", "A", "scrypt$legacy", null, "t", "t");
-    sqlite
-      .prepare("INSERT INTO users (id, email, name, password_hash, disabled_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?)")
-      .run("u2", "b@x.test", "B", null, "2026-01-01T00:00:00Z", "t", "t");
-    sqlite.close();
-
-    // Reopen through the normal runner: v5 applies on the existing file.
-    const database = openDatabase(path);
-    const rows = database.$client
-      .prepare("SELECT id, status, auth_subject, password_must_change FROM users ORDER BY id")
-      .all() as Array<{ id: string; status: string; auth_subject: string | null; password_must_change: number }>;
-    expect(rows).toEqual([
-      { id: "u1", status: "active", auth_subject: null, password_must_change: 0 },
-      { id: "u2", status: "disabled", auth_subject: null, password_must_change: 0 },
-    ]);
-    // Parity constraints hold: one membership per user, one owner per workspace.
-    database.$client.prepare("INSERT INTO memberships (id, workspace_id, user_id, role, created_at) VALUES ('m1','w1','u1','owner','t')").run();
-    expect(() =>
-      database.$client.prepare("INSERT INTO memberships (id, workspace_id, user_id, role, created_at) VALUES ('m2','w2','u1','member','t')").run(),
-    ).toThrow(/UNIQUE/);
-    expect(() =>
-      database.$client.prepare("INSERT INTO memberships (id, workspace_id, user_id, role, created_at) VALUES ('m3','w1','u2','owner','t')").run(),
-    ).toThrow(/UNIQUE/);
-    database.$client.prepare("INSERT INTO memberships (id, workspace_id, user_id, role, created_at) VALUES ('m4','w1','u2','admin','t')").run();
-    database.$client.close();
-  });
 });
 
 // ---------------------------------------------------------------------------

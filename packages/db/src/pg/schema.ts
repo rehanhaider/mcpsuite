@@ -3,7 +3,7 @@
  * deployment. Mirrors the SQLite schema in `../schema.ts` *semantically*; the
  * authoritative DDL — including every constraint, composite foreign key,
  * row-level-security policy, role and grant — is the hand-written SQL in
- * `./migrations/*.sql`. This module exists so the PostgreSQL adapter
+ * `./schema.sql`. This module exists so the PostgreSQL adapter
  * (`./repositories.ts`) can build queries; it deliberately declares only
  * tables, columns and primary keys (drizzle FK/index declarations would
  * duplicate the SQL and cannot express PG15 `ON DELETE SET NULL (column)`).
@@ -89,9 +89,9 @@ export const users = crm.table("users", {
   email: text("email").notNull(),
   name: text("name").notNull(),
   passwordHash: text("password_hash"),
-  /** 'pending' | 'active' | 'disabled' (0004; CHECK-constrained, coherent with disabledAt). */
+  /** 'pending' | 'active' | 'disabled' (schema.sql; CHECK-constrained, coherent with disabledAt). */
   status: text("status").notNull(),
-  /** Verified OpenAuth `sub`; globally unique when set (partial unique index, 0004). */
+  /** Verified OpenAuth `sub`; globally unique when set (partial unique index, schema.sql). */
   authSubject: text("auth_subject"),
   passwordMustChange: boolean("password_must_change").notNull(),
   disabledAt: ts("disabled_at"),
@@ -110,25 +110,25 @@ export const memberships = crm.table("memberships", {
 /**
  * Global auth-issuer data (doc §"Authentication tables"): RLS-enabled with no
  * policy, so workspace runtime roles can never read it. Identity resolution
- * goes through the narrow SECURITY DEFINER resolvers in migrations/0003.
+ * goes through the narrow SECURITY DEFINER resolvers in schema.sql.
  */
 export const sessions = crm.table("sessions", {
   id: uuid("id").primaryKey(),
   tokenHash: text("token_hash").notNull(),
-  /** NULL while a verified identity awaits hosted provisioning (0005). */
+  /** NULL while a verified identity awaits hosted provisioning (docs/auth-api.md §Hosted open registration). */
   userId: uuid("user_id"),
-  /** Adoption key for user-less sessions (0005). */
+  /** Adoption key for user-less sessions. */
   email: text("email"),
-  /** OpenAuth subject the session was minted for (0004). */
+  /** OpenAuth subject the session was minted for. */
   authSubject: text("auth_subject"),
-  /** Refresh token for logout-time revocation (0004). */
+  /** Refresh token for logout-time revocation. */
   authRefresh: text("auth_refresh"),
   expiresAt: ts("expires_at").notNull(),
   createdAt: ts("created_at").notNull(),
 });
 
 /**
- * OpenAuth issuer key-value storage and setup/reset code bookkeeping (0004).
+ * OpenAuth issuer key-value storage and setup/reset code bookkeeping (schema.sql).
  * Identity-level, NOT workspace-scoped: like crm.sessions they carry
  * RLS-on/no-runtime-policy and zero grants for crm_app/crm_operator, and are
  * reachable only through the fixed SECURITY DEFINER functions
@@ -426,10 +426,8 @@ export const auditEvents = crm.table("audit_events", {
 });
 
 /** Deployment-only metadata; runtime roles have no access (doc §Table classification). */
-export const schemaMigrations = crm.table("schema_migrations", {
-  version: integer("version").primaryKey(),
-  name: text("name").notNull(),
-  appliedAt: ts("applied_at").notNull(),
+export const schemaVersion = crm.table("schema_version", {
+  version: integer("version").notNull(),
 });
 
 // --- Typed association tables (divergence 8) --------------------------------

@@ -14,7 +14,7 @@ SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 _units := $(SVC:web=emcp-web.service)
 _units := $(_units:mcp=emcp-mcp-http.service)
 
-.PHONY: help setup migrate dev build start mcp mcp-http \
+.PHONY: help setup db-setup dev build start mcp mcp-http \
         test typecheck smoke clean deploy \
         autostart autostart-off autostart-status
 
@@ -24,13 +24,13 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 
-setup: ## Install dependencies + create/migrate the database (run this first)
+setup: ## Install dependencies + create the database (run this first)
 	@echo ">>> Installing workspace dependencies..."
 	pnpm install
-	$(MAKE) migrate
+	$(MAKE) db-setup
 
-migrate: ## Apply DB migrations + bootstrap workspace/owner (idempotent)
-	pnpm -s db:migrate
+db-setup: ## Create the DB schema when absent + bootstrap workspace/owner (idempotent)
+	pnpm -s db:setup
 
 dev: ## Start the web UI dev server (http://localhost:2222)
 	pnpm -s dev
@@ -87,3 +87,31 @@ autostart-status: ## Show enabled/active state of the web UI & MCP services
 			"$$(systemctl --user is-enabled $$u 2>/dev/null || echo absent)" \
 			"$$(systemctl --user is-active  $$u 2>/dev/null || echo inactive)"; \
 	done
+
+# -----------------------------------------------------------------------------
+# Release tarball + machine-wide installer (.scripts/release, .scripts/installer)
+# Docs: INSTALL.md
+# -----------------------------------------------------------------------------
+
+RELEASE_SCRIPTS := .scripts/release/build-tarball.sh \
+                   .scripts/release/payload/emcp-run \
+                   .scripts/release/payload/emcp-tsx \
+                   .scripts/installer/install.sh \
+                   .scripts/installer/launcher.sh \
+                   .scripts/installer/emcp
+
+.PHONY: release-tarball release-check
+
+release-tarball: ## Build a self-contained release tarball into dist-release/ (ARCH=x86_64|arm64)
+	bash .scripts/release/build-tarball.sh $(if $(ARCH),--arch $(ARCH))
+
+release-check: ## Syntax-check installer + release scripts (shellcheck when available)
+	@for f in $(RELEASE_SCRIPTS); do \
+		bash -n "$$f" || exit 1; \
+		echo "  bash -n OK   $$f"; \
+	done
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck $(RELEASE_SCRIPTS) && echo "  shellcheck OK"; \
+	else \
+		echo "  (shellcheck not installed — skipped)"; \
+	fi

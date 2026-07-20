@@ -12,27 +12,27 @@ This is a pnpm workspace managed by mise (Node 22 and pnpm 10).
   persistence ports, the operation catalog, and business operations. Browser
   code may import `@emcp/core/domain` and `@emcp/core/policy`; the root barrel
   is server-only.
-- `packages/db` is the only package that touches SQLite. It owns Drizzle
-  schema, versioned migrations, repository implementations, bootstrap, auth,
-  sessions, MCP keys, and the runtime composition.
+- `packages/db` is the only package that touches SQLite. It owns the Drizzle
+  schema, the hand-written SQL schema, repository implementations, bootstrap,
+  auth, sessions, MCP keys, and the runtime composition.
 - `apps/web` is the TanStack Start application. `/` redirects to `/login`; the
   authenticated product lives under `/app/*`; `POST /api/ops/:name` exposes
   the catalog to scripts and future clients. Server functions are in
   `src/server/fns.ts`, and the client data layer is in `src/lib/api.ts`.
 - `apps/mcp` turns catalog operations marked `mcpExpose` into MCP tools. It
   supports authenticated stdio and HTTP transports.
-- `data/emcp.db` is the SQLite WAL database created and migrated on first run.
+- `data/emcp.db` is the SQLite WAL database created on first run.
 
 ## Commands
 
 Run commands through mise so every process receives the same `DB_PATH`.
 
 ```text
-make setup            install dependencies, migrate, and bootstrap
+make setup            install dependencies, create the DB, and bootstrap
 make dev              web development server on :2222
 make build / start    build and serve the production web app
 make mcp / mcp-http   MCP stdio / MCP HTTP on :8765
-make migrate          apply migrations and bootstrap idempotently
+make db-setup         create the DB schema when absent + bootstrap (idempotent)
 make test / typecheck run the automated checks
 make smoke            exercise every catalog operation and clean up
 docker compose up -d  run web and MCP with ./data persisted
@@ -71,8 +71,12 @@ destructive-risk operation.
 - Use semantic theme variables and the existing Base UI primitives. Do not add
   DaisyUI or gradients. Stage and tag colors use the semantic mappings in
   `apps/web/src/lib/colors.ts`.
-- Append schema changes to `MIGRATIONS` and mirror them in `schema.ts`. Never
-  edit an applied migration or modify a live database by hand.
+- Schema changes edit the single hand-written schema (`schema-sql.ts`, and
+  `pg/schema.sql` for the hosted adapter) and mirror it in `schema.ts` —
+  pre-release there are no migrations. In-place upgrade machinery ships with
+  the first post-release schema change, keyed off the version stamp
+  (`PRAGMA user_version` / `crm.schema_version`). Never modify a live
+  database by hand.
 - Model status-like values as workspace data when users need to customize
   them. Money is integer minor units plus ISO currency; dates are ISO strings.
 

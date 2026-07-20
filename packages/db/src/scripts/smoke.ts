@@ -10,7 +10,7 @@ import { users, memberships } from "../schema.ts";
 
 const runtime = createRuntime();
 const membership = runtime.db.select().from(memberships).where(eq(memberships.role, "owner")).get();
-if (!membership) throw new Error("no owner membership — run pnpm db:migrate first");
+if (!membership) throw new Error("no owner membership — run pnpm db:setup first");
 const owner = runtime.db.select().from(users).where(eq(users.id, membership.userId)).get();
 if (!owner) throw new Error("owner user missing");
 const ctx = webContext({

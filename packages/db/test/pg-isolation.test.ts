@@ -37,7 +37,7 @@ import {
   type PgPorts,
   type PgPoolClientLike,
 } from "../src/pg/repositories.ts";
-import { applyPgMigrations } from "../src/pg/migrate.ts";
+import { initPgSchema } from "../src/pg/init.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
 
@@ -45,7 +45,7 @@ const APP_ROLE_TEST_PASSWORD = "crm_app_test_pw";
 const RANDOM_ID = "01890000-0000-7000-8000-00000000dead"; // valid uuid, never inserted
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
-/** Must stay identical to the policy registry in src/pg/migrations/0003_rls.sql. */
+/** Must stay identical to the policy registry in src/pg/schema.sql. */
 const WORKSPACE_OWNED_TABLES = [
   "users",
   "memberships",
@@ -88,10 +88,10 @@ const WORKSPACE_ROOT_TABLE = "workspaces";
 /**
  * RLS on, no runtime policy, no runtime grants: unreachable by crm_app and
  * crm_operator. sessions/openauth_kv/auth_codes are identity-level auth
- * storage reachable only via the SECURITY DEFINER functions in 0004_auth.sql
- * (covered in pg-auth.test.ts); schema_migrations is deployment-only.
+ * storage reachable only via the SECURITY DEFINER functions in schema.sql
+ * (covered in pg-auth.test.ts); schema_version is deployment-only.
  */
-const DENIED_TABLES = ["sessions", "schema_migrations", "openauth_kv", "auth_codes"];
+const DENIED_TABLES = ["sessions", "schema_version", "openauth_kv", "auth_codes"];
 
 describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)", () => {
   let admin: PgHandle;
@@ -264,23 +264,24 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     const adminUrl = process.env.DATABASE_URL!;
     admin = await connectPg({ databaseUrl: adminUrl, max: 2 });
 
-    // Fresh schema every run; roles are cluster-global and guarded in 0002.
-    // pg-auth.test.ts migrates its own database in parallel, so on a virgin
-    // cluster two runs of 0002's guarded CREATE ROLE can race — retrying is
-    // safe because every migration file is idempotent per database.
+    // Fresh schema every run; roles are cluster-global and guarded in
+    // schema.sql. pg-auth.test.ts initializes its own database in parallel,
+    // so on a virgin cluster two runs of the guarded CREATE ROLE block can
+    // race — retrying is safe because schema.sql is one transaction (a failed
+    // attempt rolls back completely and the guard is idempotent).
     await admin.pool.query("DROP SCHEMA IF EXISTS crm CASCADE");
-    let migrationError: unknown = null;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    let initError: unknown = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        await applyPgMigrations(admin.pool);
-        migrationError = null;
+        await initPgSchema(admin.pool);
+        initError = null;
         break;
       } catch (e) {
-        migrationError = e;
-        await new Promise((r) => setTimeout(r, 250));
+        initError = e;
+        await new Promise((r) => setTimeout(r, 500));
       }
     }
-    if (migrationError) throw migrationError;
+    if (initError) throw initError;
     await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
 
     const appUrl = new URL(adminUrl);
@@ -349,7 +350,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
   it("crm_app cannot create tables or read auth/deployment tables", async () => {
     await expect(app.pool.query("CREATE TABLE crm.evil (id int)")).rejects.toThrow(/permission denied/i);
     await expect(app.pool.query("SELECT * FROM crm.sessions")).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("SELECT * FROM crm.schema_migrations")).rejects.toThrow(/permission denied/i);
+    await expect(app.pool.query("SELECT * FROM crm.schema_version")).rejects.toThrow(/permission denied/i);
   });
 
   it("identity resolvers: fixed shape for crm_app, no PUBLIC execute, no table access needed", async () => {
@@ -357,7 +358,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     const direct = await app.pool.query("SELECT count(*)::int AS n FROM crm.users");
     expect(direct.rows[0]?.n).toBe(0);
     // …but the narrow resolver returns exactly the fixed identity fields.
-    // Since 0004 it keys on the verified OpenAuth subject, not the email
+    // It keys on the verified OpenAuth subject, not the email
     // (subject linking + pending/disabled semantics live in pg-auth.test.ts).
     await admin.pool.query("UPDATE crm.users SET auth_subject = $1 WHERE id = $2", ["sub-alpha-owner", A.userId]);
     const resolved = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-alpha-owner"]);

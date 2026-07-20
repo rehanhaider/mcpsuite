@@ -141,10 +141,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
 
   function schemaVersion(): number {
     try {
-      const row = db.$client.prepare("SELECT MAX(version) AS v FROM schema_migrations").get() as
-        | { v: number | null }
-        | undefined;
-      return row?.v ?? 0;
+      return Number(db.$client.pragma("user_version", { simple: true })) || 0;
     } catch {
       return 0;
     }

@@ -22,7 +22,7 @@
  *   anything else  -> clear startup error.
  *
  * Entry points call `getRuntimeAsync()`; the sync `getRuntime()` stays for
- * the SQLite-only scripts (migrate/import/smoke) and always answers SQLite.
+ * the SQLite-only scripts (setup/import/smoke) and always answers SQLite.
  */
 import {
   buildCatalog,

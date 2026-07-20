@@ -1,8 +1,14 @@
--- 0001_schema.sql — crm schema: tables, same-workspace composite foreign keys,
--- uniqueness, indexes. Hand-written; applied in order by src/pg/migrate.ts (or
--- psql -f) using a deployment role (crm_migrator/superuser), never a runtime
--- role. Requires PostgreSQL >= 15 (ON DELETE SET NULL (column) form; target is
--- PostgreSQL 17).
+-- schema.sql — the complete hand-written PostgreSQL schema for the hosted
+-- multi-tenant deployment: crm tables, same-workspace composite foreign keys,
+-- roles and least-privilege grants, forced row-level security, the narrow
+-- SECURITY DEFINER identity/credential functions, and the schema_version
+-- stamp. Applied in ONE transaction by src/pg/init.ts (or `psql -f`) — only
+-- when the database is empty (no crm.workspaces) — using a deployment role
+-- (crm_migrator/superuser), never a runtime role. Requires PostgreSQL >= 15
+-- (ON DELETE SET NULL (column) form; target is PostgreSQL 17).
+--
+-- There is no in-place upgrade machinery yet — it ships together with the
+-- first post-release schema change, keyed off crm.schema_version.
 --
 -- Design source: docs/architecture/postgres-tenant-isolation.md
 --   * every workspace-owned parent has UNIQUE (workspace_id, id);
@@ -16,19 +22,10 @@
 --     association features);
 --   * audit_events.entity_type/entity_id stay generic text: historical data,
 --     never a live reference.
---
--- Roles/grants land in 0002; RLS policies and identity resolvers in 0003.
 
 BEGIN;
 
 CREATE SCHEMA IF NOT EXISTS crm;
-
--- Deployment-only bookkeeping (no runtime grants; RLS-denied in 0003).
-CREATE TABLE IF NOT EXISTS crm.schema_migrations (
-  version    integer PRIMARY KEY,
-  name       text NOT NULL,
-  applied_at timestamptz NOT NULL DEFAULT now()
-);
 
 -- --- Workspace root and identity -------------------------------------------
 
@@ -44,19 +41,34 @@ CREATE TABLE crm.workspaces (
 
 -- users carry a mandatory hidden workspace_id as the isolation key (doc
 -- §Workspace root and identity tables). Email stays deployment-global.
+--
+-- status: 'pending'  invited, no credentials yet — may NOT authenticate;
+--         'active'   normal user;
+--         'disabled' login disabled by an admin — may NOT authenticate.
+-- disabled_at is the human-visible "since when"; the CHECK keeps the pair
+-- coherent so no code path can produce a half-disabled user. auth_subject is
+-- the OpenAuth `sub` claim: globally unique across the deployment (isolation
+-- doc §"Uniqueness and information disclosure" allows exactly this and the
+-- normalized email as deployment-wide identities).
 CREATE TABLE crm.users (
-  id            uuid PRIMARY KEY,
-  workspace_id  uuid NOT NULL REFERENCES crm.workspaces (id) ON DELETE CASCADE,
-  email         text NOT NULL,
-  name          text NOT NULL,
-  password_hash text,
-  disabled_at   timestamptz,
-  created_at    timestamptz NOT NULL,
-  updated_at    timestamptz NOT NULL,
-  UNIQUE (workspace_id, id)
+  id                   uuid PRIMARY KEY,
+  workspace_id         uuid NOT NULL REFERENCES crm.workspaces (id) ON DELETE CASCADE,
+  email                text NOT NULL,
+  name                 text NOT NULL,
+  password_hash        text,
+  disabled_at          timestamptz,
+  created_at           timestamptz NOT NULL,
+  updated_at           timestamptz NOT NULL,
+  status               text NOT NULL DEFAULT 'active',
+  auth_subject         text,
+  password_must_change boolean NOT NULL DEFAULT false,
+  UNIQUE (workspace_id, id),
+  CONSTRAINT users_status_ck CHECK (status IN ('pending', 'active', 'disabled')),
+  CONSTRAINT users_status_disabled_ck CHECK ((status = 'disabled') = (disabled_at IS NOT NULL))
 );
 CREATE UNIQUE INDEX users_email_ux ON crm.users (email);
 CREATE INDEX users_ws_ix ON crm.users (workspace_id);
+CREATE UNIQUE INDEX users_auth_subject_ux ON crm.users (auth_subject) WHERE auth_subject IS NOT NULL;
 
 -- One membership per user; role lives here; exactly one owner per workspace.
 CREATE TABLE crm.memberships (
@@ -71,14 +83,21 @@ CREATE TABLE crm.memberships (
 );
 CREATE UNIQUE INDEX memberships_one_owner_ux ON crm.memberships (workspace_id) WHERE role = 'owner';
 
--- Global auth-issuer data. No runtime grants, RLS-denied in 0003; identity
--- resolution happens only through the narrow resolver functions.
+-- Global auth-issuer data. No runtime grants, RLS-denied below; identity
+-- resolution happens only through the narrow resolver functions. A session
+-- records the OpenAuth subject it was minted for and the refresh token to
+-- revoke at logout (docs/auth-api.md §Sessions). A session may exist for a
+-- verified identity BEFORE its CRM user does (docs/auth-api.md §Hosted open
+-- registration): user_id is nullable and email carries the adoption key.
 CREATE TABLE crm.sessions (
-  id         uuid PRIMARY KEY,
-  token_hash text NOT NULL,
-  user_id    uuid NOT NULL REFERENCES crm.users (id) ON DELETE CASCADE,
-  expires_at timestamptz NOT NULL,
-  created_at timestamptz NOT NULL,
+  id           uuid PRIMARY KEY,
+  token_hash   text NOT NULL,
+  user_id      uuid REFERENCES crm.users (id) ON DELETE CASCADE,
+  expires_at   timestamptz NOT NULL,
+  created_at   timestamptz NOT NULL,
+  auth_subject text,
+  auth_refresh text,
+  email        text,
   UNIQUE (token_hash)
 );
 CREATE INDEX sessions_user_ix ON crm.sessions (user_id);
@@ -103,6 +122,52 @@ CREATE TABLE crm.mcp_clients (
     REFERENCES crm.users (workspace_id, id) ON DELETE SET NULL (created_by_user_id)
 );
 CREATE INDEX mcp_clients_ws_ix ON crm.mcp_clients (workspace_id);
+
+-- --- OpenAuth issuer storage (identity-level, NOT workspace-scoped) ---------
+--
+-- Generic key-value store backing the public product's OpenAuth storage
+-- adapter (tokens, authorization state, verification records). Keys are
+-- opaque issuer-defined strings; values are issuer JSON; expires_at implements
+-- storage TTL. Runtime access ONLY via the crm.openauth_kv_* functions below.
+
+CREATE TABLE crm.openauth_kv (
+  key        text PRIMARY KEY,
+  value      jsonb NOT NULL,
+  expires_at timestamptz
+);
+CREATE INDEX openauth_kv_expires_ix ON crm.openauth_kv (expires_at) WHERE expires_at IS NOT NULL;
+
+-- --- Setup / reset code bookkeeping (identity-level) ------------------------
+--
+-- Column-parity with the SQLite table (docs/auth-api.md): one row per issued
+-- single-use code; only the SHA-256 hash is stored, plus the user's email at
+-- issue time (redemption UIs are email+code shaped) and an attempts counter
+-- for redemption throttling at the auth surface. Issuing a new code for a
+-- (user, purpose) deletes the previous ones (single active code per purpose);
+-- consumption is a single atomic UPDATE so a code can be redeemed at most
+-- once under any concurrency. Rows die with their user (ON DELETE CASCADE —
+-- FK enforcement is exempt from RLS by design, which is also what lets user
+-- deletion cascade into sessions).
+
+CREATE TABLE crm.auth_codes (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL REFERENCES crm.users (id) ON DELETE CASCADE,
+  email      text NOT NULL,
+  purpose    text NOT NULL CHECK (purpose IN ('setup', 'reset')),
+  code_hash  text NOT NULL UNIQUE,
+  attempts   integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  used_at    timestamptz
+);
+CREATE INDEX auth_codes_user_ix ON crm.auth_codes (user_id, purpose);
+CREATE INDEX auth_codes_email_ix ON crm.auth_codes (email, created_at);
+
+-- Deployment-only stamp: what schema is on disk (no runtime grants; RLS-denied
+-- below). A future updater reads it to pick its upgrade steps.
+CREATE TABLE crm.schema_version (
+  version integer NOT NULL
+);
 
 -- --- Workspace-owned CRM tables ---------------------------------------------
 
@@ -642,7 +707,517 @@ CREATE TABLE crm.audit_events (
 CREATE INDEX audit_ws_ix ON crm.audit_events (workspace_id, created_at);
 CREATE INDEX audit_entity_ix ON crm.audit_events (workspace_id, entity_type, entity_id);
 
-INSERT INTO crm.schema_migrations (version, name) VALUES (1, '0001_schema')
-ON CONFLICT (version) DO NOTHING;
+-- =============================================================================
+-- PostgreSQL roles and least-privilege grants per
+-- docs/architecture/postgres-tenant-isolation.md §"PostgreSQL roles".
+--
+--   crm_schema_owner       NOLOGIN  owns every crm object and policy
+--   crm_identity_resolver  NOLOGIN  owns the narrow resolver/credential fns
+--   crm_app                LOGIN    web / operation API / MCP runtime
+--   crm_operator           LOGIN    private hosting-control service
+--
+-- No runtime role is a superuser, a table owner, a BYPASSRLS member, or able
+-- to create/alter schemas, tables, policies, functions or roles. Passwords
+-- are NOT set here: deployment (or the test harness) sets them with
+-- `ALTER ROLE crm_app PASSWORD ...` using its own secret management.
+--
+-- Roles are cluster-global, so creation is guarded for idempotency across
+-- databases sharing one cluster. Grants are per-database and re-run safely.
+-- =============================================================================
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'crm_schema_owner') THEN
+    CREATE ROLE crm_schema_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'crm_identity_resolver') THEN
+    CREATE ROLE crm_identity_resolver NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'crm_app') THEN
+    CREATE ROLE crm_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'crm_operator') THEN
+    CREATE ROLE crm_operator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
+  END IF;
+END
+$$;
+
+-- The schema and every table are owned by the non-login schema owner, so no
+-- login role can ever use table-owner RLS bypass (FORCE below closes the
+-- rest). Functions created below set their own ownership.
+ALTER SCHEMA crm OWNER TO crm_schema_owner;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'crm' LOOP
+    EXECUTE format('ALTER TABLE crm.%I OWNER TO crm_schema_owner', r.tablename);
+  END LOOP;
+END
+$$;
+
+-- Lock the schema down, then grant back exactly what runtime needs.
+REVOKE ALL ON SCHEMA crm FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA crm FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+GRANT USAGE ON SCHEMA crm TO crm_app, crm_operator, crm_identity_resolver;
+
+-- Workspace-owned product tables: plain CRUD for the runtime roles; every row
+-- is still gated by the forced RLS policies below.
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+  crm.workspaces,
+  crm.users,
+  crm.memberships,
+  crm.mcp_clients,
+  crm.workspace_counters,
+  crm.companies,
+  crm.people,
+  crm.company_people,
+  crm.pipelines,
+  crm.stages,
+  crm.engagements,
+  crm.deals,
+  crm.deal_stakeholders,
+  crm.offerings,
+  crm.engagement_offering_links,
+  crm.deal_offering_links,
+  crm.activities,
+  crm.tags,
+  crm.company_tags,
+  crm.person_tags,
+  crm.engagement_tags,
+  crm.deal_tags,
+  crm.lists,
+  crm.company_list_members,
+  crm.person_list_members,
+  crm.engagement_list_members,
+  crm.deal_list_members,
+  crm.custom_field_definitions,
+  crm.company_custom_field_values,
+  crm.person_custom_field_values,
+  crm.engagement_custom_field_values,
+  crm.deal_custom_field_values,
+  crm.offering_custom_field_values,
+  crm.saved_views,
+  crm.pending_actions,
+  crm.audit_events
+TO crm_app, crm_operator;
+
+-- The identity resolver role touches only what its fixed SECURITY DEFINER
+-- functions (below) need: read the identity tables, read/write the OpenAuth
+-- issuer storage and code bookkeeping, and read/delete sessions for the fixed
+-- revocation path. It has no login and no other access.
+GRANT SELECT ON crm.users, crm.memberships, crm.mcp_clients TO crm_identity_resolver;
+GRANT SELECT, INSERT, UPDATE, DELETE ON crm.openauth_kv, crm.auth_codes TO crm_identity_resolver;
+GRANT SELECT, DELETE ON crm.sessions TO crm_identity_resolver;
+
+-- crm.sessions (beyond the resolver's narrow grant) and crm.schema_version
+-- receive NO runtime grants at all: sessions are auth-issuer data owned by
+-- the product's auth storage adapter; schema_version is deployment-only
+-- metadata.
+
+-- Deliberately NO "ALTER DEFAULT PRIVILEGES ... GRANT" here: a newly created
+-- table is inaccessible to every runtime role until a schema change
+-- explicitly classifies it, grants it, and adds its RLS policy (doc §Table
+-- classification: "new tables default to inaccessible").
+
+-- =============================================================================
+-- Row-level security and narrow identity resolvers per
+-- docs/architecture/postgres-tenant-isolation.md.
+--
+-- Session-GUC contract: every request transaction installs its trusted
+-- workspace BEFORE the first CRM query using the transaction-local form
+--
+--     SET LOCAL app.workspace_id = '<uuid>';
+--     -- or, parameterized (what the adapter sends):
+--     SELECT set_config('app.workspace_id', $1, true);
+--
+-- `set_config(..., true)` is the parameterizable equivalent of SET LOCAL: the
+-- value evaporates at COMMIT/ROLLBACK, so a pooled connection can never carry
+-- the previous request's workspace. crm.current_workspace_id() returns NULL
+-- when the setting is absent, empty, or malformed — and every policy compares
+-- against it, so a missing context denies everything (default deny).
+--
+-- Every workspace-owned table is ENABLE + FORCE row level security with one
+-- policy carrying both USING (read/update/delete visibility) and WITH CHECK
+-- (insert/update assignment) — a row outside the transaction's workspace can
+-- be neither seen nor produced. FORCE keeps even a future table owner subject
+-- to the policy; runtime roles are not owners anyway.
+--
+-- The identity-level tables (sessions, openauth_kv, auth_codes) are NOT
+-- workspace-scoped — a credential exists before any workspace context does
+-- (login is the step that DISCOVERS the workspace). They get RLS ENABLE +
+-- FORCE with NO policy for any login role and ZERO grants to crm_app /
+-- crm_operator — direct table access is denied to every runtime login role.
+-- The ONLY sanctioned path is the fixed SECURITY DEFINER functions below,
+-- owned by the non-login crm_identity_resolver, which receives narrow
+-- per-command grants plus an explicit all-rows policy so the fixed function
+-- bodies (and nothing else) can reach the rows. schema_version gets the same
+-- no-policy, no-grant denial.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION crm.current_workspace_id()
+RETURNS uuid
+LANGUAGE plpgsql STABLE PARALLEL SAFE
+AS $$
+DECLARE
+  raw text := current_setting('app.workspace_id', true);
+BEGIN
+  IF raw IS NULL OR raw = '' THEN
+    RETURN NULL;
+  END IF;
+  BEGIN
+    RETURN raw::uuid;
+  EXCEPTION WHEN OTHERS THEN
+    RETURN NULL;  -- malformed context must deny, not error
+  END;
+END
+$$;
+
+ALTER FUNCTION crm.current_workspace_id() OWNER TO crm_schema_owner;
+REVOKE ALL ON FUNCTION crm.current_workspace_id() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION crm.current_workspace_id() TO crm_app, crm_operator, crm_identity_resolver;
+
+-- The workspace root row itself: visible only as the current workspace.
+ALTER TABLE crm.workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE crm.workspaces FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspace_isolation ON crm.workspaces
+  TO crm_app, crm_operator
+  USING (id = crm.current_workspace_id())
+  WITH CHECK (id = crm.current_workspace_id());
+
+-- Every workspace-owned table (registry mirrored by the isolation tests —
+-- keep the two lists identical when adding tables).
+DO $$
+DECLARE
+  tbl text;
+BEGIN
+  FOREACH tbl IN ARRAY ARRAY[
+    'users',
+    'memberships',
+    'mcp_clients',
+    'workspace_counters',
+    'companies',
+    'people',
+    'company_people',
+    'pipelines',
+    'stages',
+    'engagements',
+    'deals',
+    'deal_stakeholders',
+    'offerings',
+    'engagement_offering_links',
+    'deal_offering_links',
+    'activities',
+    'tags',
+    'company_tags',
+    'person_tags',
+    'engagement_tags',
+    'deal_tags',
+    'lists',
+    'company_list_members',
+    'person_list_members',
+    'engagement_list_members',
+    'deal_list_members',
+    'custom_field_definitions',
+    'company_custom_field_values',
+    'person_custom_field_values',
+    'engagement_custom_field_values',
+    'deal_custom_field_values',
+    'offering_custom_field_values',
+    'saved_views',
+    'pending_actions',
+    'audit_events'
+  ] LOOP
+    EXECUTE format('ALTER TABLE crm.%I ENABLE ROW LEVEL SECURITY', tbl);
+    EXECUTE format('ALTER TABLE crm.%I FORCE ROW LEVEL SECURITY', tbl);
+    EXECUTE format(
+      'CREATE POLICY workspace_isolation ON crm.%I '
+      'TO crm_app, crm_operator '
+      'USING (workspace_id = crm.current_workspace_id()) '
+      'WITH CHECK (workspace_id = crm.current_workspace_id())',
+      tbl
+    );
+  END LOOP;
+END
+$$;
+
+-- Auth-issuer and deployment tables: RLS on; the auth_storage policies below
+-- open them to the resolver role only; schema_version stays fully denied.
+ALTER TABLE crm.sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE crm.sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE crm.openauth_kv ENABLE ROW LEVEL SECURITY;
+ALTER TABLE crm.openauth_kv FORCE ROW LEVEL SECURITY;
+ALTER TABLE crm.auth_codes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE crm.auth_codes FORCE ROW LEVEL SECURITY;
+ALTER TABLE crm.schema_version ENABLE ROW LEVEL SECURITY;
+ALTER TABLE crm.schema_version FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY auth_storage ON crm.sessions
+  TO crm_identity_resolver USING (true) WITH CHECK (true);
+CREATE POLICY auth_storage ON crm.openauth_kv
+  TO crm_identity_resolver USING (true) WITH CHECK (true);
+CREATE POLICY auth_storage ON crm.auth_codes
+  TO crm_identity_resolver USING (true) WITH CHECK (true);
+
+-- --- Narrow identity resolvers (doc §Identity before workspace context) -----
+-- Global credential resolution is available ONLY through these fixed
+-- SECURITY DEFINER functions owned by the non-login crm_identity_resolver.
+-- They take one verified credential fact, return one row of fixed fields
+-- (never names, emails-by-pattern, password material, or lists), and are the
+-- step BEFORE a workspace transaction is opened. The identity_resolution
+-- SELECT policies below apply to crm_identity_resolver only.
+
+CREATE POLICY identity_resolution ON crm.users
+  FOR SELECT TO crm_identity_resolver USING (true);
+CREATE POLICY identity_resolution ON crm.memberships
+  FOR SELECT TO crm_identity_resolver USING (true);
+CREATE POLICY identity_resolution ON crm.mcp_clients
+  FOR SELECT TO crm_identity_resolver USING (true);
+
+-- resolve_user_identity — the AUTHENTICATION authority — keys on the VERIFIED
+-- OpenAuth subject and returns a row ONLY for status = 'active' users:
+-- pending and disabled users do not authenticate, full stop.
+--
+-- The email arm demanded by identity linking is deliberately a SEPARATE
+-- function (resolve_auth_email) so no authentication code path can treat an
+-- email match as a login. It serves exactly the issuer success callback
+-- (docs/auth-api.md §password/authorize), which runs only AFTER OpenAuth
+-- verified ownership of the email/credential, and needs to triage:
+--   pending + not linked  → activate: bind subject once, then log in
+--   active  + not linked  → first OpenAuth login of a pre-OpenAuth user
+--                           (e.g. after owner recovery): bind subject
+--   linked (any status)   → subject already authoritative; email is stale as
+--                           a key — the callback re-resolves by subject
+--   disabled              → reject as account_disabled (distinct from
+--                           not_invited, per the landed UI contract)
+-- It returns the fixed triage fields only — never names, password state, or
+-- another workspace's data — and is NOT a list/search interface.
+
+CREATE FUNCTION crm.resolve_user_identity(p_subject text)
+RETURNS TABLE (user_id uuid, workspace_id uuid, role text, password_must_change boolean)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT u.id, u.workspace_id, m.role, u.password_must_change
+  FROM crm.users u
+  JOIN crm.memberships m ON m.user_id = u.id AND m.workspace_id = u.workspace_id
+  WHERE u.status = 'active'
+    AND u.auth_subject IS NOT NULL
+    AND u.auth_subject = p_subject
+$$;
+
+CREATE FUNCTION crm.resolve_auth_email(p_email text)
+RETURNS TABLE (user_id uuid, workspace_id uuid, role text, status text, subject_linked boolean)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT u.id, u.workspace_id, m.role, u.status, (u.auth_subject IS NOT NULL)
+  FROM crm.users u
+  JOIN crm.memberships m ON m.user_id = u.id AND m.workspace_id = u.workspace_id
+  WHERE u.email = lower(p_email)
+$$;
+
+-- MCP keys: the creating user must be ACTIVE (pending creators cannot lend
+-- authority any more than disabled ones — same resolver-enforced rule).
+CREATE FUNCTION crm.resolve_mcp_key(p_token_hash text)
+RETURNS TABLE (
+  client_id uuid,
+  workspace_id uuid,
+  user_id uuid,
+  role text,
+  scopes jsonb,
+  trust text,
+  enabled boolean
+)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT
+    c.id,
+    c.workspace_id,
+    u.id,
+    m.role,
+    c.scopes,
+    c.trust,
+    (c.revoked_at IS NULL AND u.id IS NOT NULL AND u.status = 'active')
+  FROM crm.mcp_clients c
+  LEFT JOIN crm.users u
+    ON u.id = c.created_by_user_id AND u.workspace_id = c.workspace_id
+  LEFT JOIN crm.memberships m
+    ON m.user_id = u.id AND m.workspace_id = c.workspace_id
+  WHERE c.token_hash = p_token_hash
+$$;
+
+-- --- Credential storage functions (the sanctioned runtime path) -------------
+--
+-- OpenAuth storage contract: get / set(+TTL) / remove / scan-by-prefix.
+-- Identity-level by nature, so none of these consult the workspace GUC; they
+-- are callable outside a workspace transaction (the issuer runs before a
+-- workspace is known). scan uses starts_with (no LIKE pattern injection).
+-- Expired rows are invisible to get/scan; set sweeps them opportunistically.
+
+CREATE FUNCTION crm.openauth_kv_get(p_key text)
+RETURNS jsonb
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT value FROM crm.openauth_kv
+  WHERE key = p_key AND (expires_at IS NULL OR expires_at > now())
+$$;
+
+CREATE FUNCTION crm.openauth_kv_set(p_key text, p_value jsonb, p_expires_at timestamptz)
+RETURNS void
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  WITH swept AS (
+    DELETE FROM crm.openauth_kv WHERE expires_at IS NOT NULL AND expires_at <= now()
+  )
+  INSERT INTO crm.openauth_kv (key, value, expires_at)
+  VALUES (p_key, p_value, p_expires_at)
+  ON CONFLICT (key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at
+$$;
+
+CREATE FUNCTION crm.openauth_kv_remove(p_key text)
+RETURNS void
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  DELETE FROM crm.openauth_kv WHERE key = p_key
+$$;
+
+CREATE FUNCTION crm.openauth_kv_scan(p_prefix text)
+RETURNS TABLE (key text, value jsonb)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT key, value FROM crm.openauth_kv
+  WHERE starts_with(key, p_prefix) AND (expires_at IS NULL OR expires_at > now())
+  ORDER BY key
+$$;
+
+-- Issue a single-use code for a user IN THE CURRENT WORKSPACE (the issuing
+-- surfaces — invite, reset — are admin operations inside a workspace
+-- transaction). Deletes that user's previous codes of the same purpose, so at
+-- most one code per (user, purpose) is redeemable. Returns the new row id, or
+-- NULL when the user is not visible in this workspace or is disabled — the
+-- adapter translates NULL to not_found, indistinguishable from a random id.
+CREATE FUNCTION crm.issue_auth_code(p_user_id uuid, p_purpose text, p_code_hash text, p_expires_at timestamptz)
+RETURNS uuid
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  WITH target AS (
+    SELECT id, email FROM crm.users
+    WHERE id = p_user_id
+      AND workspace_id = crm.current_workspace_id()
+      AND status <> 'disabled'
+  ),
+  cleared AS (
+    DELETE FROM crm.auth_codes c USING target t
+    WHERE c.user_id = t.id AND c.purpose = p_purpose
+  )
+  INSERT INTO crm.auth_codes (user_id, email, purpose, code_hash, expires_at)
+  SELECT t.id, t.email, p_purpose, p_code_hash, p_expires_at FROM target t
+  RETURNING id
+$$;
+
+-- Atomically redeem a code: the UPDATE both checks single-use/expiry and
+-- burns the code, so concurrent redemptions see exactly one winner. Runs
+-- BEFORE a workspace transaction exists (the redeemer is not logged in), so
+-- like resolve_mcp_key it is keyed on the hash and not workspace-guarded; it
+-- returns the fixed identity pair the caller needs to proceed.
+CREATE FUNCTION crm.consume_auth_code(p_code_hash text, p_purpose text)
+RETURNS TABLE (user_id uuid, workspace_id uuid)
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  UPDATE crm.auth_codes c
+  SET used_at = now()
+  FROM crm.users u
+  WHERE c.code_hash = p_code_hash
+    AND c.purpose = p_purpose
+    AND c.used_at IS NULL
+    AND c.expires_at > now()
+    AND u.id = c.user_id
+    AND u.status <> 'disabled'
+  RETURNING c.user_id, u.workspace_id
+$$;
+
+-- Disable/delete revocation sweep (docs/issues/0022): hard-delete every login
+-- session of a user IN THE CURRENT WORKSPACE. Returns the number removed.
+CREATE FUNCTION crm.delete_user_sessions(p_user_id uuid)
+RETURNS integer
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  WITH target AS (
+    SELECT id FROM crm.users
+    WHERE id = p_user_id AND workspace_id = crm.current_workspace_id()
+  ),
+  deleted AS (
+    DELETE FROM crm.sessions s USING target t WHERE s.user_id = t.id RETURNING 1
+  )
+  SELECT count(*)::integer FROM deleted
+$$;
+
+-- Permanent user deletion also revokes the OpenAuth issuer's stored state for
+-- that identity. The issuer keys rows by the subject (refresh tokens,
+-- authorization state) AND by the normalized email (password hash,
+-- email→subject binding — docs/auth-api.md §Storage), so both markers are
+-- purged; substring matching is deliberate because OpenAuth joins key path
+-- segments with a control separator, and both markers are globally unique
+-- deployment-wide. Guarded to a user visible in the current workspace, so a
+-- workspace transaction can never purge another workspace's credentials; call
+-- it BEFORE deleting the user row.
+CREATE FUNCTION crm.purge_openauth_identity(p_user_id uuid)
+RETURNS integer
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  WITH target AS (
+    SELECT auth_subject, email FROM crm.users
+    WHERE id = p_user_id AND workspace_id = crm.current_workspace_id()
+  ),
+  deleted AS (
+    DELETE FROM crm.openauth_kv k USING target t
+    WHERE (t.auth_subject IS NOT NULL AND position(t.auth_subject IN k.key) > 0)
+       OR position(lower(t.email) IN lower(k.key)) > 0
+    RETURNING 1
+  )
+  SELECT count(*)::integer FROM deleted
+$$;
+
+-- --- Ownership + execution grants -------------------------------------------
+-- Owned by the non-login resolver role, EXECUTE revoked from PUBLIC and
+-- granted only to crm_app.
+
+DO $$
+DECLARE fn text;
+BEGIN
+  FOREACH fn IN ARRAY ARRAY[
+    'resolve_user_identity(text)',
+    'resolve_auth_email(text)',
+    'resolve_mcp_key(text)',
+    'openauth_kv_get(text)',
+    'openauth_kv_set(text, jsonb, timestamptz)',
+    'openauth_kv_remove(text)',
+    'openauth_kv_scan(text)',
+    'issue_auth_code(uuid, text, text, timestamptz)',
+    'consume_auth_code(text, text)',
+    'delete_user_sessions(uuid)',
+    'purge_openauth_identity(uuid)'
+  ] LOOP
+    EXECUTE format('ALTER FUNCTION crm.%s OWNER TO crm_identity_resolver', fn);
+    EXECUTE format('REVOKE ALL ON FUNCTION crm.%s FROM PUBLIC', fn);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION crm.%s TO crm_app', fn);
+  END LOOP;
+END
+$$;
+
+-- --- Version stamp -----------------------------------------------------------
+
+INSERT INTO crm.schema_version (version) VALUES (1);
 
 COMMIT;

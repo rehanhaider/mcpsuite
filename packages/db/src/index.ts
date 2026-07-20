@@ -1,4 +1,4 @@
-export { getDb, openDatabase, closeDb, resolveDbPath, runMigrations, type Db } from "./connection.ts";
+export { getDb, openDatabase, closeDb, resolveDbPath, initSchema, type Db } from "./connection.ts";
 export { createPorts } from "./repositories.ts";
 export { bootstrap, DEFAULT_DEAL_STAGES, DEFAULT_ENGAGEMENT_STAGES, type BootstrapResult } from "./bootstrap.ts";
 export {

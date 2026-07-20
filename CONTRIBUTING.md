@@ -25,8 +25,11 @@ without prior discussion will likely be declined regardless of quality.
    catalog.
 2. **DB access only via `packages/db` repositories** implementing the ports in
    `packages/core/src/ports.ts`. No SQL outside `packages/db`.
-3. **Schema changes are versioned migrations** (`packages/db/src/migrations/`),
-   never edits to the live database or to already-shipped migration files.
+3. **Schema changes edit the hand-written schema files**
+   (`packages/db/src/schema-sql.ts`, `packages/db/src/pg/schema.sql`) — the
+   product is pre-release, so there is no migration system yet. In-place
+   upgrade machinery arrives with the first post-release schema change, keyed
+   off the version stamp. Never edit a live database by hand.
 4. **Checks must pass**: `make typecheck && make test` (and `make build` if
    you touched the web app).
 5. **No new runtime dependencies** without discussion — the dependency budget

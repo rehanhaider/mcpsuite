@@ -15,7 +15,7 @@ import {
   type Ports,
   type RequestContext,
 } from "@emcp/core";
-import { runMigrations, type Db } from "../src/connection.ts";
+import { initSchema, type Db } from "../src/connection.ts";
 import * as schema from "../src/schema.ts";
 import { createPorts } from "../src/repositories.ts";
 import { createSession, resolveMcpToken, resolveSession } from "../src/auth.ts";
@@ -34,7 +34,7 @@ function makeDb(): Db {
   const sqlite = new Database(":memory:");
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
-  runMigrations(sqlite);
+  initSchema(sqlite);
   return drizzle(sqlite, { schema }) as Db;
 }
 

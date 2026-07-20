@@ -81,7 +81,7 @@ enters storage or logs:
 ## Own tables (created by this package on open)
 
 This package creates its own SQLite tables at startup — it never touches
-`packages/db/src/migrations.ts`:
+`packages/db/src/schema-sql.ts`:
 
 - `hc_idempotency_receipts` — one row per idempotency key: action, canonical
   request hash, state, safe stored response, timestamps. Mutations and their
