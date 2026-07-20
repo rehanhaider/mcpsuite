@@ -1,0 +1,404 @@
+# =============================================================================
+# Release pipeline — tag-driven, dormant-safe. See RELEASING.md.
+#
+#   Trigger: pushing a `vX.Y.Z` tag (must match the version in package.json).
+#
+#   Jobs:
+#     preflight  version/tag match + secrets audit (fails loud, early)
+#     image      multi-arch container -> GHCR always, Docker Hub when secrets exist
+#     tarball    per-arch self-contained tarballs + native smoke test (matrix)
+#     publish    GitHub Release with tarballs + SHA256SUMS
+#
+#   Dormancy: this repo may have ZERO secrets configured. GHCR publishing uses
+#   the always-present GITHUB_TOKEN, so a tag push always produces images.
+#   Docker Hub (the eventual canonical registry) is skipped WITH A WARNING
+#   until DOCKERHUB_USERNAME + DOCKERHUB_TOKEN are configured — and preflight
+#   HARD-FAILS if exactly one of the two is set (misconfiguration), so the
+#   pipeline never half-publishes.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Default: least privilege. Jobs that need more declare it themselves.
+permissions:
+  contents: read
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: Preflight (version + secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.checks.outputs.version }}
+      is_prerelease: ${{ steps.checks.outputs.is_prerelease }}
+      dockerhub: ${{ steps.checks.outputs.dockerhub }}
+      ghcr_image: ${{ steps.checks.outputs.ghcr_image }}
+      dockerhub_image: ${{ steps.checks.outputs.dockerhub_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag, version source, build script, and secrets
+        id: checks
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          # Optional repo *variable* (not secret): overrides the Docker Hub
+          # image name while the `mcpsuite` namespace is unclaimed.
+          DOCKERHUB_IMAGE_OVERRIDE: ${{ vars.DOCKERHUB_IMAGE }}
+        run: |
+          set -euo pipefail
+
+          TAG="$GITHUB_REF_NAME"
+          if [[ "$TAG" != v* ]]; then
+            echo "::error title=Bad tag::Release ran on tag '$TAG' — release tags must look like vX.Y.Z."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+
+          # package.json is the single version source; the tag must agree.
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$VERSION" != "$PKG_VERSION" ]]; then
+            echo "::error title=Tag/version mismatch::Tag $TAG says version '$VERSION' but package.json says '$PKG_VERSION'. Bump package.json, commit, delete the tag, re-tag."
+            exit 1
+          fi
+
+          if [[ ! -f .scripts/release/build-tarball.sh ]]; then
+            echo "::error title=Missing build script::.scripts/release/build-tarball.sh not found — the tarball jobs would fail. Add the script before tagging releases."
+            exit 1
+          fi
+
+          # --- Secrets audit (dormant-safe, mirror-first) --------------------
+          # GHCR always works (GITHUB_TOKEN). Docker Hub: both secrets -> push;
+          # neither -> skip with a loud warning; exactly one -> hard fail.
+          if [[ -n "${DOCKERHUB_USERNAME:-}" && -n "${DOCKERHUB_TOKEN:-}" ]]; then
+            DOCKERHUB=true
+          elif [[ -z "${DOCKERHUB_USERNAME:-}" && -z "${DOCKERHUB_TOKEN:-}" ]]; then
+            DOCKERHUB=false
+            echo "::warning title=Docker Hub publish SKIPPED::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN are not configured. This release publishes container images to GHCR only. See RELEASING.md ('Claiming Docker Hub') to enable the canonical docker.io images."
+          else
+            echo "::error title=Docker Hub secrets half-configured::Exactly one of DOCKERHUB_USERNAME / DOCKERHUB_TOKEN is set. Set both to publish to Docker Hub, or remove both to skip it. Refusing to guess."
+            exit 1
+          fi
+
+          IS_PRERELEASE=false
+          if [[ "$VERSION" == *-* ]]; then
+            IS_PRERELEASE=true
+          fi
+
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"   # GHCR requires lowercase
+          GHCR_IMAGE="ghcr.io/${OWNER}/mcpsuite-crm"
+          DOCKERHUB_IMAGE="docker.io/${DOCKERHUB_IMAGE_OVERRIDE:-mcpsuite/crm}"
+
+          {
+            echo "version=$VERSION"
+            echo "is_prerelease=$IS_PRERELEASE"
+            echo "dockerhub=$DOCKERHUB"
+            echo "ghcr_image=$GHCR_IMAGE"
+            echo "dockerhub_image=$DOCKERHUB_IMAGE"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Release preflight — $TAG"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Version (package.json) | \`$VERSION\` |"
+            echo "| Prerelease | $IS_PRERELEASE |"
+            echo "| GHCR image (always) | \`$GHCR_IMAGE\` |"
+            echo "| Docker Hub image | \`$DOCKERHUB_IMAGE\` — publish: **$DOCKERHUB** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  image:
+    name: Container image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    # The arm64 half builds under QEMU emulation (pnpm install + vite build),
+    # which is slow. Native arm runners are the upgrade path — see RELEASING.md.
+    timeout-minutes: 120
+    needs: preflight
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: needs.preflight.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+          DOCKERHUB: ${{ needs.preflight.outputs.dockerhub }}
+          GHCR_IMAGE: ${{ needs.preflight.outputs.ghcr_image }}
+          DOCKERHUB_IMAGE: ${{ needs.preflight.outputs.dockerhub_image }}
+        run: |
+          set -euo pipefail
+          TAGS="${GHCR_IMAGE}:${VERSION}"
+          if [[ "$IS_PRERELEASE" != "true" ]]; then
+            TAGS="${TAGS},${GHCR_IMAGE}:latest"
+          fi
+          if [[ "$DOCKERHUB" == "true" ]]; then
+            TAGS="${TAGS},${DOCKERHUB_IMAGE}:${VERSION}"
+            if [[ "$IS_PRERELEASE" != "true" ]]; then
+              TAGS="${TAGS},${DOCKERHUB_IMAGE}:latest"
+            fi
+          fi
+          echo "Pushing tags: $TAGS"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.preflight.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          # No provenance attestation manifests: keeps the registry tag listing
+          # to exactly the two platform images (no "unknown/unknown" entries).
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  tarball:
+    name: Tarball (${{ matrix.arch }})
+    # Native runner per arch: better-sqlite3 is a native module and
+    # build-tarball.sh refuses cross-arch builds (a cross-built binding would
+    # crash on load), so the arm64 leg runs on GitHub's free-for-public-repos
+    # arm64 runner and everything — install, build, smoke — is native.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # After setup-node on purpose: node 22 bundles corepack, newer runner
+      # system nodes may not.
+      - name: Set up pnpm 10 (corepack)
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest-10 --activate
+
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+
+      - name: Build tarball
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          touch .tarball-marker
+          bash .scripts/release/build-tarball.sh --arch "$ARCH"
+
+      - name: Locate tarball
+        id: locate
+        run: |
+          set -euo pipefail
+          # build-tarball.sh writes dist-release/; the mtime fallback below
+          # only exists to catch the script moving without this step keeping
+          # up (it excludes node runtime downloads and dependency dirs).
+          FOUND=()
+          if [[ -d dist-release ]]; then
+            mapfile -t FOUND < <(find dist-release -maxdepth 1 -name '*.tar.gz' | sort)
+          fi
+          if [[ ${#FOUND[@]} -eq 0 ]]; then
+            mapfile -t FOUND < <(find . -name '*.tar.gz' -newer .tarball-marker \
+              -not -path './node_modules/*' -not -path './.git/*' \
+              -not -name 'node-*' | sort)
+          fi
+          if [[ ${#FOUND[@]} -eq 0 ]]; then
+            echo "::error title=No tarball produced::build-tarball.sh exited 0 but no .tar.gz was found (checked dist-release/ and files newer than the build marker). If the script writes somewhere else, update the 'Locate tarball' step."
+            exit 1
+          fi
+          if [[ ${#FOUND[@]} -gt 1 ]]; then
+            echo "::error title=Ambiguous tarball::Expected exactly one artifact per arch, found ${#FOUND[@]}:"
+            printf '  %s\n' "${FOUND[@]}"
+            exit 1
+          fi
+          mkdir -p release-assets
+          cp "${FOUND[0]}" release-assets/
+          echo "Tarball: ${FOUND[0]} ($(du -h "${FOUND[0]}" | cut -f1))"
+          echo "tarball=release-assets/$(basename "${FOUND[0]}")" >> "$GITHUB_OUTPUT"
+
+      # better-sqlite3 is a NATIVE module: a wrong-arch build would ship a
+      # tarball that crashes on the user's machine. This step executes the
+      # bundled node natively (the runner matches the target arch) and opens
+      # a real database, so an arch problem fails THIS JOB, never the user.
+      - name: Smoke test (bundled node + better-sqlite3 under target arch)
+        env:
+          ARCH: ${{ matrix.arch }}
+          TARBALL: ${{ steps.locate.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          case "$ARCH" in
+            x86_64) ELF_PAT='x86-64' ;;
+            arm64)  ELF_PAT='aarch64' ;;
+            *) echo "::error::Unknown arch '$ARCH'"; exit 1 ;;
+          esac
+
+          SMOKE_DIR="$(mktemp -d)"
+          tar -xzf "$TARBALL" -C "$SMOKE_DIR"
+
+          NODE_BIN="$(find "$SMOKE_DIR" -type f -name node | sort | head -n 1)"
+          if [[ -z "$NODE_BIN" ]]; then
+            echo "::error title=Not self-contained::$TARBALL contains no bundled 'node' binary."
+            exit 1
+          fi
+          echo "bundled node: $NODE_BIN"
+          file "$NODE_BIN"
+          if ! file -b "$NODE_BIN" | grep -q "$ELF_PAT"; then
+            echo "::error title=Wrong-arch runtime::Bundled node is not a $ARCH ($ELF_PAT) binary — build-tarball.sh --arch was not honored."
+            exit 1
+          fi
+          "$NODE_BIN" --version
+
+          BINDING="$(find "$SMOKE_DIR" -type f -name 'better_sqlite3.node' | sort | head -n 1)"
+          if [[ -z "$BINDING" ]]; then
+            echo "::error title=Missing native binding::No better_sqlite3.node found in the tarball — the CRM cannot open its database without it."
+            exit 1
+          fi
+          file "$BINDING"
+          if ! file -b "$BINDING" | grep -q "$ELF_PAT"; then
+            echo "::error title=Wrong-arch native module::better_sqlite3.node is '$(file -b "$BINDING")', expected $ARCH ($ELF_PAT). This artifact would crash on load."
+            exit 1
+          fi
+
+          BS3_PKG="$(find "$SMOKE_DIR" -type d -path '*node_modules/better-sqlite3' | sort | head -n 1)"
+          if [[ -z "$BS3_PKG" ]]; then
+            echo "::error title=Layout surprise::better_sqlite3.node exists but no node_modules/better-sqlite3 package dir was found, so the load test cannot run. If the layout is intentional, adjust this smoke step."
+            exit 1
+          fi
+          "$NODE_BIN" -e '
+            const Database = require(process.argv[1]);
+            const db = new Database(":memory:");
+            db.exec("CREATE TABLE smoke (n INTEGER)");
+            db.prepare("INSERT INTO smoke (n) VALUES (?)").run(42);
+            const row = db.prepare("SELECT n FROM smoke").get();
+            if (row.n !== 42) throw new Error("unexpected row: " + JSON.stringify(row));
+            db.close();
+            console.log("better-sqlite3 native binding loaded and executed OK on", process.arch);
+          ' "$BS3_PKG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  publish:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [preflight, image, tarball]
+    permissions:
+      contents: write # create the release + upload assets
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd release-assets
+          COUNT="$(find . -maxdepth 1 -name '*.tar.gz' | wc -l)"
+          if [[ "$COUNT" -lt 2 ]]; then
+            echo "::error title=Missing artifacts::Expected one tarball per architecture (2 total), found $COUNT. Did both arches produce the same filename?"
+            ls -la
+            exit 1
+          fi
+          sha256sum ./*.tar.gz | sed 's|\./||' > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          if gh release view "$TAG" --json name > /dev/null 2>&1; then
+            echo "Release $TAG already exists — replacing assets (workflow re-run)."
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            ARGS=(--title "MCP Suite CRM $TAG" --generate-notes --verify-tag)
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              ARGS+=(--prerelease)
+            fi
+            gh release create "$TAG" "${ARGS[@]}" release-assets/*
+          fi
+
+      - name: Summary
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          DOCKERHUB: ${{ needs.preflight.outputs.dockerhub }}
+          GHCR_IMAGE: ${{ needs.preflight.outputs.ghcr_image }}
+          DOCKERHUB_IMAGE: ${{ needs.preflight.outputs.dockerhub_image }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Released $GITHUB_REF_NAME"
+            echo ""
+            echo "- Image: \`${GHCR_IMAGE}:${VERSION}\`"
+            if [[ "$DOCKERHUB" == "true" ]]; then
+              echo "- Image: \`${DOCKERHUB_IMAGE}:${VERSION}\`"
+            else
+              echo "- Docker Hub: **skipped** (secrets not configured — see RELEASING.md)"
+            fi
+            echo "- Assets:"
+            for f in release-assets/*; do
+              echo "  - \`$(basename "$f")\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
