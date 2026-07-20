@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
     "stdio": "tsx src/stdio.ts",
     "http": "tsx src/http.ts",

@@ -51,6 +51,9 @@ importers:
       '@emcp/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@emcp/mcp':
+        specifier: workspace:*
+        version: link:../mcp
       '@fontsource-variable/geist':
         specifier: ^5.2.9
         version: 5.2.9
@@ -87,6 +90,9 @@ importers:
       lucide-react:
         specifier: ^1.23.0
         version: 1.23.0(react@19.2.7)
+      pg:
+        specifier: ^8.22.0
+        version: 8.22.0
       react:
         specifier: ^19.2.7
         version: 19.2.7

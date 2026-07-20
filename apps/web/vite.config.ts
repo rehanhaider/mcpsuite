@@ -24,7 +24,9 @@ export default defineConfig(({ command, isPreview }) => ({
     viteReact(),
   ],
   ssr: {
-    // Native module — must stay external to the SSR/server bundle.
-    external: ["better-sqlite3"],
+    // better-sqlite3 is native; pg is loaded lazily by the hosted adapter.
+    // Both must stay external to the SSR/server bundle and be declared as
+    // app dependencies so the bundle resolves them from apps/web at runtime.
+    external: ["better-sqlite3", "pg"],
   },
 }));

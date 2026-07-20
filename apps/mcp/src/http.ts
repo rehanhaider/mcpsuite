@@ -1,6 +1,7 @@
 /**
- * Streamable HTTP transport on :8765 (MCP_PORT) for Claude Desktop / Cowork
- * and any remote agent.
+ * Standalone Streamable HTTP transport on :8765 (MCP_PORT) for deployments
+ * that scale MCP separately from the web process (the default install serves
+ * POST /mcp inside the web process itself — see PRODUCTION.md).
  *
  * Auth, per request:
  *   `Authorization: Bearer emcp_…` — an MCP client API key created in
@@ -8,12 +9,14 @@
  *   Any other request (missing/invalid key) gets 401.
  *
  * Stateless mode: a fresh McpServer + transport per request, no session ids.
+ * The per-request handling itself lives in handler.ts (web-standard
+ * Request/Response), shared with the in-process mount so auth and error
+ * shapes cannot drift; this file is only the node:http bridge around it.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { getRuntimeAsync, mcpContext, resolveMcpToken, resolveWorkspaceAccess } from "@emcp/db";
-import type { RequestContext } from "@emcp/core";
-import { createMcpServer, lockedRpcRejection, requireSqliteRuntime } from "./server.ts";
+import { getRuntimeAsync } from "@emcp/db";
+import { handleMcpRequest } from "./handler.ts";
+import { requireSqliteRuntime } from "./server.ts";
 
 const PORT = Number(process.env.MCP_PORT ?? 8765);
 const HOST = process.env.MCP_HOST ?? "127.0.0.1";
@@ -22,29 +25,28 @@ const HOST = process.env.MCP_HOST ?? "127.0.0.1";
 // SQLite default, file: -> SQLite at that path); Bearer auth needs SQLite.
 const runtime = requireSqliteRuntime(await getRuntimeAsync(), "HTTP");
 
-function resolveContext(req: IncomingMessage): RequestContext | null {
-  const header = req.headers.authorization;
-  if (header?.startsWith("Bearer ")) {
-    const client = resolveMcpToken(runtime.db, header.slice("Bearer ".length).trim());
-    return client ? mcpContext(client) : null;
-  }
-  return null;
-}
-
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 }
 
-async function readBody(req: IncomingMessage): Promise<unknown> {
+/** node req -> web-standard Request (body fully buffered; requests are small). */
+async function toFetchRequest(req: IncomingMessage, url: URL): Promise<Request> {
+  const method = req.method ?? "GET";
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (typeof value === "string") headers.set(name, value);
+    else if (Array.isArray(value)) for (const v of value) headers.append(name, v);
+  }
+  if (method === "GET" || method === "HEAD") return new Request(url, { method, headers });
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
+  return new Request(url, { method, headers, body: Buffer.concat(chunks) });
+}
+
+/** web-standard Response -> node res (JSON mode: bodies are complete strings). */
+async function writeFetchResponse(res: ServerResponse, response: Response): Promise<void> {
+  res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
+  res.end(Buffer.from(await response.arrayBuffer()));
 }
 
 const httpServer = createServer(async (req, res) => {
@@ -59,41 +61,7 @@ const httpServer = createServer(async (req, res) => {
       return json(res, 404, { error: "not_found", hint: "MCP endpoint is /mcp" });
     }
 
-    if (req.method !== "POST") {
-      // Stateless mode: no SSE streams or session deletes.
-      res.writeHead(405, { allow: "POST", "content-type": "application/json" });
-      return res.end(JSON.stringify({ error: "method_not_allowed" }));
-    }
-
-    const ctx = resolveContext(req);
-    if (!ctx) {
-      return json(res, 401, {
-        error: "unauthorized",
-        message: "Send Authorization: Bearer <emcp API key> — create one in the web UI under Admin → Agents.",
-      });
-    }
-
-    const body = await readBody(req);
-
-    // Hosted access gate: the key identified a client (auth succeeded), but a
-    // locked workspace refuses tool calls and resource reads at the JSON-RPC
-    // layer. Handshake and listing methods still pass through.
-    if (resolveWorkspaceAccess(runtime.db, ctx.workspaceId).mode === "locked") {
-      const rejection = lockedRpcRejection(body);
-      if (rejection) return json(res, 200, rejection);
-    }
-
-    const server = createMcpServer(runtime, ctx);
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless
-      enableJsonResponse: true,
-    });
-    res.on("close", () => {
-      void transport.close();
-      void server.close();
-    });
-    await server.connect(transport);
-    await transport.handleRequest(req, res, body);
+    await writeFetchResponse(res, await handleMcpRequest(await toFetchRequest(req, url), runtime));
   } catch (error) {
     console.error("[emcp-mcp] request failed:", error);
     if (!res.headersSent) json(res, 500, { error: "internal" });
