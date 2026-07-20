@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# emcp-run — production entrypoint for a self-contained MCP Suite CRM release.
+#
+# Lives at <release>/bin/emcp-run and is what systemd execs via
+# /opt/emcp/current/bin/emcp-run. Uses ONLY the Node runtime bundled in the
+# release (<release>/node) — no system Node, pnpm, or source checkout needed.
+#
+# Configuration (systemd loads /etc/emcp/emcp.env via EnvironmentFile=; for
+# manual runs this script sources the same file, but values already present in
+# the environment always win):
+#   WEB_PORT       port for the web + MCP server        (default 2222)
+#   DB_PATH        SQLite database file                 (default /var/lib/emcp/emcp.db)
+#   EMCP_BASE_URL  public base URL used in printed links (default http://localhost:$WEB_PORT)
+#   EMCP_ENV_FILE  alternate env file (tests)           (default /etc/emcp/emcp.env)
+set -euo pipefail
+
+ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ENV_FILE="${EMCP_ENV_FILE:-/etc/emcp/emcp.env}"
+if [[ -r "$ENV_FILE" ]]; then
+  _web_port="${WEB_PORT:-}"
+  _db_path="${DB_PATH:-}"
+  _base_url="${EMCP_BASE_URL:-}"
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  # Values from the caller's environment take precedence over the file.
+  [[ -n "$_web_port" ]] && WEB_PORT="$_web_port"
+  [[ -n "$_db_path" ]] && DB_PATH="$_db_path"
+  [[ -n "$_base_url" ]] && EMCP_BASE_URL="$_base_url"
+fi
+
+export WEB_PORT="${WEB_PORT:-2222}"
+export DB_PATH="${DB_PATH:-/var/lib/emcp/emcp.db}"
+export EMCP_BASE_URL="${EMCP_BASE_URL:-http://localhost:${WEB_PORT}}"
+
+# Make sure anything that shells out to `node` finds the bundled runtime.
+export PATH="$ROOT/node/bin:$PATH"
+
+cd "$ROOT/apps/web"
+exec "$ROOT/node/bin/node" "$ROOT/apps/web/node_modules/srvx/bin/srvx.mjs" \
+  serve --prod --dir . --entry dist/server/server.js --static dist/client \
+  --port "$WEB_PORT"

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# emcp-tsx — run a bundled TypeScript maintenance script with the release's
+# own Node runtime and the tsx that ships in packages/db's production deps.
+#
+# Usage (paths relative to the release root or absolute):
+#   <release>/bin/emcp-tsx packages/db/src/scripts/setup.ts
+#   <release>/bin/emcp-tsx packages/db/src/scripts/reset-owner.ts
+#
+# Reads DB_PATH / EMCP_BASE_URL from the environment (the callers — install.sh
+# and the emcp CLI — pass them explicitly; nothing secret transits arguments).
+set -euo pipefail
+
+ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+TSX_CLI="$ROOT/packages/db/node_modules/tsx/dist/cli.mjs"
+if [[ ! -f "$TSX_CLI" ]]; then
+  echo "emcp-tsx: bundled tsx not found at $TSX_CLI (corrupt release?)" >&2
+  exit 1
+fi
+
+export PATH="$ROOT/node/bin:$PATH"
+cd "$ROOT"
+exec "$ROOT/node/bin/node" "$TSX_CLI" "$@"

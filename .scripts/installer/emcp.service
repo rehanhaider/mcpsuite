@@ -1,0 +1,36 @@
+# emcp.service — MCP Suite CRM as a machine-wide systemd service.
+# Installed to /etc/systemd/system/emcp.service by install.sh.
+# One process serves the web UI, POST /mcp, and GET /healthz on WEB_PORT.
+# Config lives in /etc/emcp/emcp.env; data in /var/lib/emcp; code under
+# /opt/emcp/releases/<version> behind the /opt/emcp/current symlink.
+[Unit]
+Description=MCP Suite CRM (emcp) — web UI + MCP server
+Documentation=https://github.com/rehanhaider/mcpsuite
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=emcp
+Group=emcp
+EnvironmentFile=/etc/emcp/emcp.env
+Environment=HOME=/var/lib/emcp
+ExecStart=/opt/emcp/current/bin/emcp-run
+WorkingDirectory=/opt/emcp/current
+Restart=on-failure
+RestartSec=3
+
+# Hardening: the service only ever writes its SQLite data under /var/lib/emcp.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/emcp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

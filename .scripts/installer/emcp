@@ -1,0 +1,442 @@
+#!/usr/bin/env bash
+# emcp — admin CLI for a machine-wide MCP Suite CRM install.
+# Installed to /usr/local/bin/emcp by install.sh; a copy ships inside every
+# release tarball under installer/ (updates refresh this file).
+#
+# Commands:
+#   emcp status                    service state, version, health
+#   emcp logs [journalctl args]    tail service logs (default -n 50; try -f)
+#   emcp version                   CLI + installed release versions
+#   sudo emcp start|stop|restart   control the systemd service
+#   sudo emcp setup-code           print a fresh one-time owner setup/reset code
+#   sudo emcp update [--version X | --tarball PATH] [--yes]
+#                                  guarded update: verify sha256, stop, back up
+#                                  DB+config, install, db setup, swap, start,
+#                                  health-check /healthz, roll back on failure
+#   sudo emcp uninstall [--purge] [--yes]
+#                                  remove service + /opt/emcp (+ CLI); keeps
+#                                  /var/lib/emcp and /etc/emcp unless --purge
+#                                  (which demands a typed confirmation)
+#
+# Layout: /opt/emcp/releases/<v> + /opt/emcp/current, /etc/emcp/emcp.env,
+# /var/lib/emcp (data + backups), unit emcp.service, service user 'emcp'.
+#
+# Testing: EMCP_INSTALL_ROOT=<dir> re-roots every path and stubs out systemd,
+# journalctl, root checks, and the service-user switch (repo dry-run only).
+set -euo pipefail
+
+REPO="${EMCP_REPO:-rehanhaider/mcpsuite}"
+PREFIX="${EMCP_INSTALL_ROOT:-}"
+TEST_MODE=0
+[[ -n "$PREFIX" ]] && TEST_MODE=1
+
+OPT_DIR="$PREFIX/opt/emcp"
+CURRENT="$OPT_DIR/current"
+ETC_DIR="$PREFIX/etc/emcp"
+ENV_FILE="$ETC_DIR/emcp.env"
+VAR_DIR="$PREFIX/var/lib/emcp"
+BACKUP_DIR="$VAR_DIR/backups"
+BIN_DIR="$PREFIX/usr/local/bin"
+UNIT_DIR="$PREFIX/etc/systemd/system"
+SERVICE="emcp"
+SERVICE_USER="emcp"
+BACKUP_KEEP="${EMCP_BACKUP_KEEP:-5}"
+
+log()  { printf '\033[36m[emcp]\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m[emcp] WARNING:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m[emcp] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+require_root() {
+  [[ "$TEST_MODE" -eq 1 ]] && return 0
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "'emcp $CMD' must run as root (use sudo)"
+}
+
+svc() { # systemctl wrapper, stubbed in test mode
+  if [[ "$TEST_MODE" -eq 1 ]]; then log "[test mode] systemctl $*"; return 0; fi
+  systemctl "$@"
+}
+
+# Run a command as the service user with the service environment.
+run_as_service_user() {
+  if [[ "$TEST_MODE" -eq 1 ]]; then
+    env HOME="$VAR_DIR" DB_PATH="$DB_PATH" EMCP_BASE_URL="$EMCP_BASE_URL" "$@"
+  else
+    runuser -u "$SERVICE_USER" -- env \
+      HOME=/var/lib/emcp DB_PATH="$DB_PATH" EMCP_BASE_URL="$EMCP_BASE_URL" "$@"
+  fi
+}
+
+load_env() {
+  WEB_PORT=2222
+  EMCP_BASE_URL=""
+  DB_PATH="/var/lib/emcp/emcp.db"
+  if [[ -r "$ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    WEB_PORT="$(. "$ENV_FILE" && echo "${WEB_PORT:-2222}")"
+    # shellcheck disable=SC1090
+    DB_PATH="$(. "$ENV_FILE" && echo "${DB_PATH:-/var/lib/emcp/emcp.db}")"
+    # shellcheck disable=SC1090
+    EMCP_BASE_URL="$(. "$ENV_FILE" && echo "${EMCP_BASE_URL:-}")"
+  fi
+  [[ -n "$EMCP_BASE_URL" ]] || EMCP_BASE_URL="http://localhost:$WEB_PORT"
+  [[ "$TEST_MODE" -eq 1 && "$DB_PATH" == /var/lib/emcp/* ]] && DB_PATH="$PREFIX$DB_PATH"
+  return 0
+}
+
+installed_version() { # -> EMCP_VERSION of the current release, or ""
+  if [[ -f "$CURRENT/VERSION" ]]; then
+    # shellcheck disable=SC1091
+    (. "$CURRENT/VERSION" && echo "${EMCP_VERSION:-}")
+  fi
+}
+
+require_install() {
+  [[ -L "$CURRENT" || -d "$CURRENT" ]] || die "no install found at $OPT_DIR (run install.sh first)"
+}
+
+health_probe() { # $1 = seconds to keep trying; returns 0 when /healthz answers 200
+  local tries="$1" i
+  for ((i = 0; i < tries; i++)); do
+    if curl -fsS -m 2 -o /dev/null "http://127.0.0.1:$WEB_PORT/healthz" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+github_latest_version() {
+  local tag
+  tag="$(curl -fsSL --retry 3 "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')" || true
+  [[ -n "$tag" ]] || die "could not resolve the latest release of $REPO"
+  echo "${tag#v}"
+}
+
+machine_arch() {
+  case "$(uname -m)" in
+    x86_64)          echo x86_64 ;;
+    aarch64 | arm64) echo arm64 ;;
+    *) die "unsupported CPU: $(uname -m)" ;;
+  esac
+}
+
+# --------------------------------------------------------------- commands --
+
+cmd_start()   { require_root; svc start "$SERVICE";   log "started $SERVICE.service"; }
+cmd_stop()    { require_root; svc stop "$SERVICE";    log "stopped $SERVICE.service"; }
+cmd_restart() { require_root; svc restart "$SERVICE"; log "restarted $SERVICE.service"; }
+
+cmd_status() {
+  load_env
+  local v; v="$(installed_version || true)"
+  echo "emcp — MCP Suite CRM"
+  echo "  release   : ${v:-none installed} ($(readlink "$CURRENT" 2>/dev/null || echo 'no current symlink'))"
+  echo "  config    : $ENV_FILE (WEB_PORT=$WEB_PORT)"
+  echo "  data      : $DB_PATH"
+  if [[ "$TEST_MODE" -eq 0 ]]; then
+    echo "  service   : $(systemctl is-enabled "$SERVICE" 2>/dev/null || echo not-installed) / $(systemctl is-active "$SERVICE" 2>/dev/null || echo inactive)"
+  else
+    echo "  service   : [test mode] systemd stubbed"
+  fi
+  if health_probe 1; then
+    echo "  health    : ok (GET /healthz -> 200 on :$WEB_PORT)"
+  else
+    echo "  health    : NOT responding on http://127.0.0.1:$WEB_PORT/healthz"
+  fi
+}
+
+cmd_logs() {
+  [[ "$TEST_MODE" -eq 1 ]] && { log "[test mode] journalctl -u $SERVICE $*"; return 0; }
+  if [[ $# -gt 0 ]]; then journalctl -u "$SERVICE" "$@"; else journalctl -u "$SERVICE" -n 50 --no-pager; fi
+}
+
+cmd_version() {
+  require_install
+  echo "installed release:"
+  sed 's/^/  /' "$CURRENT/VERSION"
+  echo "available releases in $OPT_DIR/releases:"
+  ls -1 "$OPT_DIR/releases" 2>/dev/null | sed 's/^/  /' || true
+}
+
+cmd_setup_code() {
+  require_root
+  require_install
+  load_env
+  # reset-owner prints the one-time code on stdout, exactly once. Pass it
+  # straight through to the terminal; never capture it into files or logs.
+  log "issuing a fresh one-time owner code (invalidates the previous one)"
+  run_as_service_user "$CURRENT/bin/emcp-tsx" packages/db/src/scripts/reset-owner.ts
+}
+
+# ------------------------------------------------------------------ update --
+
+cmd_update() {
+  require_root
+  require_install
+  load_env
+
+  local want_version="" tarball="" assume_yes=0 pinned=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version) [[ $# -ge 2 ]] || die "--version needs a value"; want_version="${2#v}"; pinned=1; shift 2 ;;
+      --tarball) [[ $# -ge 2 ]] || die "--tarball needs a path"; tarball="$2"; pinned=1; shift 2 ;;
+      --yes | -y) assume_yes=1; shift ;;
+      *) die "unknown argument for update: $1" ;;
+    esac
+  done
+
+  local cur_version arch
+  cur_version="$(installed_version || true)"
+  arch="$(machine_arch)"
+
+  local work
+  work="$(mktemp -d -t emcp-update.XXXXXX)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$work'" EXIT INT TERM
+
+  # -- obtain + verify the release ------------------------------------------
+  if [[ -n "$tarball" ]]; then
+    [[ -f "$tarball" ]] || die "tarball not found: $tarball"
+    if [[ -f "$tarball.sha256" ]]; then
+      log "verifying sha256 ($tarball.sha256)"
+      (cd "$(dirname "$tarball")" && sha256sum -c "$(basename "$tarball").sha256" >/dev/null) \
+        || die "sha256 verification FAILED for $tarball"
+      log "checksum OK"
+    else
+      warn "no $tarball.sha256 next to the tarball — skipping checksum verification"
+    fi
+  else
+    command -v curl >/dev/null 2>&1 || die "curl is required for updates"
+    if [[ -z "$want_version" ]]; then
+      log "checking latest release of $REPO"
+      want_version="$(github_latest_version)"
+    fi
+    if [[ "$want_version" == "$cur_version" && "$pinned" -eq 0 ]]; then
+      log "already up to date ($cur_version)"
+      return 0
+    fi
+    local name base
+    name="mcpsuite-crm-${want_version}-linux-${arch}.tar.gz"
+    base="https://github.com/$REPO/releases/download/v${want_version}"
+    log "downloading $base/$name"
+    curl -fsSL --retry 3 -o "$work/$name" "$base/$name" || die "download failed: $base/$name"
+    curl -fsSL --retry 3 -o "$work/$name.sha256" "$base/$name.sha256" \
+      || die "download failed: $base/$name.sha256 (releases must ship checksums)"
+    log "verifying sha256"
+    (cd "$work" && sha256sum -c "$name.sha256" >/dev/null) || die "sha256 verification FAILED for $name"
+    log "checksum OK"
+    tarball="$work/$name"
+  fi
+
+  # -- extract + inspect -----------------------------------------------------
+  mkdir -p "$work/release"
+  tar -xzf "$tarball" -C "$work/release"
+  [[ -f "$work/release/VERSION" ]] || die "invalid release: VERSION missing"
+  local new_version rel_arch
+  # shellcheck disable=SC1091
+  new_version="$(. "$work/release/VERSION" && echo "${EMCP_VERSION:-}")"
+  # shellcheck disable=SC1091
+  rel_arch="$(. "$work/release/VERSION" && echo "${EMCP_ARCH:-}")"
+  [[ -n "$new_version" ]] || die "invalid release: EMCP_VERSION missing"
+  [[ "$rel_arch" == "$arch" ]] || die "release is for $rel_arch but this machine is $arch"
+  [[ -x "$work/release/bin/emcp-run" && -x "$work/release/node/bin/node" ]] \
+    || die "invalid release: bin/emcp-run or bundled node missing"
+
+  if [[ "$new_version" == "$cur_version" && "$pinned" -eq 0 ]]; then
+    log "already up to date ($cur_version)"
+    return 0
+  fi
+
+  # -- confirm (never silent) ------------------------------------------------
+  echo
+  echo "  update plan:  ${cur_version:-<none>}  ->  $new_version  (linux/$arch)"
+  echo "  service will be stopped; DB + config backed up to $BACKUP_DIR"
+  echo
+  if [[ "$assume_yes" -ne 1 ]]; then
+    [[ -t 0 ]] || die "stdin is not a terminal — re-run with --yes to confirm the update"
+    local reply
+    read -r -p "Proceed with the update? [y/N] " reply
+    [[ "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" ]] || die "update cancelled"
+  fi
+
+  # -- stop + back up --------------------------------------------------------
+  log "stopping $SERVICE.service"
+  svc stop "$SERVICE" || true
+
+  local ts bdir
+  ts="$(date +%Y%m%d-%H%M%S)"
+  bdir="$BACKUP_DIR/$ts"
+  mkdir -p "$bdir"
+  log "backing up database + config to $bdir"
+  local f
+  for f in "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm"; do
+    [[ -f "$f" ]] && cp -a "$f" "$bdir/"
+  done
+  [[ -f "$ENV_FILE" ]] && cp -a "$ENV_FILE" "$bdir/"
+  readlink "$CURRENT" > "$bdir/PREV_RELEASE" 2>/dev/null || true
+  if [[ "$TEST_MODE" -eq 0 ]]; then chown -R "$SERVICE_USER:$SERVICE_USER" "$bdir"; fi
+
+  # retention: keep the newest $BACKUP_KEEP backups
+  local old
+  while IFS= read -r old; do
+    log "pruning old backup $old"
+    rm -rf "${BACKUP_DIR:?}/$old"
+  done < <(ls -1 "$BACKUP_DIR" | sort | head -n -"$BACKUP_KEEP")
+
+  # -- place the new release -------------------------------------------------
+  local prev_link rel_dir moved_aside=""
+  prev_link="$(readlink "$CURRENT" 2>/dev/null || true)"
+  rel_dir="$OPT_DIR/releases/$new_version"
+  if [[ -e "$rel_dir" ]]; then
+    moved_aside="$rel_dir.old-$ts"
+    warn "release dir $rel_dir already exists — setting it aside"
+    mv "$rel_dir" "$moved_aside"
+  fi
+  mv "$work/release" "$rel_dir"
+
+  rollback() {
+    warn "UPDATE FAILED — rolling back"
+    svc stop "$SERVICE" >/dev/null 2>&1 || true
+    if [[ -n "$prev_link" ]]; then
+      ln -s "$prev_link" "$OPT_DIR/.current.tmp.$$" && mv -T "$OPT_DIR/.current.tmp.$$" "$CURRENT"
+      log "restored current -> $prev_link"
+    fi
+    if [[ -n "$moved_aside" && -e "$moved_aside" ]]; then
+      rm -rf "$rel_dir"
+      mv "$moved_aside" "$rel_dir"
+    elif [[ "$rel_dir" != "$OPT_DIR/releases/${cur_version:-__none__}" ]]; then
+      # The failed release was newly placed — remove it again.
+      rm -rf "$rel_dir"
+    fi
+    local bf
+    for bf in "$bdir"/*; do
+      [[ -f "$bf" ]] || continue
+      case "$(basename "$bf")" in
+        emcp.env | PREV_RELEASE) ;; # config untouched by updates; keep as backup only
+        *) cp -a "$bf" "$(dirname "$DB_PATH")/" ;;
+      esac
+    done
+    log "restored database from $bdir"
+    svc start "$SERVICE" >/dev/null 2>&1 || true
+    die "update to $new_version failed; previous release ${cur_version:-?} restored (backup kept at $bdir)"
+  }
+
+  # -- refresh unit if the release ships a newer one -------------------------
+  if [[ -f "$rel_dir/installer/emcp.service" ]] \
+    && ! cmp -s "$rel_dir/installer/emcp.service" "$UNIT_DIR/$SERVICE.service"; then
+    log "updating $SERVICE.service unit"
+    install -m 0644 "$rel_dir/installer/emcp.service" "$UNIT_DIR/$SERVICE.service"
+    svc daemon-reload || true
+  fi
+
+  # -- db setup on the new release (DB already backed up) --------------------
+  # Today this is a no-op on an existing database: in-place upgrade steps ship
+  # with the first post-release schema change (keyed off the version stamp).
+  log "running database setup"
+  local setup_out
+  if ! setup_out="$(run_as_service_user "$rel_dir/bin/emcp-tsx" packages/db/src/scripts/setup.ts 2>&1)"; then
+    echo "$setup_out" >&2
+    rollback
+  fi
+
+  # -- swap current + start --------------------------------------------------
+  ln -s "releases/$new_version" "$OPT_DIR/.current.tmp.$$"
+  mv -T "$OPT_DIR/.current.tmp.$$" "$CURRENT"
+  log "current -> releases/$new_version"
+
+  log "starting $SERVICE.service"
+  svc start "$SERVICE" || rollback
+
+  if [[ "$TEST_MODE" -eq 0 ]]; then
+    log "health check: http://127.0.0.1:$WEB_PORT/healthz (up to 30s)"
+    health_probe 30 || rollback
+    log "healthy (GET /healthz -> 200)"
+  else
+    log "[test mode] skipping post-start health check"
+  fi
+
+  # -- success: clean up + refresh CLI ---------------------------------------
+  [[ -n "$moved_aside" ]] && rm -rf "$moved_aside"
+  if [[ -f "$rel_dir/installer/emcp" ]] && ! cmp -s "$rel_dir/installer/emcp" "$BIN_DIR/emcp"; then
+    install -m 0755 "$rel_dir/installer/emcp" "$BIN_DIR/emcp"
+    log "updated the emcp CLI itself"
+  fi
+
+  echo
+  log "update complete: ${cur_version:-<none>} -> $new_version"
+  echo "$setup_out" | sed 's/^/  /'
+  log "backup kept at $bdir (retention: last $BACKUP_KEEP)"
+}
+
+# --------------------------------------------------------------- uninstall --
+
+cmd_uninstall() {
+  require_root
+  local purge=0 assume_yes=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --purge) purge=1; shift ;;
+      --yes | -y) assume_yes=1; shift ;;
+      *) die "unknown argument for uninstall: $1" ;;
+    esac
+  done
+
+  echo "This will remove:"
+  echo "  - the $SERVICE.service systemd unit"
+  echo "  - $OPT_DIR (all installed releases)"
+  echo "  - $BIN_DIR/emcp (this CLI)"
+  if [[ "$purge" -eq 1 ]]; then
+    echo "  - PLUS ALL DATA: $VAR_DIR (database + backups) and $ETC_DIR (config)"
+  else
+    echo "Kept: $VAR_DIR (database + backups) and $ETC_DIR (config)."
+  fi
+  if [[ "$assume_yes" -ne 1 ]]; then
+    [[ -t 0 ]] || die "stdin is not a terminal — re-run with --yes"
+    local reply
+    read -r -p "Continue? [y/N] " reply
+    [[ "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" ]] || die "uninstall cancelled"
+  fi
+  if [[ "$purge" -eq 1 ]]; then
+    # Deleting the database is irreversible: always demand the typed phrase,
+    # even with --yes.
+    [[ -t 0 ]] || die "--purge needs an interactive terminal for its typed confirmation"
+    local phrase
+    read -r -p "Type 'delete-my-data' to permanently erase $VAR_DIR and $ETC_DIR: " phrase
+    [[ "$phrase" == "delete-my-data" ]] || die "confirmation did not match — nothing was deleted"
+  fi
+
+  svc stop "$SERVICE" 2>/dev/null || true
+  svc disable "$SERVICE" 2>/dev/null || true
+  rm -f "$UNIT_DIR/$SERVICE.service"
+  svc daemon-reload 2>/dev/null || true
+  rm -rf "$OPT_DIR"
+  rm -f "$BIN_DIR/emcp"
+  log "removed service, releases, and CLI"
+
+  if [[ "$purge" -eq 1 ]]; then
+    rm -rf "$VAR_DIR" "$ETC_DIR"
+    log "purged $VAR_DIR and $ETC_DIR"
+  else
+    log "kept data in $VAR_DIR and config in $ETC_DIR"
+  fi
+  log "note: the '$SERVICE_USER' system user was kept (remove with: userdel $SERVICE_USER)"
+}
+
+usage() { sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+CMD="${1:-}"
+[[ -n "$CMD" ]] && shift || true
+case "$CMD" in
+  start)      cmd_start "$@" ;;
+  stop)       cmd_stop "$@" ;;
+  restart)    cmd_restart "$@" ;;
+  status)     cmd_status "$@" ;;
+  logs)       cmd_logs "$@" ;;
+  version)    cmd_version "$@" ;;
+  setup-code) cmd_setup_code "$@" ;;
+  update)     cmd_update "$@" ;;
+  uninstall)  cmd_uninstall "$@" ;;
+  -h | --help | help | "") usage ;;
+  *) die "unknown command: $CMD (see emcp --help)" ;;
+esac
