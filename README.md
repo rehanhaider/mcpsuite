@@ -15,7 +15,7 @@ shared audit trail.
 | `apps/web` | Login, the authenticated CRM under `/app/*`, and the HTTP operation API |
 | `apps/mcp` | MCP over stdio and HTTP |
 | `packages/core` | Domain types, authorization policy, and operation catalog |
-| `packages/db` | SQLite persistence, migrations, authentication, and bootstrap |
+| `packages/db` | SQLite persistence, schema, authentication, and bootstrap |
 
 The CRM covers companies, people, leads, deals, activities, tasks, pipelines,
 tags, contact lists, custom fields, saved views, offerings, approvals, users,
@@ -43,9 +43,11 @@ change the password after signing in.
 docker compose up -d
 ```
 
-The web app listens on `:2222`, MCP HTTP on `:8765`, and persistent state lives
-in `./data`. The compose file builds the image locally until official images
-are released.
+One container, one process on `:2222`: the web app, the operation API, the
+MCP endpoint for agents (`POST /mcp`) and `GET /healthz`. Persistent state
+lives in `./data`. The compose file builds the `mcpsuite/crm` image locally
+until official images are released. See [PRODUCTION.md](PRODUCTION.md) for
+the standalone-MCP command override and reverse-proxy guidance.
 
 ## Connect an agent
 
@@ -56,7 +58,7 @@ scope, and trust-profile guide is in [docs/mcp.md](docs/mcp.md).
 Example for Claude Code:
 
 ```sh
-claude mcp add --transport http mcpsuite-crm http://localhost:8765/mcp \
+claude mcp add --transport http mcpsuite-crm http://localhost:2222/mcp \
   --header "Authorization: Bearer emcp_YOUR_KEY"
 ```
 

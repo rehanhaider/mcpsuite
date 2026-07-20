@@ -12,7 +12,7 @@ Every key is hashed at rest (SHA-256), scoped, and revocable.
 
 Throughout this guide the placeholder `emcp_YOUR_KEY` marks where your real key
 goes (the app inlines the actual key for you). The endpoint is
-`http://localhost:8765/mcp` on the machine running emcp; substitute the host if
+`http://localhost:2222/mcp` on the machine running emcp; substitute the host if
 you're connecting from elsewhere.
 
 ## Create an API key
@@ -50,7 +50,7 @@ Each block below is complete on its own — nothing to export first.
 One command registers this CRM as an HTTP MCP server:
 
 ```sh
-claude mcp add --transport http emcp-crm http://localhost:8765/mcp \
+claude mcp add --transport http emcp-crm http://localhost:2222/mcp \
   --header "Authorization: Bearer emcp_YOUR_KEY"
 ```
 
@@ -62,7 +62,7 @@ Add to `.cursor/mcp.json` (project) or the global MCP settings:
 {
   "mcpServers": {
     "emcp-crm": {
-      "url": "http://localhost:8765/mcp",
+      "url": "http://localhost:2222/mcp",
       "headers": { "Authorization": "Bearer emcp_YOUR_KEY" }
     }
   }
@@ -78,7 +78,7 @@ to be in the environment:
 
 ```toml
 [mcp_servers.emcp-crm]
-url = "http://localhost:8765/mcp"
+url = "http://localhost:2222/mcp"
 http_headers = { "Authorization" = "Bearer emcp_YOUR_KEY" }
 ```
 
@@ -86,7 +86,7 @@ http_headers = { "Authorization" = "Bearer emcp_YOUR_KEY" }
 > sessions run in an isolated container with no route back to your machine, so
 > the settings-UI connector toggle saves but the runtime never connects. Custom
 > local MCP only works with Codex running **locally** (CLI / IDE / desktop app).
-> To use it from a cloud session you'd have to expose `:8765` over a tunnel
+> To use it from a cloud session you'd have to expose `:2222` over a tunnel
 > (e.g. tailscale or cloudflared) and point the connector at that URL instead.
 
 ### Claude Desktop / other stdio-only clients
@@ -102,7 +102,7 @@ this into the `mcpServers` block of `claude_desktop_config.json`:
       "args": [
         "-y",
         "mcp-remote",
-        "http://localhost:8765/mcp",
+        "http://localhost:2222/mcp",
         "--allow-http",
         "--header",
         "Authorization: Bearer emcp_YOUR_KEY"
@@ -117,27 +117,31 @@ this into the `mcpServers` block of `claude_desktop_config.json`:
 Any HTTP client works. List the tools to confirm the key:
 
 ```sh
-curl -X POST http://localhost:8765/mcp \
+curl -X POST http://localhost:2222/mcp \
   -H "Authorization: Bearer emcp_YOUR_KEY" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-## The HTTP server (`:8765`)
+## The HTTP endpoint
 
-Start it with `make mcp-http` (dev), `make autostart` (systemd), or
-`docker compose up -d`. Endpoint: `POST http://localhost:8765/mcp` (streamable
-HTTP, stateless — no SSE sessions). It binds `127.0.0.1` by default
-(`MCP_HOST=0.0.0.0` in Docker). Health check: `GET /healthz`. Every request
-must carry `Authorization: Bearer <key>`; a missing/invalid key returns `401`.
+MCP is served by the product process itself: `POST /mcp` on the web port
+(`http://localhost:2222/mcp` by default, `docker compose up -d` included) —
+streamable HTTP, stateless, no SSE sessions. Health check: `GET /healthz`.
+Every request must carry `Authorization: Bearer <key>`; a missing/invalid key
+returns `401`.
+
+A standalone MCP-only server still exists for split deployments and dev
+(`make mcp-http`, port `MCP_PORT` default 8765, binds `127.0.0.1` unless
+`MCP_HOST=0.0.0.0`); it serves the same endpoint with the same auth.
 
 ## Troubleshooting
 
 "Enabled but no tools show up" — work down this list:
 
 - **Cloud vs local.** Codex cloud / ChatGPT web can't reach localhost (see
-  above). Run the client locally, or expose `:8765` over a tunnel.
+  above). Run the client locally, or expose `:2222` over a tunnel.
 - **Key actually in the config.** The snippets above put the key directly in the
   client's config file / command. Make sure you replaced `emcp_YOUR_KEY` with
   the real key and that the client reloaded its config.
@@ -145,15 +149,15 @@ must carry `Authorization: Bearer <key>`; a missing/invalid key returns `401`.
   means the key and server are fine and the problem is the client's config:
 
   ```sh
-  curl -X POST http://localhost:8765/mcp \
+  curl -X POST http://localhost:2222/mcp \
     -H "Authorization: Bearer emcp_YOUR_KEY" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
   ```
 
-  `401` = missing/invalid key; connection refused = server isn't running on
-  `:8765`.
+  `401` = missing/invalid key; connection refused = the product isn't running
+  on that port.
 - **Env-var setups only:** if you're using one of the advanced env-var flows
   below, confirm `EMCP_API_KEY` is present in the *shell that launches the
   client* — GUI apps often don't inherit interactive-shell exports.
@@ -209,7 +213,7 @@ from an environment variable:
 
 ```toml
 [mcp_servers.emcp-crm]
-url = "http://localhost:8765/mcp"
+url = "http://localhost:2222/mcp"
 bearer_token_env_var = "EMCP_API_KEY"
 ```
 
@@ -217,7 +221,7 @@ bearer_token_env_var = "EMCP_API_KEY"
 write the entry for you:
 
 ```sh
-codex mcp add emcp-crm --url http://localhost:8765/mcp \
+codex mcp add emcp-crm --url http://localhost:2222/mcp \
   --bearer-token-env-var EMCP_API_KEY
 # verify: codex mcp list  /  codex mcp get emcp-crm
 ```
