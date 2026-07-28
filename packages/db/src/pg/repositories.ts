@@ -98,7 +98,7 @@ import {
   type User,
   type Workspace,
   type WorkspaceSettings,
-} from "@emcp/core";
+} from "@mcpsuite/core";
 import * as t from "./schema.ts";
 import { generateAuthCode, normalizeAuthCode } from "../openauth.ts";
 
@@ -169,7 +169,7 @@ export interface PgPoolLike {
 export type PgDb = PgDatabase<PgQueryResultHKT, Record<string, never>>;
 
 export interface PgConnectOptions {
-  /** e.g. postgres://crm_app:...@127.0.0.1:55432/emcp */
+  /** e.g. postgres://crm_app:...@127.0.0.1:55432/mcpsuite */
   databaseUrl: string;
   /** Pool size; keep small — every operation is a short transaction. */
   max?: number;
@@ -197,7 +197,7 @@ export async function connectPg(options: PgConnectOptions): Promise<PgHandle> {
     } catch (cause) {
       throw new Error(
         'PostgreSQL driver "pg" is not installed. It is intentionally not a dependency yet ' +
-          "(pending signoff). Install it with `pnpm --filter @emcp/db add pg` to use the Postgres adapter.",
+          "(pending signoff). Install it with `pnpm --filter @mcpsuite/db add pg` to use the Postgres adapter.",
         { cause },
       );
     }

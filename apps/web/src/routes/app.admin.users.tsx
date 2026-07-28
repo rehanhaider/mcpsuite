@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Copy, Crown, KeyRound, Plus, RotateCw, Trash2, UserX } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
-import type { User } from "@emcp/core/domain";
+import type { User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { formatDate } from "~/lib/format.ts";

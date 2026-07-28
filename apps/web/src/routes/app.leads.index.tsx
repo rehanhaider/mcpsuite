@@ -16,7 +16,7 @@ import type {
   Pipeline,
   Tag,
   User,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { CHANNEL_HINTS } from "~/lib/channels.ts";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";

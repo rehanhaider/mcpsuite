@@ -93,7 +93,7 @@ function LoginPage() {
         <div className="mb-8 flex items-center justify-center gap-2">
           <Zap className="size-6 text-primary" fill="currentColor" />
           <span className="font-mono text-xl font-bold tracking-tight">
-            emcp<span className="text-muted-foreground/60">/crm</span>
+            mcpsuite<span className="text-muted-foreground/60">/crm</span>
           </span>
         </div>
         <form

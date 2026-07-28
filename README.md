@@ -34,7 +34,7 @@ mise exec -- make dev
 ```
 
 Open <http://localhost:2222>. `/` redirects to `/login`. The first setup creates
-the SQLite database at `data/emcp.db` and prints the initial owner credentials;
+the SQLite database at `data/mcpsuite.db` and prints the initial owner credentials;
 change the password after signing in.
 
 ## Run with Docker
@@ -59,7 +59,7 @@ Example for Claude Code:
 
 ```sh
 claude mcp add --transport http mcpsuite-crm http://localhost:2222/mcp \
-  --header "Authorization: Bearer emcp_YOUR_KEY"
+  --header "Authorization: Bearer mcpsuite_YOUR_KEY"
 ```
 
 ## Development checks

@@ -3,7 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { CalendarClock, Plus } from "lucide-react";
 import { useState } from "react";
 import { z } from "zod";
-import type { Activity, Page, User } from "@emcp/core/domain";
+import type { Activity, Page, User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { daysUntil, formatDateTime, relativeTime } from "~/lib/format.ts";

@@ -5,12 +5,12 @@
 # SQLite file + WAL sidecars). Back up that dir.
 #
 # First run against an empty ./data prints a ONE-TIME owner setup code in the
-# logs (`docker compose logs emcp`) — redeem it at /set-password.
+# logs (`docker compose logs mcpsuite`) — redeem it at /set-password.
 #
 # Exposing to the internet: don't publish the port directly. Put a reverse
 # proxy with TLS in front — see "Put it behind HTTPS" in PRODUCTION.md.
 services:
-  emcp:
+  mcpsuite:
     image: mcpsuite/crm
     build: .
     ports:
@@ -18,5 +18,5 @@ services:
     volumes:
       - ./data:/data
     environment:
-      DB_PATH: /data/emcp.db
+      DB_PATH: /data/mcpsuite.db
     restart: unless-stopped

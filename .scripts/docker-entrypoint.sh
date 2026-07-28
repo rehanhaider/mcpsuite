@@ -15,7 +15,7 @@
 # POSIX sh (dash).
 set -eu
 
-: "${DB_PATH:=/data/emcp.db}"
+: "${DB_PATH:=/data/mcpsuite.db}"
 : "${WEB_PORT:=2222}"
 export DB_PATH
 
@@ -26,10 +26,10 @@ fi
 mkdir -p "$(dirname "$DB_PATH")"
 
 # pnpm keeps bins per-package; resolve them explicitly.
-echo ">>> emcp: setting up database at $DB_PATH"
+echo ">>> mcpsuite: setting up database at $DB_PATH"
 packages/db/node_modules/.bin/tsx packages/db/src/scripts/setup.ts
 
-echo ">>> emcp: starting web + MCP on :$WEB_PORT"
+echo ">>> mcpsuite: starting web + MCP on :$WEB_PORT"
 cd apps/web
 exec node_modules/.bin/srvx serve --prod --dir . \
   --entry dist/server/server.js --static dist/client --port "$WEB_PORT"

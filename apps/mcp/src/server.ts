@@ -9,16 +9,16 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodRawShape } from "zod";
 import type { z } from "zod";
-import type { OperationDef, OpResult, RequestContext } from "@emcp/core";
+import type { OperationDef, OpResult, RequestContext } from "@mcpsuite/core";
 import {
   resolveWorkspaceAccess,
   WORKSPACE_LOCKED_MESSAGE,
   workspaceLockedResult,
   type AnyRuntime,
   type Runtime,
-} from "@emcp/db";
+} from "@mcpsuite/db";
 
-export const SERVER_INFO = { name: "emcp-crm", version: "0.1.0" } as const;
+export const SERVER_INFO = { name: "mcpsuite-crm", version: "0.1.0" } as const;
 
 /**
  * Both MCP transports authenticate API keys and read the hosted-access lock
@@ -29,7 +29,7 @@ export const SERVER_INFO = { name: "emcp-crm", version: "0.1.0" } as const;
 export function requireSqliteRuntime(runtime: AnyRuntime, transport: string): Runtime {
   if (runtime.adapter !== "sqlite") {
     console.error(
-      `[emcp-mcp] The MCP ${transport} transport requires the SQLite adapter (DATABASE_URL unset or file:); ` +
+      `[mcpsuite-mcp] The MCP ${transport} transport requires the SQLite adapter (DATABASE_URL unset or file:); ` +
         `DATABASE_URL selected "${runtime.adapter}". API keys and workspace access state resolve from the SQLite store.`,
     );
     process.exit(1);
@@ -136,7 +136,7 @@ export function toolName(operationName: string): string {
 export function createMcpServer(runtime: Runtime, ctx: RequestContext): McpServer {
   const server = new McpServer(SERVER_INFO, {
     instructions:
-      "emcp CRM — agent-native sales CRM. Naming: engagements are outreach leads; deals carry money. " +
+      "mcpsuite CRM — agent-native sales CRM. Naming: engagements are outreach leads; deals carry money. " +
       "Start with stats_home for an operational overview, search_global to find records, " +
       "*_get_context tools for full record bundles. Risky operations may return pendingApproval=true — " +
       "a human must approve them in the web UI (Approvals page) before they take effect.",
@@ -170,7 +170,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
 
   server.registerResource(
     "catalog",
-    "emcp://catalog",
+    "mcpsuite://catalog",
     {
       title: "Operation catalog",
       description: "Every operation this CRM exposes: name, risk category, required scope/role.",
@@ -196,7 +196,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
 
   server.registerResource(
     "pipelines",
-    "emcp://pipelines",
+    "mcpsuite://pipelines",
     {
       title: "Pipelines and stages",
       description: "Engagement + deal pipelines with their ordered stages (ids needed for stage updates).",
@@ -207,7 +207,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
 
   server.registerResource(
     "saved-views",
-    "emcp://views",
+    "mcpsuite://views",
     {
       title: "Saved views",
       description: "Saved filters; run one with saved_view_run.",
@@ -218,7 +218,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
 
   server.registerResource(
     "pending-approvals",
-    "emcp://approvals/pending",
+    "mcpsuite://approvals/pending",
     {
       title: "Pending approvals",
       description: "Actions waiting for human review.",
@@ -235,7 +235,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
   };
   server.registerResource(
     "record-context",
-    new ResourceTemplate("emcp://context/{type}/{id}", { list: undefined }),
+    new ResourceTemplate("mcpsuite://context/{type}/{id}", { list: undefined }),
     {
       title: "Record context bundle",
       description: "Full context for one record (type: company | person | engagement | deal).",

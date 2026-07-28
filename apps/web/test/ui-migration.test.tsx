@@ -120,7 +120,7 @@ describe("shadcn migration boundaries", () => {
     expect(existsSync(join(sourceRoot, "components/Toasts.tsx"))).toBe(false);
   });
 
-  it("preserves emcp theme tokens after shadcn initialization", () => {
+  it("preserves mcpsuite theme tokens after shadcn initialization", () => {
     const css = readFileSync(join(sourceRoot, "styles/app.css"), "utf8");
 
     expect(css).toContain("--primary: #c81e78");

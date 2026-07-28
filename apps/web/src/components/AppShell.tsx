@@ -117,7 +117,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               fill="currentColor"
             />
             <span className="min-w-0 flex-1 truncate font-mono text-sm font-bold tracking-tight group-data-[collapsible=icon]:hidden">
-              emcp<span className="text-muted-foreground/60">/crm</span>
+              mcpsuite<span className="text-muted-foreground/60">/crm</span>
             </span>
             <Button
               type="button"

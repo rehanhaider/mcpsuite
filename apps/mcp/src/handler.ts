@@ -8,15 +8,15 @@
  *     deployments that scale MCP separately.
  *
  * Auth, per request:
- *   `Authorization: Bearer emcp_…` — an MCP client API key created in
+ *   `Authorization: Bearer mcpsuite_…` — an MCP client API key created in
  *   Admin → Agents. Scopes + trust profile come from the client record.
  *   Any other request (missing/invalid key) gets 401.
  *
  * Stateless mode: a fresh McpServer + transport per request, no session ids.
  */
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { mcpContext, resolveMcpToken, resolveWorkspaceAccess, type AnyRuntime, type Runtime } from "@emcp/db";
-import type { RequestContext } from "@emcp/core";
+import { mcpContext, resolveMcpToken, resolveWorkspaceAccess, type AnyRuntime, type Runtime } from "@mcpsuite/db";
+import type { RequestContext } from "@mcpsuite/core";
 import { createMcpServer, lockedRpcRejection } from "./server.ts";
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -72,7 +72,7 @@ export async function handleMcpRequest(request: Request, runtime: AnyRuntime): P
     if (!ctx) {
       return json(401, {
         error: "unauthorized",
-        message: "Send Authorization: Bearer <emcp API key> — create one in the web UI under Admin → Agents.",
+        message: "Send Authorization: Bearer <mcpsuite API key> — create one in the web UI under Admin → Agents.",
       });
     }
 
@@ -105,7 +105,7 @@ export async function handleMcpRequest(request: Request, runtime: AnyRuntime): P
       void server.close();
     }
   } catch (error) {
-    console.error("[emcp-mcp] request failed:", error);
+    console.error("[mcpsuite-mcp] request failed:", error);
     return json(500, { error: "internal" });
   }
 }

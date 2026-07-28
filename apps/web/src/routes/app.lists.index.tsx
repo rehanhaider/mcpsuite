@@ -13,7 +13,7 @@ import {
   type ContactListWithCounts,
   type ListableType,
   type SemanticColor,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { relativeTime } from "~/lib/format.ts";

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Terminal, User as UserIcon } from "lucide-react";
 import { useState } from "react";
-import type { AuditEvent, McpClient, Page, User } from "@emcp/core/domain";
+import type { AuditEvent, McpClient, Page, User } from "@mcpsuite/core/domain";
 import { opQuery } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { formatDateTime, relativeTime } from "~/lib/format.ts";

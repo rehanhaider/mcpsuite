@@ -39,7 +39,7 @@ command override (skip publishing `:8765` unless agents connect from outside
 the host):
 
 ```yaml
-  emcp-mcp:
+  mcpsuite-mcp:
     image: mcpsuite/crm
     command: pnpm mcp:http
     ports:
@@ -79,7 +79,7 @@ After pulling source changes:
 mise exec -- make deploy
 ```
 
-Do not run `make dev` while the `emcp-web` service owns port 2222.
+Do not run `make dev` while the `mcpsuite-web` service owns port 2222.
 
 ## Put it behind HTTPS
 
@@ -110,18 +110,18 @@ mode.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DB_PATH` | `data/emcp.db` through mise | SQLite database path |
+| `DB_PATH` | `data/mcpsuite.db` through mise | SQLite database path |
 | `WEB_PORT` | `2222` | The product port: web app + API + `/mcp` + `/healthz` |
 | `MCP_PORT` | `8765` | Standalone MCP HTTP process only |
 | `MCP_HOST` | `127.0.0.1` | Standalone MCP bind address; Docker sets `0.0.0.0` |
-| `EMCP_API_KEY` | none | MCP key used by the stdio launcher |
+| `MCPSUITE_API_KEY` | none | MCP key used by the stdio launcher |
 
 ## Backups
 
 SQLite's online backup command is safe while the database is in WAL mode:
 
 ```sh
-sqlite3 /path/to/emcp.db "VACUUM INTO '/path/to/backups/emcp-backup.db'"
+sqlite3 /path/to/mcpsuite.db "VACUUM INTO '/path/to/backups/mcpsuite-backup.db'"
 ```
 
 Copy backups off the host and test restoration. To restore, stop the

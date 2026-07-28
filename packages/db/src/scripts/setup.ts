@@ -15,8 +15,8 @@ if (url?.startsWith("postgresql://") || url?.startsWith("postgres://")) {
   const handle = await connectPg({ databaseUrl: process.env.DATABASE_URL!.trim() });
   try {
     const { created } = await initPgSchema(handle.pool);
-    console.log(`[emcp] database: postgres (crm schema)`);
-    console.log(`[emcp] schema: ${created ? "created (version 1)" : "already present"}`);
+    console.log(`[mcpsuite] database: postgres (crm schema)`);
+    console.log(`[mcpsuite] schema: ${created ? "created (version 1)" : "already present"}`);
   } finally {
     await handle.close();
   }
@@ -27,20 +27,20 @@ if (url?.startsWith("postgresql://") || url?.startsWith("postgres://")) {
   const db = getDb();
   const result = bootstrap(db);
 
-  console.log(`[emcp] database: ${resolveDbPath()}`);
-  console.log(`[emcp] workspace: ${result.workspaceId}${result.createdWorkspace ? " (created)" : ""}`);
-  console.log(`[emcp] owner user: ${result.ownerUserId}`);
+  console.log(`[mcpsuite] database: ${resolveDbPath()}`);
+  console.log(`[mcpsuite] workspace: ${result.workspaceId}${result.createdWorkspace ? " (created)" : ""}`);
+  console.log(`[mcpsuite] owner user: ${result.ownerUserId}`);
   if (result.createdOwner) {
-    console.log(`[emcp] owner login — email: ${result.ownerEmail} (pending setup)`);
+    console.log(`[mcpsuite] owner login — email: ${result.ownerEmail} (pending setup)`);
     if (result.ownerSetupCode) {
       // A one-time SETUP CODE, never a password (docs/issues/0022). Regenerate
-      // with `pnpm --filter @emcp/db reset-owner` if lost.
-      const base = process.env.EMCP_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:2222";
-      console.log(`[emcp] set the owner password at ${base}/set-password`);
-      console.log(`[emcp] one-time setup code: ${result.ownerSetupCode}`);
+      // with `pnpm --filter @mcpsuite/db reset-owner` if lost.
+      const base = process.env.MCPSUITE_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:2222";
+      console.log(`[mcpsuite] set the owner password at ${base}/set-password`);
+      console.log(`[mcpsuite] one-time setup code: ${result.ownerSetupCode}`);
     }
   }
 
   const version = Number(db.$client.pragma("user_version", { simple: true }));
-  console.log(`[emcp] schema version: ${version}`);
+  console.log(`[mcpsuite] schema version: ${version}`);
 }

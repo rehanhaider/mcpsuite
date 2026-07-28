@@ -7,7 +7,7 @@ import {
   type Pipeline,
   type SemanticColor,
   type Stage,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { Field, Modal, SectionCard, Spinner } from "~/components/ui.tsx";

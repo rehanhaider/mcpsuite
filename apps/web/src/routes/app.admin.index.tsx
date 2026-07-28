@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import type { Workspace } from "@emcp/core/domain";
+import type { Workspace } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { ButtonSpinner, Field, SectionCard, Spinner } from "~/components/ui.tsx";
 import { Button } from "~/components/ui/button.tsx";

@@ -2,14 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Bot, Copy, Plus, ShieldOff } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import type { McpClient, User } from "@emcp/core/domain";
+import type { McpClient, User } from "@mcpsuite/core/domain";
 import {
   ROLE_GRANTABLE_SCOPES,
   TRUST_PROFILES,
   roleAtLeast,
   type McpScope,
   type Role,
-} from "@emcp/core/policy";
+} from "@mcpsuite/core/policy";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { relativeTime } from "~/lib/format.ts";
@@ -63,7 +63,7 @@ function Snippet({ code }: { code: string }) {
 }
 
 /** Readable stand-in shown in the on-page guide, replaced by the real key in the post-create modal. */
-const KEY_PLACEHOLDER = "emcp_YOUR_API_KEY";
+const KEY_PLACEHOLDER = "mcpsuite_YOUR_API_KEY";
 
 const DEFAULT_MCP_URL = "http://localhost:8765/mcp";
 
@@ -99,7 +99,7 @@ function connectGuides({
             One command registers this CRM as an HTTP MCP server:
           </p>
           <Snippet
-            code={`claude mcp add --transport http emcp-crm ${mcpUrl} \\\n  --header "Authorization: Bearer ${key}"`}
+            code={`claude mcp add --transport http mcpsuite-crm ${mcpUrl} \\\n  --header "Authorization: Bearer ${key}"`}
           />
           <p className="text-[11px] text-muted-foreground/70">
             Developing inside this repo? The bundled{" "}
@@ -121,7 +121,7 @@ function connectGuides({
           <Snippet
             code={`{
   "mcpServers": {
-    "emcp-crm": {
+    "mcpsuite-crm": {
       "url": "${mcpUrl}",
       "headers": { "Authorization": "Bearer ${key}" }
     }
@@ -141,7 +141,7 @@ function connectGuides({
             rides along as a static header:
           </p>
           <Snippet
-            code={`[mcp_servers.emcp-crm]\nurl = "${mcpUrl}"\nhttp_headers = { "Authorization" = "Bearer ${key}" }`}
+            code={`[mcp_servers.mcpsuite-crm]\nurl = "${mcpUrl}"\nhttp_headers = { "Authorization" = "Bearer ${key}" }`}
           />
           <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-2.5 py-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" />
@@ -167,7 +167,7 @@ function connectGuides({
           <Snippet
             code={`{
   "mcpServers": {
-    "emcp-crm": {
+    "mcpsuite-crm": {
       "command": "npx",
       "args": [
         "-y",

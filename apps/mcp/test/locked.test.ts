@@ -15,8 +15,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { RequestContext } from "@emcp/core";
-import { createRuntime, openDatabase, type Db, type Runtime } from "@emcp/db";
+import type { RequestContext } from "@mcpsuite/core";
+import { createRuntime, openDatabase, type Db, type Runtime } from "@mcpsuite/db";
 import { createMcpServer, lockedRpcRejection, WORKSPACE_LOCKED_RPC_CODE } from "../src/server.ts";
 
 let dir: string;
@@ -26,7 +26,7 @@ let workspaceId: string;
 let client: Client;
 
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), "emcp-mcp-lock-"));
+  dir = mkdtempSync(join(tmpdir(), "mcpsuite-mcp-lock-"));
   db = openDatabase(join(dir, "mcp-test.db"));
   runtime = createRuntime(db);
   workspaceId = runtime.bootstrapResult.workspaceId;
@@ -97,8 +97,8 @@ describe("MCP hosted access enforcement", () => {
 
   it("rejects resource reads for a locked workspace with a workspace_locked JSON-RPC error", async () => {
     setAccess("locked", null);
-    await expect(client.readResource({ uri: "emcp://pipelines" })).rejects.toThrow(/workspace_locked/);
-    await expect(client.readResource({ uri: "emcp://catalog" })).rejects.toThrow(/workspace_locked/);
+    await expect(client.readResource({ uri: "mcpsuite://pipelines" })).rejects.toThrow(/workspace_locked/);
+    await expect(client.readResource({ uri: "mcpsuite://catalog" })).rejects.toThrow(/workspace_locked/);
   });
 
   it("honors expiry at read time: future expiry passes, past expiry locks mid-session", async () => {

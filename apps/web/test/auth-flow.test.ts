@@ -18,7 +18,7 @@ import {
   joinAuthKey,
   setOpenAuthPassword,
   type Db,
-} from "@emcp/db";
+} from "@mcpsuite/db";
 import {
   handleAuthRequest,
   performPasswordLogin,
@@ -26,7 +26,7 @@ import {
   sessionFromRequest,
 } from "../src/server/auth-issuer.ts";
 
-const tmp = mkdtempSync(join(tmpdir(), "emcp-web-auth-"));
+const tmp = mkdtempSync(join(tmpdir(), "mcpsuite-web-auth-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 const ORIGIN = "http://localhost:7777"; // test-only origin, never bound to a socket
@@ -128,7 +128,7 @@ describe("in-process password login", () => {
 });
 
 describe("/api/auth/* endpoints", () => {
-  it("POST /api/auth/login sets the emcp_session cookie; logout revokes it and the refresh token", async () => {
+  it("POST /api/auth/login sets the mcpsuite_session cookie; logout revokes it and the refresh token", async () => {
     await redeemSetupCode();
     const res = await handleAuthRequest(
       db,
@@ -141,7 +141,7 @@ describe("/api/auth/* endpoints", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, mustChangePassword: false, provisioned: true });
     const cookie = res.headers.get("set-cookie")!;
-    expect(cookie).toContain("emcp_session=");
+    expect(cookie).toContain("mcpsuite_session=");
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Lax");
     expect(cookie).toContain("Path=/");

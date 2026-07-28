@@ -5,7 +5,7 @@
  * cross-cutting stats/search/activity keys).
  */
 import { queryOptions, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import type { OpResult } from "@emcp/core";
+import type { OpResult } from "@mcpsuite/core";
 import { toast } from "sonner";
 import { op } from "~/server/fns.ts";
 

@@ -1,6 +1,6 @@
 /**
  * Cookie-backed session resolution for server functions. The session itself
- * lives in the sessions table (@emcp/db) and links to the OpenAuth subject;
+ * lives in the sessions table (@mcpsuite/db) and links to the OpenAuth subject;
  * the cookie only carries the opaque token. HttpOnly, SameSite=Lax, Path=/,
  * host-only, Secure per X-Forwarded-Proto, 30-day expiry (matches the DB
  * row). Per-request resolution loads the CURRENT user/workspace/role/enabled
@@ -21,10 +21,10 @@ import {
   type Runtime,
   type SessionLink,
   type SessionUser,
-} from "@emcp/db";
-import type { RequestContext } from "@emcp/core";
+} from "@mcpsuite/db";
+import type { RequestContext } from "@mcpsuite/core";
 
-const COOKIE = "emcp_session";
+const COOKIE = "mcpsuite_session";
 const MAX_AGE = 30 * 24 * 60 * 60; // seconds — keep in sync with SESSION_TTL_MS
 
 export function readSessionToken(): string | null {

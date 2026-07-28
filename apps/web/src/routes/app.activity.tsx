@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
-import { ACTIVITY_KINDS, type Activity, type Page } from "@emcp/core/domain";
+import { ACTIVITY_KINDS, type Activity, type Page } from "@mcpsuite/core/domain";
 import { opQuery } from "~/lib/api.ts";
 import { FeedList } from "~/components/FeedList.tsx";
 import { PageHeader, Spinner } from "~/components/ui.tsx";

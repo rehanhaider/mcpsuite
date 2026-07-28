@@ -4,13 +4,13 @@
 # on :2222 (WEB_PORT). SQLite state lives entirely in the /data volume.
 #
 #   docker build -t mcpsuite/crm .
-#   docker run -d -p 2222:2222 -v emcp-data:/data mcpsuite/crm
+#   docker run -d -p 2222:2222 -v mcpsuite-data:/data mcpsuite/crm
 #
 # Scaled deployments can run a SEPARATE stateless MCP HTTP process from this
 # same image with a command override (it listens on MCP_PORT=8765 and serves
 # its own GET /healthz; database setup stays the web service's job):
 #
-#   docker run -d -p 8765:8765 -v emcp-data:/data mcpsuite/crm pnpm mcp:http
+#   docker run -d -p 8765:8765 -v mcpsuite-data:/data mcpsuite/crm pnpm mcp:http
 #   # compose:  command: pnpm mcp:http    (+ override the healthcheck to
 #   #           probe http://127.0.0.1:8765/healthz)
 # =============================================================================
@@ -42,7 +42,7 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @emcp/web build
+RUN pnpm --filter @mcpsuite/web build
 
 # ---- prod-deps: clean install of runtime dependencies only ------------------
 FROM build-base AS prod-deps
@@ -69,7 +69,7 @@ LABEL org.opencontainers.image.title="MCP Suite CRM" \
 # (see apps/mcp/src/http.ts) — don't publish any port to the internet without
 # a reverse proxy + agent API keys.
 ENV NODE_ENV=production \
-    DB_PATH=/data/emcp.db \
+    DB_PATH=/data/mcpsuite.db \
     WEB_PORT=2222 \
     MCP_PORT=8765 \
     MCP_HOST=0.0.0.0
@@ -92,7 +92,7 @@ RUN corepack install || corepack install
 COPY packages/core ./packages/core
 COPY packages/db ./packages/db
 # hosting-control runs ONLY under an explicit command override (hosted
-# deployments: `pnpm --filter @emcp/hosting-control start`); it binds
+# deployments: `pnpm --filter @mcpsuite/hosting-control start`); it binds
 # 127.0.0.1 unless HC_HOST is set and is never started by the entrypoint.
 COPY packages/hosting-control ./packages/hosting-control
 COPY apps/mcp ./apps/mcp
@@ -100,8 +100,8 @@ COPY apps/web/package.json ./apps/web/package.json
 # …and the built web app (server bundle + static client assets).
 COPY --from=build /repo/apps/web/dist ./apps/web/dist
 
-COPY .scripts/docker-entrypoint.sh /usr/local/bin/emcp-entrypoint
-RUN chmod +x /usr/local/bin/emcp-entrypoint \
+COPY .scripts/docker-entrypoint.sh /usr/local/bin/mcpsuite-entrypoint
+RUN chmod +x /usr/local/bin/mcpsuite-entrypoint \
     && mkdir -p /data \
     && chown -R node:node /data /repo /pnpm
 
@@ -114,4 +114,4 @@ EXPOSE 2222 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.WEB_PORT||2222)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 
-ENTRYPOINT ["emcp-entrypoint"]
+ENTRYPOINT ["mcpsuite-entrypoint"]

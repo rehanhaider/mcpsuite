@@ -1,5 +1,5 @@
 /**
- * Domain model for eMCP CRM V1.
+ * Domain model for MCP Suite CRM V1.
  *
  * Single source of truth for entity types, Zod input schemas, and shared
  * constants. Browser-safe: no node imports. The web client, the operation

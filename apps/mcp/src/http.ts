@@ -4,7 +4,7 @@
  * POST /mcp inside the web process itself — see PRODUCTION.md).
  *
  * Auth, per request:
- *   `Authorization: Bearer emcp_…` — an MCP client API key created in
+ *   `Authorization: Bearer mcpsuite_…` — an MCP client API key created in
  *   Admin → Agents. Scopes + trust profile come from the client record.
  *   Any other request (missing/invalid key) gets 401.
  *
@@ -14,7 +14,7 @@
  * shapes cannot drift; this file is only the node:http bridge around it.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { getRuntimeAsync } from "@emcp/db";
+import { getRuntimeAsync } from "@mcpsuite/db";
 import { handleMcpRequest } from "./handler.ts";
 import { requireSqliteRuntime } from "./server.ts";
 
@@ -54,7 +54,7 @@ const httpServer = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
     if (url.pathname === "/healthz") {
-      return json(res, 200, { ok: true, server: "emcp-mcp", operations: runtime.catalog.size });
+      return json(res, 200, { ok: true, server: "mcpsuite-mcp", operations: runtime.catalog.size });
     }
 
     if (url.pathname !== "/mcp") {
@@ -63,13 +63,13 @@ const httpServer = createServer(async (req, res) => {
 
     await writeFetchResponse(res, await handleMcpRequest(await toFetchRequest(req, url), runtime));
   } catch (error) {
-    console.error("[emcp-mcp] request failed:", error);
+    console.error("[mcpsuite-mcp] request failed:", error);
     if (!res.headersSent) json(res, 500, { error: "internal" });
   }
 });
 
 httpServer.listen(PORT, HOST, () => {
   console.log(
-    `[emcp-mcp] HTTP listening on http://${HOST}:${PORT}/mcp — ${runtime.catalog.size} operations, Bearer API key required`,
+    `[mcpsuite-mcp] HTTP listening on http://${HOST}:${PORT}/mcp — ${runtime.catalog.size} operations, Bearer API key required`,
   );
 });

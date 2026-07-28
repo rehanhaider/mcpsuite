@@ -70,7 +70,7 @@ export function AuthShell(props: { title: string; subtitle: string; children: Re
         <div className="mb-8 flex items-center justify-center gap-2">
           <Zap className="size-6 text-primary" fill="currentColor" />
           <span className="font-mono text-xl font-bold tracking-tight">
-            emcp<span className="text-muted-foreground/60">/crm</span>
+            mcpsuite<span className="text-muted-foreground/60">/crm</span>
           </span>
         </div>
         <div className="animate-pop space-y-3 rounded-xl border border-border bg-card p-6 shadow-xl">

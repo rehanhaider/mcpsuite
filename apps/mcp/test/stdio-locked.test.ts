@@ -1,7 +1,7 @@
 /**
  * The stdio transport enforces the hosted-access lock PER CALL, end to end:
  * this spawns the real src/stdio.ts process exactly like production (tsx +
- * EMCP_API_KEY, DB_PATH pointing at a temp file — never data/) and speaks
+ * MCPSUITE_API_KEY, DB_PATH pointing at a temp file — never data/) and speaks
  * newline-delimited JSON-RPC over its stdin/stdout.
  *
  * The workspace is locked MID-SESSION (an hc_workspace_access row written by
@@ -17,8 +17,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { RequestContext } from "@emcp/core";
-import { createRuntime, openDatabase, type Db, type Runtime } from "@emcp/db";
+import type { RequestContext } from "@mcpsuite/core";
+import { createRuntime, openDatabase, type Db, type Runtime } from "@mcpsuite/db";
 import { WORKSPACE_LOCKED_RPC_CODE } from "../src/server.ts";
 
 const appDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -98,7 +98,7 @@ function setAccess(mode: "active" | "locked", expiresAt: string | null): void {
 }
 
 beforeAll(async () => {
-  dir = mkdtempSync(join(tmpdir(), "emcp-stdio-lock-"));
+  dir = mkdtempSync(join(tmpdir(), "mcpsuite-stdio-lock-"));
   const dbPath = join(dir, "stdio-test.db");
 
   // Pre-bootstrap in the parent (also keeps the one-time owner-password log
@@ -128,7 +128,7 @@ beforeAll(async () => {
   if (created.status !== "ok") throw new Error(`mcpClient.create failed: ${JSON.stringify(created)}`);
   const apiKey = (created.data as { token: string }).token;
 
-  const env = { ...process.env, DB_PATH: dbPath, EMCP_API_KEY: apiKey } as NodeJS.ProcessEnv;
+  const env = { ...process.env, DB_PATH: dbPath, MCPSUITE_API_KEY: apiKey } as NodeJS.ProcessEnv;
   delete env.DATABASE_URL; // the child must take the unset -> SQLite default path
 
   child = spawn(join(appDir, "node_modules", ".bin", "tsx"), ["src/stdio.ts"], {
@@ -185,7 +185,7 @@ describe("stdio transport hosted access enforcement (real child process)", () =>
       clientInfo: { name: "stdio-lock-test", version: "0.0.0" },
     });
     expect(init.error).toBeUndefined();
-    expect(init.result?.serverInfo?.name).toBe("emcp-crm");
+    expect(init.result?.serverInfo?.name).toBe("mcpsuite-crm");
     notify("notifications/initialized");
 
     const call = callResult(await request("tools/call", { name: "company_list", arguments: {} }));
@@ -201,12 +201,12 @@ describe("stdio transport hosted access enforcement (real child process)", () =>
   }, 30_000);
 
   it("fails resource reads with the workspace_locked JSON-RPC error while locked", async () => {
-    const pipelines = await request("resources/read", { uri: "emcp://pipelines" });
+    const pipelines = await request("resources/read", { uri: "mcpsuite://pipelines" });
     expect(pipelines.result).toBeUndefined();
     expect(pipelines.error?.code).toBe(WORKSPACE_LOCKED_RPC_CODE);
     expect(String(pipelines.error?.message)).toContain("workspace_locked");
 
-    const catalog = await request("resources/read", { uri: "emcp://catalog" });
+    const catalog = await request("resources/read", { uri: "mcpsuite://catalog" });
     expect(catalog.error?.code).toBe(WORKSPACE_LOCKED_RPC_CODE);
   }, 30_000);
 

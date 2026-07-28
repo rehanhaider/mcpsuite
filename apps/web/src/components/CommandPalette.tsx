@@ -10,7 +10,7 @@ import {
   CornerDownLeft,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { SearchHit } from "@emcp/core/domain";
+import type { SearchHit } from "@mcpsuite/core/domain";
 import { opQuery } from "~/lib/api.ts";
 import { useUi } from "~/store/ui.ts";
 import { Button } from "~/components/ui/button";
@@ -149,7 +149,7 @@ export function CommandPalette() {
         showCloseButton={false}
         className="top-[12vh] max-w-xl translate-y-0 bg-popover p-0"
       >
-        <DialogTitle className="sr-only">Search emcp</DialogTitle>
+        <DialogTitle className="sr-only">Search mcpsuite</DialogTitle>
         <Input
           autoFocus
           className="h-auto rounded-none border-x-0 border-t-0 bg-transparent px-4 py-3 shadow-none focus-visible:ring-0 dark:bg-transparent"

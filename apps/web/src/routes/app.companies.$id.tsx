@@ -22,7 +22,7 @@ import type {
   Person,
   Tag,
   User,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { formatDate, formatMoneyMinor, relativeTime } from "~/lib/format.ts";

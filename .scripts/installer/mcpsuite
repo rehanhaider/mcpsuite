@@ -1,54 +1,54 @@
 #!/usr/bin/env bash
-# emcp — admin CLI for a machine-wide MCP Suite CRM install.
-# Installed to /usr/local/bin/emcp by install.sh; a copy ships inside every
+# mcpsuite — admin CLI for a machine-wide MCP Suite CRM install.
+# Installed to /usr/local/bin/mcpsuite by install.sh; a copy ships inside every
 # release tarball under installer/ (updates refresh this file).
 #
 # Commands:
-#   emcp status                    service state, version, health
-#   emcp logs [journalctl args]    tail service logs (default -n 50; try -f)
-#   emcp version                   CLI + installed release versions
-#   sudo emcp start|stop|restart   control the systemd service
-#   sudo emcp setup-code           print a fresh one-time owner setup/reset code
-#   sudo emcp update [--version X | --tarball PATH] [--yes]
+#   mcpsuite status                    service state, version, health
+#   mcpsuite logs [journalctl args]    tail service logs (default -n 50; try -f)
+#   mcpsuite version                   CLI + installed release versions
+#   sudo mcpsuite start|stop|restart   control the systemd service
+#   sudo mcpsuite setup-code           print a fresh one-time owner setup/reset code
+#   sudo mcpsuite update [--version X | --tarball PATH] [--yes]
 #                                  guarded update: verify sha256, stop, back up
 #                                  DB+config, install, db setup, swap, start,
 #                                  health-check /healthz, roll back on failure
-#   sudo emcp uninstall [--purge] [--yes]
-#                                  remove service + /opt/emcp (+ CLI); keeps
-#                                  /var/lib/emcp and /etc/emcp unless --purge
+#   sudo mcpsuite uninstall [--purge] [--yes]
+#                                  remove service + /opt/mcpsuite (+ CLI); keeps
+#                                  /var/lib/mcpsuite and /etc/mcpsuite unless --purge
 #                                  (which demands a typed confirmation)
 #
-# Layout: /opt/emcp/releases/<v> + /opt/emcp/current, /etc/emcp/emcp.env,
-# /var/lib/emcp (data + backups), unit emcp.service, service user 'emcp'.
+# Layout: /opt/mcpsuite/releases/<v> + /opt/mcpsuite/current, /etc/mcpsuite/mcpsuite.env,
+# /var/lib/mcpsuite (data + backups), unit mcpsuite.service, service user 'mcpsuite'.
 #
-# Testing: EMCP_INSTALL_ROOT=<dir> re-roots every path and stubs out systemd,
+# Testing: MCPSUITE_INSTALL_ROOT=<dir> re-roots every path and stubs out systemd,
 # journalctl, root checks, and the service-user switch (repo dry-run only).
 set -euo pipefail
 
-REPO="${EMCP_REPO:-rehanhaider/mcpsuite}"
-PREFIX="${EMCP_INSTALL_ROOT:-}"
+REPO="${MCPSUITE_REPO:-rehanhaider/mcpsuite}"
+PREFIX="${MCPSUITE_INSTALL_ROOT:-}"
 TEST_MODE=0
 [[ -n "$PREFIX" ]] && TEST_MODE=1
 
-OPT_DIR="$PREFIX/opt/emcp"
+OPT_DIR="$PREFIX/opt/mcpsuite"
 CURRENT="$OPT_DIR/current"
-ETC_DIR="$PREFIX/etc/emcp"
-ENV_FILE="$ETC_DIR/emcp.env"
-VAR_DIR="$PREFIX/var/lib/emcp"
+ETC_DIR="$PREFIX/etc/mcpsuite"
+ENV_FILE="$ETC_DIR/mcpsuite.env"
+VAR_DIR="$PREFIX/var/lib/mcpsuite"
 BACKUP_DIR="$VAR_DIR/backups"
 BIN_DIR="$PREFIX/usr/local/bin"
 UNIT_DIR="$PREFIX/etc/systemd/system"
-SERVICE="emcp"
-SERVICE_USER="emcp"
-BACKUP_KEEP="${EMCP_BACKUP_KEEP:-5}"
+SERVICE="mcpsuite"
+SERVICE_USER="mcpsuite"
+BACKUP_KEEP="${MCPSUITE_BACKUP_KEEP:-5}"
 
-log()  { printf '\033[36m[emcp]\033[0m %s\n' "$*"; }
-warn() { printf '\033[33m[emcp] WARNING:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[31m[emcp] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+log()  { printf '\033[36m[mcpsuite]\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m[mcpsuite] WARNING:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m[mcpsuite] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 require_root() {
   [[ "$TEST_MODE" -eq 1 ]] && return 0
-  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "'emcp $CMD' must run as root (use sudo)"
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "'mcpsuite $CMD' must run as root (use sudo)"
 }
 
 svc() { # systemctl wrapper, stubbed in test mode
@@ -59,34 +59,34 @@ svc() { # systemctl wrapper, stubbed in test mode
 # Run a command as the service user with the service environment.
 run_as_service_user() {
   if [[ "$TEST_MODE" -eq 1 ]]; then
-    env HOME="$VAR_DIR" DB_PATH="$DB_PATH" EMCP_BASE_URL="$EMCP_BASE_URL" "$@"
+    env HOME="$VAR_DIR" DB_PATH="$DB_PATH" MCPSUITE_BASE_URL="$MCPSUITE_BASE_URL" "$@"
   else
     runuser -u "$SERVICE_USER" -- env \
-      HOME=/var/lib/emcp DB_PATH="$DB_PATH" EMCP_BASE_URL="$EMCP_BASE_URL" "$@"
+      HOME=/var/lib/mcpsuite DB_PATH="$DB_PATH" MCPSUITE_BASE_URL="$MCPSUITE_BASE_URL" "$@"
   fi
 }
 
 load_env() {
   WEB_PORT=2222
-  EMCP_BASE_URL=""
-  DB_PATH="/var/lib/emcp/emcp.db"
+  MCPSUITE_BASE_URL=""
+  DB_PATH="/var/lib/mcpsuite/mcpsuite.db"
   if [[ -r "$ENV_FILE" ]]; then
     # shellcheck disable=SC1090
     WEB_PORT="$(. "$ENV_FILE" && echo "${WEB_PORT:-2222}")"
     # shellcheck disable=SC1090
-    DB_PATH="$(. "$ENV_FILE" && echo "${DB_PATH:-/var/lib/emcp/emcp.db}")"
+    DB_PATH="$(. "$ENV_FILE" && echo "${DB_PATH:-/var/lib/mcpsuite/mcpsuite.db}")"
     # shellcheck disable=SC1090
-    EMCP_BASE_URL="$(. "$ENV_FILE" && echo "${EMCP_BASE_URL:-}")"
+    MCPSUITE_BASE_URL="$(. "$ENV_FILE" && echo "${MCPSUITE_BASE_URL:-}")"
   fi
-  [[ -n "$EMCP_BASE_URL" ]] || EMCP_BASE_URL="http://localhost:$WEB_PORT"
-  [[ "$TEST_MODE" -eq 1 && "$DB_PATH" == /var/lib/emcp/* ]] && DB_PATH="$PREFIX$DB_PATH"
+  [[ -n "$MCPSUITE_BASE_URL" ]] || MCPSUITE_BASE_URL="http://localhost:$WEB_PORT"
+  [[ "$TEST_MODE" -eq 1 && "$DB_PATH" == /var/lib/mcpsuite/* ]] && DB_PATH="$PREFIX$DB_PATH"
   return 0
 }
 
-installed_version() { # -> EMCP_VERSION of the current release, or ""
+installed_version() { # -> MCPSUITE_VERSION of the current release, or ""
   if [[ -f "$CURRENT/VERSION" ]]; then
     # shellcheck disable=SC1091
-    (. "$CURRENT/VERSION" && echo "${EMCP_VERSION:-}")
+    (. "$CURRENT/VERSION" && echo "${MCPSUITE_VERSION:-}")
   fi
 }
 
@@ -130,7 +130,7 @@ cmd_restart() { require_root; svc restart "$SERVICE"; log "restarted $SERVICE.se
 cmd_status() {
   load_env
   local v; v="$(installed_version || true)"
-  echo "emcp — MCP Suite CRM"
+  echo "mcpsuite — MCP Suite CRM"
   echo "  release   : ${v:-none installed} ($(readlink "$CURRENT" 2>/dev/null || echo 'no current symlink'))"
   echo "  config    : $ENV_FILE (WEB_PORT=$WEB_PORT)"
   echo "  data      : $DB_PATH"
@@ -166,7 +166,7 @@ cmd_setup_code() {
   # reset-owner prints the one-time code on stdout, exactly once. Pass it
   # straight through to the terminal; never capture it into files or logs.
   log "issuing a fresh one-time owner code (invalidates the previous one)"
-  run_as_service_user "$CURRENT/bin/emcp-tsx" packages/db/src/scripts/reset-owner.ts
+  run_as_service_user "$CURRENT/bin/mcpsuite-tsx" packages/db/src/scripts/reset-owner.ts
 }
 
 # ------------------------------------------------------------------ update --
@@ -191,7 +191,7 @@ cmd_update() {
   arch="$(machine_arch)"
 
   local work
-  work="$(mktemp -d -t emcp-update.XXXXXX)"
+  work="$(mktemp -d -t mcpsuite-update.XXXXXX)"
   # shellcheck disable=SC2064
   trap "rm -rf '$work'" EXIT INT TERM
 
@@ -235,13 +235,13 @@ cmd_update() {
   [[ -f "$work/release/VERSION" ]] || die "invalid release: VERSION missing"
   local new_version rel_arch
   # shellcheck disable=SC1091
-  new_version="$(. "$work/release/VERSION" && echo "${EMCP_VERSION:-}")"
+  new_version="$(. "$work/release/VERSION" && echo "${MCPSUITE_VERSION:-}")"
   # shellcheck disable=SC1091
-  rel_arch="$(. "$work/release/VERSION" && echo "${EMCP_ARCH:-}")"
-  [[ -n "$new_version" ]] || die "invalid release: EMCP_VERSION missing"
+  rel_arch="$(. "$work/release/VERSION" && echo "${MCPSUITE_ARCH:-}")"
+  [[ -n "$new_version" ]] || die "invalid release: MCPSUITE_VERSION missing"
   [[ "$rel_arch" == "$arch" ]] || die "release is for $rel_arch but this machine is $arch"
-  [[ -x "$work/release/bin/emcp-run" && -x "$work/release/node/bin/node" ]] \
-    || die "invalid release: bin/emcp-run or bundled node missing"
+  [[ -x "$work/release/bin/mcpsuite-run" && -x "$work/release/node/bin/node" ]] \
+    || die "invalid release: bin/mcpsuite-run or bundled node missing"
 
   if [[ "$new_version" == "$cur_version" && "$pinned" -eq 0 ]]; then
     log "already up to date ($cur_version)"
@@ -313,7 +313,7 @@ cmd_update() {
     for bf in "$bdir"/*; do
       [[ -f "$bf" ]] || continue
       case "$(basename "$bf")" in
-        emcp.env | PREV_RELEASE) ;; # config untouched by updates; keep as backup only
+        mcpsuite.env | PREV_RELEASE) ;; # config untouched by updates; keep as backup only
         *) cp -a "$bf" "$(dirname "$DB_PATH")/" ;;
       esac
     done
@@ -323,10 +323,10 @@ cmd_update() {
   }
 
   # -- refresh unit if the release ships a newer one -------------------------
-  if [[ -f "$rel_dir/installer/emcp.service" ]] \
-    && ! cmp -s "$rel_dir/installer/emcp.service" "$UNIT_DIR/$SERVICE.service"; then
+  if [[ -f "$rel_dir/installer/mcpsuite.service" ]] \
+    && ! cmp -s "$rel_dir/installer/mcpsuite.service" "$UNIT_DIR/$SERVICE.service"; then
     log "updating $SERVICE.service unit"
-    install -m 0644 "$rel_dir/installer/emcp.service" "$UNIT_DIR/$SERVICE.service"
+    install -m 0644 "$rel_dir/installer/mcpsuite.service" "$UNIT_DIR/$SERVICE.service"
     svc daemon-reload || true
   fi
 
@@ -335,7 +335,7 @@ cmd_update() {
   # with the first post-release schema change (keyed off the version stamp).
   log "running database setup"
   local setup_out
-  if ! setup_out="$(run_as_service_user "$rel_dir/bin/emcp-tsx" packages/db/src/scripts/setup.ts 2>&1)"; then
+  if ! setup_out="$(run_as_service_user "$rel_dir/bin/mcpsuite-tsx" packages/db/src/scripts/setup.ts 2>&1)"; then
     echo "$setup_out" >&2
     rollback
   fi
@@ -358,9 +358,9 @@ cmd_update() {
 
   # -- success: clean up + refresh CLI ---------------------------------------
   [[ -n "$moved_aside" ]] && rm -rf "$moved_aside"
-  if [[ -f "$rel_dir/installer/emcp" ]] && ! cmp -s "$rel_dir/installer/emcp" "$BIN_DIR/emcp"; then
-    install -m 0755 "$rel_dir/installer/emcp" "$BIN_DIR/emcp"
-    log "updated the emcp CLI itself"
+  if [[ -f "$rel_dir/installer/mcpsuite" ]] && ! cmp -s "$rel_dir/installer/mcpsuite" "$BIN_DIR/mcpsuite"; then
+    install -m 0755 "$rel_dir/installer/mcpsuite" "$BIN_DIR/mcpsuite"
+    log "updated the mcpsuite CLI itself"
   fi
 
   echo
@@ -385,7 +385,7 @@ cmd_uninstall() {
   echo "This will remove:"
   echo "  - the $SERVICE.service systemd unit"
   echo "  - $OPT_DIR (all installed releases)"
-  echo "  - $BIN_DIR/emcp (this CLI)"
+  echo "  - $BIN_DIR/mcpsuite (this CLI)"
   if [[ "$purge" -eq 1 ]]; then
     echo "  - PLUS ALL DATA: $VAR_DIR (database + backups) and $ETC_DIR (config)"
   else
@@ -411,7 +411,7 @@ cmd_uninstall() {
   rm -f "$UNIT_DIR/$SERVICE.service"
   svc daemon-reload 2>/dev/null || true
   rm -rf "$OPT_DIR"
-  rm -f "$BIN_DIR/emcp"
+  rm -f "$BIN_DIR/mcpsuite"
   log "removed service, releases, and CLI"
 
   if [[ "$purge" -eq 1 ]]; then
@@ -438,5 +438,5 @@ case "$CMD" in
   update)     cmd_update "$@" ;;
   uninstall)  cmd_uninstall "$@" ;;
   -h | --help | help | "") usage ;;
-  *) die "unknown command: $CMD (see emcp --help)" ;;
+  *) die "unknown command: $CMD (see mcpsuite --help)" ;;
 esac

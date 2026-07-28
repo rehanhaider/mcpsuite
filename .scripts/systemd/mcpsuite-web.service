@@ -1,5 +1,5 @@
 [Unit]
-Description=emcp web app (TanStack Start production server, browser access via WSL localhost)
+Description=mcpsuite web app (TanStack Start production server, browser access via WSL localhost)
 After=network-online.target
 
 [Service]

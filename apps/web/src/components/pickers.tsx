@@ -22,11 +22,11 @@ import type {
   Person,
   Tag,
   User,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
-import type { Page } from "@emcp/core/domain";
+import type { Page } from "@mcpsuite/core/domain";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {

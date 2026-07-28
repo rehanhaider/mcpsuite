@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Database, Download, Upload } from "lucide-react";
 import { useRef, useState } from "react";
-import type { ImportTargetField, Pipeline } from "@emcp/core/domain";
-import { IMPORT_TARGET_FIELDS } from "@emcp/core/domain";
+import type { ImportTargetField, Pipeline } from "@mcpsuite/core/domain";
+import { IMPORT_TARGET_FIELDS } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { ButtonSpinner, Field, SectionCard } from "~/components/ui.tsx";
 import { Button } from "~/components/ui/button.tsx";
@@ -260,7 +260,7 @@ function ExportCard() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `emcp-${res.entityType}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `mcpsuite-${res.entityType}-${new Date().toISOString().slice(0, 10)}.csv`;
       a.click();
       URL.revokeObjectURL(url);
     },

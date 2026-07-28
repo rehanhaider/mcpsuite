@@ -9,7 +9,7 @@ import { version } from "../../../../package.json";
 export const Route = createFileRoute("/healthz")({
   server: {
     handlers: {
-      GET: () => Response.json({ ok: true, server: "emcp-web", version }),
+      GET: () => Response.json({ ok: true, server: "mcpsuite-web", version }),
     },
   },
 });

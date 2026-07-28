@@ -5,11 +5,11 @@
  * The owner is created without any credential (docs/issues/0022): bootstrap
  * issues a one-time SETUP CODE (returned once, printed by the caller) with
  * which the owner sets their own password at /set-password. There is no
- * generated password and no EMCP_OWNER_PASSWORD support — an owner password
+ * generated password and no MCPSUITE_OWNER_PASSWORD support — an owner password
  * must never transit environment variables.
  */
 import { eq } from "drizzle-orm";
-import { newId, nowIso, DEFAULT_WORKSPACE_SETTINGS, type SemanticColor } from "@emcp/core";
+import { newId, nowIso, DEFAULT_WORKSPACE_SETTINGS, type SemanticColor } from "@mcpsuite/core";
 import type { Db } from "./connection.ts";
 import * as t from "./schema.ts";
 import { issueAuthCodeSync } from "./openauth.ts";
@@ -20,7 +20,7 @@ export interface BootstrapResult {
   /**
    * Set ONLY when the owner user was created this run: the one-time setup
    * code for /set-password. Surfaced exactly once by the caller's printer and
-   * regenerable via `pnpm --filter @emcp/db reset-owner`. Bootstrap never
+   * regenerable via `pnpm --filter @mcpsuite/db reset-owner`. Bootstrap never
    * creates or prints a password (docs/issues/0022).
    */
   ownerSetupCode: string | null;
@@ -76,7 +76,7 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
     db.insert(t.workspaces)
       .values({
         id,
-        name: opts.workspaceName ?? process.env.EMCP_WORKSPACE_NAME ?? "EMCP",
+        name: opts.workspaceName ?? process.env.MCPSUITE_WORKSPACE_NAME ?? "MCP Suite",
         defaultCurrency: opts.defaultCurrency ?? "USD",
         timezone: opts.timezone ?? process.env.TZ ?? "Asia/Kolkata",
         settings: JSON.stringify(DEFAULT_WORKSPACE_SETTINGS),
@@ -100,8 +100,8 @@ export function bootstrap(db: Db, opts: BootstrapOptions = {}): BootstrapResult 
     .get();
   if (!owner) {
     const userId = newId();
-    const email = (opts.ownerEmail ?? process.env.EMCP_OWNER_EMAIL ?? "owner@emcp.local").toLowerCase();
-    const name = opts.ownerName ?? process.env.EMCP_OWNER_NAME ?? "Owner";
+    const email = (opts.ownerEmail ?? process.env.MCPSUITE_OWNER_EMAIL ?? "owner@mcpsuite.local").toLowerCase();
+    const name = opts.ownerName ?? process.env.MCPSUITE_OWNER_NAME ?? "Owner";
     createdOwner = true;
     ownerEmail = email;
     db.insert(t.users)

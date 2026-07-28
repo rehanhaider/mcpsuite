@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Check, ChevronDown, ShieldCheck, X } from "lucide-react";
 import { useState } from "react";
 import { z } from "zod";
-import { PENDING_STATUSES, type McpClient, type PendingAction, type User } from "@emcp/core/domain";
+import { PENDING_STATUSES, type McpClient, type PendingAction, type User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, type Tone } from "~/lib/colors.ts";
 import { formatDateTime, relativeTime } from "~/lib/format.ts";

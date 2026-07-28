@@ -1,8 +1,8 @@
-# CRM feature map — where emcp stands vs. the market
+# CRM feature map — where mcpsuite stands vs. the market
 
 _Last updated: 2026-07-06_
 
-This document maps what emcp has today against the feature set of established
+This document maps what mcpsuite has today against the feature set of established
 CRMs (Attio, HubSpot, Pipedrive, Close, folk, Twenty), so gaps are explicit
 decisions instead of blind spots. Legend:
 
@@ -16,7 +16,7 @@ relationship), Twenty (open-source CRM).
 
 ## 1. Data model & records
 
-| Feature                      | emcp                                                              | Typical CRM                     | Plan                                                          |
+| Feature                      | mcpsuite                                                              | Typical CRM                     | Plan                                                          |
 | ---------------------------- | ----------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------- |
 | Companies                    | Yes                                                               | Yes                             | —                                                             |
 | People (contacts)            | Yes                                                               | Yes                             | —                                                             |
@@ -35,7 +35,7 @@ relationship), Twenty (open-source CRM).
 Your observation ("my contacts are mixed and not tagged to any type") was
 the biggest practical gap in daily use. **Shipped in 0.5 as Contact lists**:
 
-| Feature                                                                 | emcp                                                                                                                                   | Typical CRM                          | Plan                                                                      |
+| Feature                                                                 | mcpsuite                                                                                                                                   | Typical CRM                          | Plan                                                                      |
 | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------- |
 | Contact types / audiences (job search, product X, consulting…)          | **Yes (0.5)** — Contact lists: named, colored audiences over people + companies; filters on index views, bulk assign, dashboard card, `list_*` MCP tools | folk/Attio: first-class groups/lists | Done — consider per-list default owner/pipeline later                     |
 | Duplicate detection                                                     | No (import upserts by external ref only)                                                                                               | Yes (email/domain match)             | **0.2 (P0)** — dedupe report + merge operation                            |
@@ -64,7 +64,7 @@ links each segment. Agents do the same triage over MCP (`list_create`,
 
 ## 3. Pipeline & deals
 
-| Feature                                 | emcp                                            | Typical CRM              | Plan                                                        |
+| Feature                                 | mcpsuite                                            | Typical CRM              | Plan                                                        |
 | --------------------------------------- | ----------------------------------------------- | ------------------------ | ----------------------------------------------------------- |
 | Multiple pipelines                      | Yes (per entity type, default pipeline)         | Yes                      | —                                                           |
 | Custom stages (reorder, rename, colors) | Yes                                             | Yes                      | —                                                           |
@@ -78,7 +78,7 @@ links each segment. Agents do the same triage over MCP (`list_create`,
 
 ## 4. Activities, tasks & calendar
 
-| Feature                           | emcp                                                                      | Typical CRM        | Plan                                                                                           |
+| Feature                           | mcpsuite                                                                      | Typical CRM        | Plan                                                                                           |
 | --------------------------------- | ------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------- |
 | Activity timeline per record      | Yes (notes, calls, meetings, emails-as-log, stage changes, system events) | Yes                | —                                                                                              |
 | Tasks with due dates & assignee   | Yes                                                                       | Yes                | —                                                                                              |
@@ -89,11 +89,11 @@ links each segment. Agents do the same triage over MCP (`list_create`,
 
 ## 5. Email & communication
 
-emcp deliberately does **not** try to be an email client. The agent-native
+mcpsuite deliberately does **not** try to be an email client. The agent-native
 answer is different: your agent drafts/sends via its own tools and **logs the
 touch into the CRM through MCP**. Still, parity gaps worth naming:
 
-| Feature                                        | emcp                                         | Typical CRM            | Plan                                                                 |
+| Feature                                        | mcpsuite                                         | Typical CRM            | Plan                                                                 |
 | ---------------------------------------------- | -------------------------------------------- | ---------------------- | -------------------------------------------------------------------- |
 | Log an email/call/meeting against a record     | Yes (`activity.log`, agent-callable)         | Yes                    | —                                                                    |
 | Two-way email sync (Gmail/Outlook)             | No                                           | Yes                    | Not in 0.x. Revisit for cloud; heavy OAuth + storage burden          |
@@ -104,7 +104,7 @@ touch into the CRM through MCP**. Still, parity gaps worth naming:
 
 ## 6. Automation & agents
 
-| Feature                              | emcp                                                                     | Typical CRM              | Plan                                                                                         |
+| Feature                              | mcpsuite                                                                     | Typical CRM              | Plan                                                                                         |
 | ------------------------------------ | ------------------------------------------------------------------------ | ------------------------ | -------------------------------------------------------------------------------------------- |
 | Workflow builder (if-this-then-that) | No                                                                       | HubSpot/Pipedrive: yes   | Not planned as click-ops. The operation catalog is the automation surface; agents compose it |
 | **Agent access (MCP)**               | **Yes — first-class: 100+ typed operations, resources, context bundles** | No one has this natively | Our moat; keep widening                                                                      |
@@ -116,7 +116,7 @@ touch into the CRM through MCP**. Still, parity gaps worth naming:
 
 ## 7. Reporting & insights
 
-| Feature                                           | emcp                                     | Typical CRM        | Plan                                                                                                            |
+| Feature                                           | mcpsuite                                     | Typical CRM        | Plan                                                                                                            |
 | ------------------------------------------------- | ---------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------- |
 | Home dashboard (pipeline snapshot, tasks, recent) | Yes                                      | Yes                | —                                                                                                               |
 | Entity stats (by stage, by owner)                 | Yes (`stats.engagements`, `stats.deals`) | Yes                | —                                                                                                               |
@@ -126,7 +126,7 @@ touch into the CRM through MCP**. Still, parity gaps worth naming:
 
 ## 8. Views & productivity
 
-| Feature                                            | emcp                                       | Typical CRM       | Plan                           |
+| Feature                                            | mcpsuite                                       | Typical CRM       | Plan                           |
 | -------------------------------------------------- | ------------------------------------------ | ----------------- | ------------------------------ |
 | List views with server-side filter/sort/pagination | Yes                                        | Yes               | —                              |
 | Saved views                                        | Yes (shared, per entity)                   | Yes               | —                              |
@@ -139,7 +139,7 @@ touch into the CRM through MCP**. Still, parity gaps worth naming:
 
 ## 9. Collaboration & administration
 
-| Feature                                    | emcp                                              | Typical CRM                  | Plan                                         |
+| Feature                                    | mcpsuite                                              | Typical CRM                  | Plan                                         |
 | ------------------------------------------ | ------------------------------------------------- | ---------------------------- | -------------------------------------------- |
 | Multi-user with roles (owner/admin/member) | Yes                                               | Yes                          | —                                            |
 | Workspaces (data isolation)                | Yes (schema-level `workspace_id` everywhere)      | Yes                          | Foundation for SaaS multi-tenancy            |
@@ -176,4 +176,4 @@ Where we're **behind** and it hurts daily use, in priority order:
 
 Where we consciously **won't go**: email marketing suites, meeting
 schedulers, built-in calling, quotes/invoicing, click-ops workflow builders.
-Agents + integrations cover these without turning emcp into a suite.
+Agents + integrations cover these without turning mcpsuite into a suite.

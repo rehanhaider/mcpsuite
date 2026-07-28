@@ -1,7 +1,7 @@
 /**
  * One-shot smoke test: exercises every page-facing operation as the owner,
  * including a full write round-trip on throwaway records. Run with
- * `pnpm --filter @emcp/db smoke` against the live DB — it cleans up after itself.
+ * `pnpm --filter @mcpsuite/db smoke` against the live DB — it cleans up after itself.
  */
 import { eq } from "drizzle-orm";
 import { createRuntime } from "../runtime.ts";

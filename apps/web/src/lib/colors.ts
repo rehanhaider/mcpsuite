@@ -1,10 +1,10 @@
 /**
  * Semantic color token → class maps. Kept literal so Tailwind never purges
- * them. Tokens mirror SEMANTIC_COLORS in @emcp/core/domain; the palette is
+ * them. Tokens mirror SEMANTIC_COLORS in @mcpsuite/core/domain; the palette is
  * defined in styles/app.css (`--tone-*` variables, exposed as Tailwind
  * colors). Values are stored in the DB, so token names never change.
  */
-import type { SemanticColor } from "@emcp/core/domain";
+import type { SemanticColor } from "@mcpsuite/core/domain";
 
 export type Tone = SemanticColor;
 

@@ -5,7 +5,7 @@
 import { randomBytes, scryptSync, timingSafeEqual, createHash } from "node:crypto";
 import { parse } from "csv-parse/sync";
 import { stringify } from "csv-stringify/sync";
-import type { AuthServices, CsvServices } from "@emcp/core";
+import type { AuthServices, CsvServices } from "@mcpsuite/core";
 
 const SCRYPT_N = 16384;
 const SCRYPT_R = 8;
@@ -46,9 +46,13 @@ export function generatePassword(length = 16): string {
   return out;
 }
 
-/** API keys look like `emcp_<40 hex>`; we store only the SHA-256 hash. */
+/**
+ * API keys look like `mcpsuite_<40 hex>`; we store only the SHA-256 hash.
+ * Verification hashes the full presented token, so keys minted under the
+ * pre-rebrand `emcp_` prefix keep working unchanged.
+ */
 export function generateMcpToken(): { token: string; hash: string; prefix: string } {
-  const token = `emcp_${randomBytes(20).toString("hex")}`;
+  const token = `mcpsuite_${randomBytes(20).toString("hex")}`;
   return { token, hash: sha256Hex(token), prefix: token.slice(0, 12) };
 }
 

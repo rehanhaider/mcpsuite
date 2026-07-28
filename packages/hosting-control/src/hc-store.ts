@@ -17,8 +17,8 @@
  *                             delivery survives a crash without credential
  *                             material ever entering storage.
  */
-import { nowIso } from "@emcp/core";
-import type { Db } from "@emcp/db";
+import { nowIso } from "@mcpsuite/core";
+import type { Db } from "@mcpsuite/db";
 
 const HC_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS hc_idempotency_receipts (

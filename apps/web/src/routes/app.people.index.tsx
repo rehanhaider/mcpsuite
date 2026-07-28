@@ -4,7 +4,7 @@ import type { ColumnDef, RowSelectionState, SortingState } from "@tanstack/react
 import { Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { z } from "zod";
-import type { ContactListWithCounts, Page, PersonListItem, Tag, User } from "@emcp/core/domain";
+import type { ContactListWithCounts, Page, PersonListItem, Tag, User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { relativeTime } from "~/lib/format.ts";
 import { BulkBar } from "~/components/BulkBar.tsx";

@@ -12,14 +12,14 @@
 #   curl -fsSL .../launcher.sh | sudo bash -s -- --version 0.2.0 --port 8080
 set -euo pipefail
 
-REPO="${EMCP_REPO:-rehanhaider/mcpsuite}"
-INSTALL_SH_URL="${EMCP_INSTALL_SH_URL:-https://raw.githubusercontent.com/${REPO}/main/.scripts/installer/install.sh}"
+REPO="${MCPSUITE_REPO:-rehanhaider/mcpsuite}"
+INSTALL_SH_URL="${MCPSUITE_INSTALL_SH_URL:-https://raw.githubusercontent.com/${REPO}/main/.scripts/installer/install.sh}"
 
-tmpdir="$(mktemp -d -t emcp-install.XXXXXX)"
+tmpdir="$(mktemp -d -t mcpsuite-install.XXXXXX)"
 cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT INT TERM
 
-echo "[emcp] downloading installer: $INSTALL_SH_URL"
+echo "[mcpsuite] downloading installer: $INSTALL_SH_URL"
 curl -fsSL --retry 3 -o "$tmpdir/install.sh" "$INSTALL_SH_URL"
 chmod 0755 "$tmpdir/install.sh"
 
@@ -33,6 +33,6 @@ elif (exec < /dev/tty) 2>/dev/null; then
   bash "$tmpdir/install.sh" "$@" < /dev/tty
 else
   # No terminal at all (CI). The installer itself stays non-interactive.
-  echo "[emcp] no terminal available; running installer non-interactively" >&2
+  echo "[mcpsuite] no terminal available; running installer non-interactively" >&2
   bash "$tmpdir/install.sh" "$@" < /dev/null
 fi

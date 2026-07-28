@@ -5,7 +5,7 @@
  * src/server/auth-issuer.ts; this file only adapts the Fetch handlers.
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntimeAsync } from "@emcp/db";
+import { getRuntimeAsync } from "@mcpsuite/db";
 import { handleAuthRequest } from "~/server/auth-issuer.ts";
 
 async function handle(request: Request): Promise<Response> {

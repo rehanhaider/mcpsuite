@@ -9,18 +9,18 @@ hardening), see [PRODUCTION.md](PRODUCTION.md).
 
 | Path | Purpose |
 | --- | --- |
-| `/opt/emcp/releases/<version>` | versioned, self-contained app (bundled Node 22) |
-| `/opt/emcp/current` | symlink to the active release |
-| `/etc/emcp/emcp.env` | configuration (preserved across updates/reinstalls) |
-| `/var/lib/emcp/emcp.db` | your SQLite database (owned by the `emcp` user) |
-| `/var/lib/emcp/backups/` | timestamped DB+config backups made before updates |
-| `/usr/local/bin/emcp` | admin CLI (`emcp --help`) |
-| `/etc/systemd/system/emcp.service` | system service — starts on boot, no login needed |
+| `/opt/mcpsuite/releases/<version>` | versioned, self-contained app (bundled Node 22) |
+| `/opt/mcpsuite/current` | symlink to the active release |
+| `/etc/mcpsuite/mcpsuite.env` | configuration (preserved across updates/reinstalls) |
+| `/var/lib/mcpsuite/mcpsuite.db` | your SQLite database (owned by the `mcpsuite` user) |
+| `/var/lib/mcpsuite/backups/` | timestamped DB+config backups made before updates |
+| `/usr/local/bin/mcpsuite` | admin CLI (`mcpsuite --help`) |
+| `/etc/systemd/system/mcpsuite.service` | system service — starts on boot, no login needed |
 
 One process serves the web UI, `POST /mcp` (agents), and `GET /healthz` on
-`WEB_PORT` (default 2222). It runs as the dedicated unprivileged `emcp`
+`WEB_PORT` (default 2222). It runs as the dedicated unprivileged `mcpsuite`
 system user with a hardened unit (`ProtectSystem=strict`, writable only in
-`/var/lib/emcp`).
+`/var/lib/mcpsuite`).
 
 ## Requirements
 
@@ -47,7 +47,7 @@ curl -fsSL .../launcher.sh | sudo bash -s -- --version 0.2.0 --port 8080
 At the end the installer prints the **first-run owner setup**: a URL plus a
 one-time setup code. It is shown exactly once and stored nowhere — no
 passwords ever pass through the installer, its arguments, or logs. Open the
-URL, enter the code, choose your password. Lost the code? `sudo emcp
+URL, enter the code, choose your password. Lost the code? `sudo mcpsuite
 setup-code` prints a fresh one (invalidating the old one).
 
 ## Manual install (air-gapped / pinned)
@@ -65,37 +65,37 @@ sudo bash install.sh --tarball ./mcpsuite-crm-<version>-linux-<arch>.tar.gz
 
 Options for a fresh install: `--port N` (default 2222) and `--base-url URL`
 (the public URL used in printed links; set it when behind a reverse proxy).
-Both only apply when `/etc/emcp/emcp.env` doesn't exist yet.
+Both only apply when `/etc/mcpsuite/mcpsuite.env` doesn't exist yet.
 
-## Configuration — `/etc/emcp/emcp.env`
+## Configuration — `/etc/mcpsuite/mcpsuite.env`
 
 ```sh
 WEB_PORT=2222                          # port for web UI + /mcp + /healthz
-EMCP_BASE_URL=http://localhost:2222    # public base URL used in printed links
-DB_PATH=/var/lib/emcp/emcp.db          # SQLite database file
+MCPSUITE_BASE_URL=http://localhost:2222    # public base URL used in printed links
+DB_PATH=/var/lib/mcpsuite/mcpsuite.db          # SQLite database file
 ```
 
-After editing: `sudo systemctl restart emcp` (or `sudo emcp restart`).
+After editing: `sudo systemctl restart mcpsuite` (or `sudo mcpsuite restart`).
 The file is never overwritten by installs or updates.
 
-## Day-2: the `emcp` CLI
+## Day-2: the `mcpsuite` CLI
 
 | Command | What it does |
 | --- | --- |
-| `emcp status` | service state, installed version, `/healthz` probe |
-| `emcp logs [-f]` | service logs (journalctl passthrough) |
-| `emcp version` | active release + all installed releases |
-| `sudo emcp start` / `stop` / `restart` | control the service |
-| `sudo emcp setup-code` | fresh one-time owner setup/reset code (printed once) |
-| `sudo emcp update [--version X]` | guarded update (see below) |
-| `sudo emcp uninstall [--purge]` | remove the app (data kept unless `--purge`) |
+| `mcpsuite status` | service state, installed version, `/healthz` probe |
+| `mcpsuite logs [-f]` | service logs (journalctl passthrough) |
+| `mcpsuite version` | active release + all installed releases |
+| `sudo mcpsuite start` / `stop` / `restart` | control the service |
+| `sudo mcpsuite setup-code` | fresh one-time owner setup/reset code (printed once) |
+| `sudo mcpsuite update [--version X]` | guarded update (see below) |
+| `sudo mcpsuite uninstall [--purge]` | remove the app (data kept unless `--purge`) |
 
 ## Updates (manual, guarded — never silent)
 
 ```sh
-sudo emcp update                 # latest GitHub release
-sudo emcp update --version 0.2.0 # pin a specific version
-sudo emcp update --tarball ./mcpsuite-crm-0.2.0-linux-x86_64.tar.gz  # offline
+sudo mcpsuite update                 # latest GitHub release
+sudo mcpsuite update --version 0.2.0 # pin a specific version
+sudo mcpsuite update --tarball ./mcpsuite-crm-0.2.0-linux-x86_64.tar.gz  # offline
 ```
 
 Every update, in order:
@@ -105,10 +105,10 @@ Every update, in order:
 2. shows the plan (`old -> new`) and asks for confirmation (`--yes` for
    non-interactive use),
 3. stops the service,
-4. **backs up** `emcp.db` (+ WAL/SHM) and `emcp.env` to
-   `/var/lib/emcp/backups/<timestamp>/` (retention: last 5, override with
-   `EMCP_BACKUP_KEEP`),
-5. installs to `/opt/emcp/releases/<version>` and runs database setup
+4. **backs up** `mcpsuite.db` (+ WAL/SHM) and `mcpsuite.env` to
+   `/var/lib/mcpsuite/backups/<timestamp>/` (retention: last 5, override with
+   `MCPSUITE_BACKUP_KEEP`),
+5. installs to `/opt/mcpsuite/releases/<version>` and runs database setup
    (a no-op on an existing database until the first post-release schema
    change ships its upgrade steps),
 6. swaps the `current` symlink, starts the service, and health-checks
@@ -120,18 +120,18 @@ restores the database from the just-made backup, and restarts the old
 version. The backup directory is kept either way. Manual disaster recovery:
 
 ```sh
-sudo emcp stop
-sudo cp /var/lib/emcp/backups/<timestamp>/emcp.db* /var/lib/emcp/
-sudo ln -sfn releases/<old-version> /opt/emcp/current
-sudo emcp start
+sudo mcpsuite stop
+sudo cp /var/lib/mcpsuite/backups/<timestamp>/mcpsuite.db* /var/lib/mcpsuite/
+sudo ln -sfn releases/<old-version> /opt/mcpsuite/current
+sudo mcpsuite start
 ```
 
 ## Uninstall
 
 ```sh
-sudo emcp uninstall           # removes service + /opt/emcp + CLI;
-                              # KEEPS /var/lib/emcp (data) and /etc/emcp (config)
-sudo emcp uninstall --purge   # also erases data + config — demands you type
+sudo mcpsuite uninstall           # removes service + /opt/mcpsuite + CLI;
+                              # KEEPS /var/lib/mcpsuite (data) and /etc/mcpsuite (config)
+sudo mcpsuite uninstall --purge   # also erases data + config — demands you type
                               # 'delete-my-data' before deleting anything
 ```
 
@@ -144,9 +144,9 @@ make release-check              # bash -n / shellcheck over installer + release 
 
 `build-tarball.sh` builds the web app, installs production `node_modules`,
 downloads and SHASUMS256-verifies the official Node 22 runtime, and packs
-everything with the installer + `emcp` CLI inside. Because `better-sqlite3`
+everything with the installer + `mcpsuite` CLI inside. Because `better-sqlite3`
 is a **native module**, cross-building for another CPU is not supported yet:
 build arm64 tarballs on an arm64 host (the script refuses cross-arch and
 prints the TODO). Upload the `.tar.gz` and `.tar.gz.sha256` (and/or
-`checksums.txt`) as assets of a `v<version>` GitHub release — `emcp update`
+`checksums.txt`) as assets of a `v<version>` GitHub release — `mcpsuite update`
 and `install.sh --version` rely on those names.

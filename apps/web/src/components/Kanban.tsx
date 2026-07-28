@@ -1,6 +1,6 @@
 /** Minimal HTML5 drag-and-drop board keyed by stage. Used by Leads and Deals. */
 import { useState, type ReactNode } from "react";
-import type { Stage } from "@emcp/core/domain";
+import type { Stage } from "@mcpsuite/core/domain";
 import { dotClass } from "~/lib/colors.ts";
 
 export interface KanbanCard {

@@ -1,6 +1,6 @@
 /** Floating action bar for selected rows: stage, owner, tag, list, archive. */
 import { Archive, ArrowRightLeft, Layers, Tags, UserRound, X } from "lucide-react";
-import type { ContactListWithCounts, ListableType, Stage, Tag, User } from "@emcp/core/domain";
+import type { ContactListWithCounts, ListableType, Stage, Tag, User } from "@mcpsuite/core/domain";
 import { useOp } from "~/lib/api.ts";
 import { dotClass } from "~/lib/colors.ts";
 import { ButtonSpinner } from "./ui.tsx";

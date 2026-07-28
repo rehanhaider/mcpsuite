@@ -10,7 +10,7 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* ============================================================================
-   emcp — design tokens (shadcn-style CSS variables on Base UI components).
+   mcpsuite — design tokens (shadcn-style CSS variables on Base UI components).
    Dark-first, near-black neutral ramp, one loud pink primary. No gradients.
    ========================================================================== */
 :root {
@@ -335,7 +335,7 @@
 }
 
 /* Small pop used by inline popovers/menus that aren't Base UI overlays. */
-@keyframes emcp-pop {
+@keyframes mcpsuite-pop {
   from {
     opacity: 0;
     transform: translateY(4px) scale(0.99);
@@ -346,7 +346,7 @@
   }
 }
 @utility animate-pop {
-  animation: emcp-pop 120ms ease-out;
+  animation: mcpsuite-pop 120ms ease-out;
 }
 
 /* ============================================================================

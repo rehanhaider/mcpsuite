@@ -14,7 +14,7 @@ import {
   type OpResult,
   type Ports,
   type RequestContext,
-} from "@emcp/core";
+} from "@mcpsuite/core";
 import { initSchema, type Db } from "../src/connection.ts";
 import * as schema from "../src/schema.ts";
 import { createPorts } from "../src/repositories.ts";
@@ -99,10 +99,10 @@ describe("bootstrap", () => {
   });
 
   it("creates a pending owner with a one-time setup code — never a password", () => {
-    // EMCP_OWNER_PASSWORD support is removed: even when set it must neither
+    // MCPSUITE_OWNER_PASSWORD support is removed: even when set it must neither
     // create a credential nor leak anywhere (docs/issues/0022).
-    const prev = process.env.EMCP_OWNER_PASSWORD;
-    process.env.EMCP_OWNER_PASSWORD = "must-be-ignored-1";
+    const prev = process.env.MCPSUITE_OWNER_PASSWORD;
+    process.env.MCPSUITE_OWNER_PASSWORD = "must-be-ignored-1";
     try {
       const fresh = makeDb();
       const boot = bootstrap(fresh, { ownerEmail: "Boss@Example.COM" });
@@ -126,8 +126,8 @@ describe("bootstrap", () => {
       expect(code.used_at).toBeNull();
       expect(code.code_hash).not.toContain(boot.ownerSetupCode!);
     } finally {
-      if (prev === undefined) delete process.env.EMCP_OWNER_PASSWORD;
-      else process.env.EMCP_OWNER_PASSWORD = prev;
+      if (prev === undefined) delete process.env.MCPSUITE_OWNER_PASSWORD;
+      else process.env.MCPSUITE_OWNER_PASSWORD = prev;
     }
   });
 
@@ -624,7 +624,7 @@ describe("admin", () => {
     expect(updated.role).toBe("admin");
 
     const client = await ok(run(owner, "mcpClient.create", { name: "Claude", scopes: ["read", "write"], trust: "trusted_agent" }));
-    expect(client.token).toMatch(/^emcp_/);
+    expect(client.token).toMatch(/^mcpsuite_/);
 
     const revoked = await ok(run(owner, "mcpClient.revoke", { id: client.client.id }));
     expect(revoked.revokedAt).toBeTruthy();
@@ -1007,7 +1007,7 @@ describe("multi-workspace isolation", () => {
 });
 
 describe("hosted workspace access read contract", () => {
-  // Mirrors the DDL owned by @emcp/hosting-control (hc-store.ts); the CRM
+  // Mirrors the DDL owned by @mcpsuite/hosting-control (hc-store.ts); the CRM
   // side only ever reads this table.
   function createAccessTable(): void {
     db.$client.exec(`CREATE TABLE IF NOT EXISTS hc_workspace_access (

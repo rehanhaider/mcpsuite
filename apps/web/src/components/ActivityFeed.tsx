@@ -1,7 +1,7 @@
 /** Record-scoped timeline + composer (notes, calls, emails, meetings, tasks). */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import type { Activity, Page } from "@emcp/core/domain";
+import type { Activity, Page } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { ACTIVITY_KIND_ICON, FeedList } from "./FeedList.tsx";
 import { OwnerSelect } from "./pickers.tsx";

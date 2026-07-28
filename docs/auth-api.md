@@ -20,7 +20,7 @@ issuer + `PasswordProvider` implementation, not from its docs._
   provider's screens are HTTP redirects to CRM pages, never OpenAuth-rendered
   HTML).
 - Token claims are **never authority**. After any successful flow the CRM
-  issues its own `emcp_session` cookie whose row links to the OpenAuth
+  issues its own `mcpsuite_session` cookie whose row links to the OpenAuth
   subject; every request re-resolves current user/workspace/role/enabled
   state from the database.
 
@@ -143,10 +143,10 @@ Errors: `invalid_email`, `invalid_password`, `password_mismatch`,
 
 Register must be entered **inside an authorize flow** (it completes via the
 `authorization` cookie). It is UI-gated, not existence-gated: without
-`EMCP_AUTH_SIGNUP_URL` the register UI redirects to
+`MCPSUITE_AUTH_SIGNUP_URL` the register UI redirects to
 `/login?error=signup_disabled`; completing a register for an email with no
 pending CRM user still dead-ends at `not_invited`. Hosted signup (the SaaS
-stream) sets `EMCP_AUTH_SIGNUP_URL` and builds its screens on this state
+stream) sets `MCPSUITE_AUTH_SIGNUP_URL` and builds its screens on this state
 machine.
 
 ### `GET|POST /api/auth/password/change`
@@ -172,7 +172,7 @@ POSTing back to the provider endpoints above.
 | screen | redirect target |
 | --- | --- |
 | login | `/login?flow=1[&error=invalid_password\|invalid_email][&email=…]` |
-| register | `${EMCP_AUTH_SIGNUP_URL}?state=start\|code[&error=…][&message=…][&email=…]` — unset ⇒ `/login?error=signup_disabled` |
+| register | `${MCPSUITE_AUTH_SIGNUP_URL}?state=start\|code[&error=…][&message=…][&email=…]` — unset ⇒ `/login?error=signup_disabled` |
 | change | `/reset-password?flow=change&state=start\|code\|update[&error=…][&message=…][&email=…]` |
 | flow-state loss | `/login?error=expired_flow` |
 | success-callback rejections | `/login?error=not_invited\|account_disabled` |
@@ -188,7 +188,7 @@ dance.
 
 `application/json` or form body: `{ "email": …, "password": … }`.
 
-- `200 {"ok":true,"mustChangePassword":false}` + `Set-Cookie: emcp_session=…`
+- `200 {"ok":true,"mustChangePassword":false}` + `Set-Cookie: mcpsuite_session=…`
 - `200 {"ok":true,"mustChangePassword":true}` — client must send the user to
   `/set-password` (every catalog operation is refused with
   `password_change_required` until the password is changed).
@@ -199,7 +199,7 @@ dance.
 Redirect target for the browser code flow with `client_id=crm-web`
 (`redirect_uri` must be `<origin>/api/auth/callback`). Exchanges the code,
 resolves the subject to the CRM user, creates the session row (linked to the
-subject + refresh token), sets `emcp_session`, then `302 /app` — or
+subject + refresh token), sets `mcpsuite_session`, then `302 /app` — or
 `302 /set-password` when `password_must_change` is set. On failure
 `302 /login?error=…`.
 
@@ -229,7 +229,7 @@ for the app UI.)
 
 ## Session cookie
 
-`emcp_session=<opaque token>` — HttpOnly; SameSite=Lax; Path=/; host-only (no
+`mcpsuite_session=<opaque token>` — HttpOnly; SameSite=Lax; Path=/; host-only (no
 `Domain`); `Max-Age=2592000` (30 d, matches the DB row); `Secure` iff the
 effective protocol is https (`x-forwarded-proto` wins over the socket). Only
 the SHA-256 of the token is stored. The session row carries `user_id`,
@@ -255,15 +255,15 @@ CRM-issued codes (distinct from OpenAuth's 6-digit flow-internal codes):
 - Issued only via `ports.credentials.issueCode(userId, "setup"|"reset")`
   (operation catalog: `user.create`, `user.regenerateSetupCode`,
   `user.resetPassword`), via first-run bootstrap (pending owner), and via the
-  server-side owner recovery CLI (`pnpm --filter @emcp/db reset-owner`).
+  server-side owner recovery CLI (`pnpm --filter @mcpsuite/db reset-owner`).
 
 **Delivery seam** — `deliverAuthCode({ email, code, purpose })`, purposes
 `"setup" | "reset" | "verify"` (`verify` = OpenAuth's own register/change
 codes; both code kinds flow through the same seam):
 
-- If `EMCP_AUTH_DELIVERY_URL` is set (hosted): `POST` that URL with JSON
+- If `MCPSUITE_AUTH_DELIVERY_URL` is set (hosted): `POST` that URL with JSON
   `{ "email": …, "code": …, "purpose": … }` and
-  `Authorization: Bearer $EMCP_AUTH_DELIVERY_KEY` (when set). Any 2xx is
+  `Authorization: Bearer $MCPSUITE_AUTH_DELIVERY_KEY` (when set). Any 2xx is
   delivered; anything else is a hard failure (the code is never logged and
   never shown in a response). The SaaS owns turning this webhook into email.
 - Otherwise (self-host, "display" mode): the code is surfaced exactly once to
@@ -274,8 +274,8 @@ codes; both code kinds flow through the same seam):
 
 - Bootstrap (empty SQLite DB) creates a **pending owner** and prints a
   one-time setup code and the `/set-password` URL — never a password.
-  `EMCP_OWNER_PASSWORD` is removed and ignored.
-- `pnpm --filter @emcp/db reset-owner` prints a fresh one-time code for the
+  `MCPSUITE_OWNER_PASSWORD` is removed and ignored.
+- `pnpm --filter @mcpsuite/db reset-owner` prints a fresh one-time code for the
   owner (setup code while the owner is still pending, reset code once
   active). Server-side access only.
 
@@ -283,21 +283,21 @@ codes; both code kinds flow through the same seam):
 
 | var | effect |
 | --- | --- |
-| `EMCP_AUTH_DELIVERY_URL` | hosted code delivery webhook (else display mode) |
-| `EMCP_AUTH_DELIVERY_KEY` | bearer key for the delivery webhook |
-| `EMCP_AUTH_SIGNUP_URL` | base URL of the hosted signup UI (register screens); unset ⇒ signup disabled |
-| `EMCP_BASE_URL` | absolute origin used in printed setup URLs (default `http://localhost:2222`) |
+| `MCPSUITE_AUTH_DELIVERY_URL` | hosted code delivery webhook (else display mode) |
+| `MCPSUITE_AUTH_DELIVERY_KEY` | bearer key for the delivery webhook |
+| `MCPSUITE_AUTH_SIGNUP_URL` | base URL of the hosted signup UI (register screens); unset ⇒ signup disabled |
+| `MCPSUITE_BASE_URL` | absolute origin used in printed setup URLs (default `http://localhost:2222`) |
 
 ## Hosted open registration (trial-first signup)
 
-Setting `EMCP_AUTH_SIGNUP_URL` switches the deployment into open registration:
+Setting `MCPSUITE_AUTH_SIGNUP_URL` switches the deployment into open registration:
 
 - The register flow accepts NEW emails (self-host keeps `signup_disabled`).
 - Register/verify success for an email with **no CRM user yet** mints a stable
   subject and completes the OAuth flow into an **unprovisioned session**: the
-  `emcp_session` cookie is set with `user_id = NULL` and the verified email as
+  `mcpsuite_session` cookie is set with `user_id = NULL` and the verified email as
   the adoption key. The browser callback 302s to
-  `${EMCP_AUTH_SIGNUP_URL}?state=registered` instead of `/app`.
+  `${MCPSUITE_AUTH_SIGNUP_URL}?state=registered` instead of `/app`.
 - `GET /api/me` reports the state as
   `{ userId: null, subject, email, workspaceId: null, …, provisioned: false }`
   — the signup page reads it to drive provisioning.

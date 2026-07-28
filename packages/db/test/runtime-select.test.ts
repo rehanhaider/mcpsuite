@@ -11,7 +11,7 @@ import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import type { RequestContext } from "@emcp/core";
+import type { RequestContext } from "@mcpsuite/core";
 import { closeDb } from "../src/connection.ts";
 import { createRuntimeFromEnv, getRuntime, getRuntimeAsync, type Runtime } from "../src/runtime.ts";
 
@@ -33,7 +33,7 @@ function fakeDeadServer(): Promise<{ port: number; close: () => Promise<void> }>
 // The process-wide singletons open lazily on first use — point them at a
 // temp file before any test can touch them (the caching test below relies
 // on this, exactly like the entry points rely on DB_PATH).
-const dir = mkdtempSync(join(tmpdir(), "emcp-runtime-select-"));
+const dir = mkdtempSync(join(tmpdir(), "mcpsuite-runtime-select-"));
 process.env.DB_PATH = join(dir, "singleton.db");
 delete process.env.DATABASE_URL;
 
@@ -100,7 +100,7 @@ describe("DATABASE_URL adapter selection", () => {
     // deterministic on every network stack, unlike closed-port semantics.
     const { port, close } = await fakeDeadServer();
     try {
-      const url = `postgresql://crm_app:supersecret@127.0.0.1:${port}/emcp`;
+      const url = `postgresql://crm_app:supersecret@127.0.0.1:${port}/mcpsuite`;
       const error = await createRuntimeFromEnv({ DATABASE_URL: url }).then(
         () => {
           throw new Error("expected the Postgres startup to fail");
@@ -119,7 +119,7 @@ describe("DATABASE_URL adapter selection", () => {
     const { port, close } = await fakeDeadServer();
     try {
       await expect(
-        createRuntimeFromEnv({ DATABASE_URL: `postgres://postgres:postgres@127.0.0.1:${port}/emcp` }),
+        createRuntimeFromEnv({ DATABASE_URL: `postgres://postgres:postgres@127.0.0.1:${port}/mcpsuite` }),
       ).rejects.toThrow(/Cannot reach PostgreSQL for DATABASE_URL/);
     } finally {
       await close();
@@ -133,15 +133,15 @@ describe("DATABASE_URL adapter selection", () => {
     const started = Date.now();
     await expect(
       createRuntimeFromEnv({
-        DATABASE_URL: "postgresql://crm_app:pw@127.0.0.1:1/emcp",
-        EMCP_PG_STARTUP_TIMEOUT_MS: "1500",
+        DATABASE_URL: "postgresql://crm_app:pw@127.0.0.1:1/mcpsuite",
+        MCPSUITE_PG_STARTUP_TIMEOUT_MS: "1500",
       }),
     ).rejects.toThrow(/Cannot reach PostgreSQL for DATABASE_URL/);
     expect(Date.now() - started).toBeLessThan(10_000);
   }, 15_000);
 
   it("rejects an unsupported DATABASE_URL scheme with a clear error", async () => {
-    await expect(createRuntimeFromEnv({ DATABASE_URL: "mysql://root@localhost/emcp" })).rejects.toThrow(
+    await expect(createRuntimeFromEnv({ DATABASE_URL: "mysql://root@localhost/mcpsuite" })).rejects.toThrow(
       /Unsupported DATABASE_URL/,
     );
   });

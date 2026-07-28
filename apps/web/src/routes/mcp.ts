@@ -2,11 +2,11 @@
  * POST /mcp — the MCP endpoint served by the product process itself, so the
  * default install is one process, one port, one health check. Same
  * per-request Bearer auth and stateless transport as the standalone server
- * (apps/mcp/src/http.ts): both delegate to @emcp/mcp's handleMcpRequest, so
+ * (apps/mcp/src/http.ts): both delegate to @mcpsuite/mcp's handleMcpRequest, so
  * auth and error shapes cannot drift.
  *
  *   curl -X POST http://localhost:2222/mcp \
- *     -H "authorization: Bearer emcp_…" \
+ *     -H "authorization: Bearer mcpsuite_…" \
  *     -H "content-type: application/json" \
  *     -H "accept: application/json, text/event-stream" -d '…'
  *
@@ -14,8 +14,8 @@
  * JSON error — hosted deployments run the standalone MCP process instead.
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntimeAsync } from "@emcp/db";
-import { handleMcpRequest } from "@emcp/mcp";
+import { getRuntimeAsync } from "@mcpsuite/db";
+import { handleMcpRequest } from "@mcpsuite/mcp";
 
 const handle = async ({ request }: { request: Request }): Promise<Response> =>
   handleMcpRequest(request, await getRuntimeAsync());

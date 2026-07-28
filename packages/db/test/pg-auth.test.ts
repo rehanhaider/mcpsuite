@@ -6,7 +6,7 @@
  *
  * Runs exactly like test/pg-isolation.test.ts:
  *
- *   docker run --rm -d --name emcp-pg-test \
+ *   docker run --rm -d --name mcpsuite-pg-test \
  *     -e POSTGRES_PASSWORD=postgres -p 127.0.0.1:55432:5432 postgres:17-alpine
  *   cd packages/db && PG_TESTS=1 \
  *     DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
@@ -15,13 +15,13 @@
  * DATABASE_URL must be a superuser/deployment credential (see the isolation
  * suite header for why). To stay parallel-safe with pg-isolation.test.ts in
  * one vitest run, this suite creates and initializes its OWN database
- * (emcp_pg_auth) on the same server and drops it afterwards. Roles are
+ * (mcpsuite_pg_auth) on the same server and drops it afterwards. Roles are
  * cluster-global and both suites set the same throwaway crm_app password.
  * Without PG_TESTS=1 and DATABASE_URL the whole file self-skips.
  */
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { OpError, type ActorStamp, type User } from "@emcp/core";
+import { OpError, type ActorStamp, type User } from "@mcpsuite/core";
 import {
   connectPg,
   createPgPorts,
@@ -35,7 +35,7 @@ import { normalizeAuthCode } from "../src/openauth.ts";
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
 
 const APP_ROLE_TEST_PASSWORD = "crm_app_test_pw"; // same constant as pg-isolation.test.ts
-const AUTH_DB = "emcp_pg_auth";
+const AUTH_DB = "mcpsuite_pg_auth";
 const RANDOM_ID = "01890000-0000-7000-8000-00000000dead"; // valid uuid, never inserted
 const sha256Hex = (v: string): string => createHash("sha256").update(v).digest("hex");
 /** Adapter-mapped but not (yet) part of the core User type. */
@@ -43,8 +43,8 @@ const mustChangeOf = (u: User): boolean => (u as unknown as { passwordMustChange
 
 describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced RLS)", () => {
   let root: PgHandle; // server-level superuser on the original database
-  let admin: PgHandle; // superuser on the dedicated emcp_pg_auth database
-  let app: PgHandle; // crm_app on emcp_pg_auth
+  let admin: PgHandle; // superuser on the dedicated mcpsuite_pg_auth database
+  let app: PgHandle; // crm_app on mcpsuite_pg_auth
   let wsA: string;
   let wsB: string;
   let portsA: PgPorts;
@@ -249,7 +249,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     await portsA.mcpClients.create({
       name: "Revocable agent",
       tokenHash,
-      tokenPrefix: "emcp_test",
+      tokenPrefix: "mcpsuite_test",
       scopes: ["read"],
       trust: "review_risky_actions",
       createdByUserId: u.id,
@@ -273,7 +273,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     await portsA.mcpClients.create({
       name: "Pending-owned agent",
       tokenHash: pendingHash,
-      tokenPrefix: "emcp_test",
+      tokenPrefix: "mcpsuite_test",
       scopes: ["read"],
       trust: "review_risky_actions",
       createdByUserId: pendingId,
@@ -291,7 +291,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     const activeClient = await portsA.mcpClients.create({
       name: "Sweep active",
       tokenHash: `mcp-hash-${Math.random().toString(36).slice(2)}`,
-      tokenPrefix: "emcp_test",
+      tokenPrefix: "mcpsuite_test",
       scopes: ["read"],
       trust: "review_risky_actions",
       createdByUserId: u.id,
@@ -299,7 +299,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     const preRevoked = await portsA.mcpClients.create({
       name: "Sweep already revoked",
       tokenHash: `mcp-hash-${Math.random().toString(36).slice(2)}`,
-      tokenPrefix: "emcp_test",
+      tokenPrefix: "mcpsuite_test",
       scopes: ["read"],
       trust: "review_risky_actions",
       createdByUserId: u.id,
@@ -479,7 +479,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     const client = await portsA.mcpClients.create({
       name: "Victim agent",
       tokenHash: `mcp-hash-${Math.random().toString(36).slice(2)}`,
-      tokenPrefix: "emcp_test",
+      tokenPrefix: "mcpsuite_test",
       scopes: ["read", "write"],
       trust: "review_risky_actions",
       createdByUserId: victim.id,
@@ -487,7 +487,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     const revoked = await portsA.mcpClients.create({
       name: "Victim revoked agent",
       tokenHash: `mcp-hash-${Math.random().toString(36).slice(2)}`,
-      tokenPrefix: "emcp_test",
+      tokenPrefix: "mcpsuite_test",
       scopes: ["read"],
       trust: "review_risky_actions",
       createdByUserId: victim.id,

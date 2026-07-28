@@ -11,8 +11,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { RequestContext } from "@emcp/core";
-import { createRuntime, openDatabase, type AnyRuntime, type Db, type Runtime } from "@emcp/db";
+import type { RequestContext } from "@mcpsuite/core";
+import { createRuntime, openDatabase, type AnyRuntime, type Db, type Runtime } from "@mcpsuite/db";
 import { handleMcpRequest } from "../src/handler.ts";
 import { SERVER_INFO, WORKSPACE_LOCKED_RPC_CODE } from "../src/server.ts";
 
@@ -23,7 +23,7 @@ let workspaceId: string;
 let apiKey: string;
 
 beforeEach(async () => {
-  dir = mkdtempSync(join(tmpdir(), "emcp-mcp-handler-"));
+  dir = mkdtempSync(join(tmpdir(), "mcpsuite-mcp-handler-"));
   db = openDatabase(join(dir, "handler-test.db"));
   runtime = createRuntime(db);
   workspaceId = runtime.bootstrapResult.workspaceId;
@@ -56,7 +56,7 @@ afterEach(() => {
 });
 
 function mcpRequest(body: unknown, headers: Record<string, string> = {}): Request {
-  return new Request("http://emcp.test/mcp", {
+  return new Request("http://mcpsuite.test/mcp", {
     method: "POST",
     headers: {
       authorization: `Bearer ${apiKey}`,
@@ -100,7 +100,7 @@ function setAccess(mode: "active" | "locked"): void {
 
 describe("handleMcpRequest", () => {
   it("answers non-POST with 405 and an allow header (stateless: no SSE/session)", async () => {
-    const res = await handleMcpRequest(new Request("http://emcp.test/mcp"), runtime);
+    const res = await handleMcpRequest(new Request("http://mcpsuite.test/mcp"), runtime);
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("POST");
     expect(await res.json()).toEqual({ error: "method_not_allowed" });
@@ -111,12 +111,12 @@ describe("handleMcpRequest", () => {
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({
       error: "unauthorized",
-      message: "Send Authorization: Bearer <emcp API key> — create one in the web UI under Admin → Agents.",
+      message: "Send Authorization: Bearer <mcpsuite API key> — create one in the web UI under Admin → Agents.",
     });
   });
 
   it("rejects an unknown key with 401", async () => {
-    const res = await handleMcpRequest(mcpRequest(INITIALIZE, { authorization: "Bearer emcp_bogus" }), runtime);
+    const res = await handleMcpRequest(mcpRequest(INITIALIZE, { authorization: "Bearer mcpsuite_bogus" }), runtime);
     expect(res.status).toBe(401);
   });
 

@@ -16,7 +16,7 @@
  */
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { and, desc, eq, gt, isNull, like, lt, sql, type SQL } from "drizzle-orm";
-import { newId, nowIso, OpError } from "@emcp/core";
+import { newId, nowIso, OpError } from "@mcpsuite/core";
 import type { Db } from "./connection.ts";
 import * as t from "./schema.ts";
 import { sha256Hex } from "./services.ts";
@@ -383,7 +383,7 @@ export interface AuthCodeDeliveryResult {
 }
 
 /**
- * The code-delivery seam (docs/auth-api.md). With EMCP_AUTH_DELIVERY_URL set
+ * The code-delivery seam (docs/auth-api.md). With MCPSUITE_AUTH_DELIVERY_URL set
  * (hosted), POST the code there — the SaaS turns it into email; the code is
  * never logged and a non-2xx is a hard failure. Without it (self-host,
  * display mode) the caller surfaces the code to the initiating admin or the
@@ -394,9 +394,9 @@ export async function deliverAuthCode(input: {
   code: string;
   purpose: AuthDeliveryPurpose;
 }): Promise<AuthCodeDeliveryResult> {
-  const url = process.env.EMCP_AUTH_DELIVERY_URL?.trim();
+  const url = process.env.MCPSUITE_AUTH_DELIVERY_URL?.trim();
   if (!url) return { mode: "display" };
-  const key = process.env.EMCP_AUTH_DELIVERY_KEY?.trim();
+  const key = process.env.MCPSUITE_AUTH_DELIVERY_KEY?.trim();
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -567,12 +567,12 @@ export async function redeemAuthCodeAndSetPassword(
 export function atomically(db: Db, fn: () => void): void {
   const sqlite = db.$client;
   const nested = sqlite.inTransaction;
-  sqlite.exec(nested ? "SAVEPOINT emcp_auth" : "BEGIN");
+  sqlite.exec(nested ? "SAVEPOINT mcpsuite_auth" : "BEGIN");
   try {
     fn();
-    sqlite.exec(nested ? "RELEASE emcp_auth" : "COMMIT");
+    sqlite.exec(nested ? "RELEASE mcpsuite_auth" : "COMMIT");
   } catch (e) {
-    sqlite.exec(nested ? "ROLLBACK TO emcp_auth; RELEASE emcp_auth" : "ROLLBACK");
+    sqlite.exec(nested ? "ROLLBACK TO mcpsuite_auth; RELEASE mcpsuite_auth" : "ROLLBACK");
     throw e;
   }
 }

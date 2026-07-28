@@ -31,7 +31,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "emcp — the CRM your agents can work" },
+      { title: "mcpsuite — the CRM your agents can work" },
       {
         name: "description",
         content:
@@ -39,8 +39,8 @@ export const Route = createRootRouteWithContext<RouterContext>()({
       },
       { name: "theme-color", content: "#131316" },
       { property: "og:type", content: "website" },
-      { property: "og:site_name", content: "emcp" },
-      { property: "og:title", content: "emcp — the CRM your agents can work" },
+      { property: "og:site_name", content: "mcpsuite" },
+      { property: "og:title", content: "mcpsuite — the CRM your agents can work" },
       {
         property: "og:description",
         content:
@@ -54,8 +54,8 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     scripts: [
       {
         // Anti-flash: apply persisted theme before first paint. Dark is the
-        // default; legacy values from 0.1 ("emcp"/"emcplight") are migrated.
-        children: `(function(){try{var t=localStorage.getItem("emcp:theme");if(t==="emcp")t="dark";if(t==="emcplight")t="light";if(t!=="light"&&t!=="dark")t="dark";document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}catch(e){}})();`,
+        // default; legacy values from 0.1 ("mcpsuite"/"mcpsuitelight") are migrated.
+        children: `(function(){try{var t=localStorage.getItem("mcpsuite:theme");if(t==="mcpsuite")t="dark";if(t==="mcpsuitelight")t="light";if(t!=="light"&&t!=="dark")t="dark";document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}catch(e){}})();`,
       },
     ],
   }),

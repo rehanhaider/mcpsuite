@@ -5,7 +5,7 @@
  * Adapter selection (docs/issues/0023): one database adapter per process,
  * chosen once at startup from DATABASE_URL and invisible to users —
  *
- *   unset          -> SQLite at DB_PATH (default ./data/emcp.db), including
+ *   unset          -> SQLite at DB_PATH (default ./data/mcpsuite.db), including
  *                     the existing first-run bootstrap: byte-identical to the
  *                     historical sync `getRuntime()` behavior. (Moving
  *                     bootstrap out of startup is issue 0029 #5, out of
@@ -31,7 +31,7 @@ import {
   type OpResult,
   type Ports,
   type RequestContext,
-} from "@emcp/core";
+} from "@mcpsuite/core";
 import { getDb, openDatabase, resolveDbPath, type Db } from "./connection.ts";
 import { createPorts } from "./repositories.ts";
 import { bootstrap, type BootstrapResult } from "./bootstrap.ts";
@@ -82,12 +82,12 @@ export function createRuntime(db: Db = getDb()): Runtime {
   if (bootstrapResult.ownerSetupCode) {
     // Shown once, on the very first boot against an empty database. This is a
     // one-time SETUP CODE — bootstrap never creates or prints a password
-    // (docs/issues/0022; regenerate with `pnpm --filter @emcp/db reset-owner`).
-    const base = process.env.EMCP_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:2222";
+    // (docs/issues/0022; regenerate with `pnpm --filter @mcpsuite/db reset-owner`).
+    const base = process.env.MCPSUITE_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:2222";
     console.log(
-      `\n[emcp] First run: created a pending owner account — email: ${bootstrapResult.ownerEmail}\n` +
-        `[emcp] Set the owner password at ${base}/set-password\n` +
-        `[emcp] One-time setup code: ${bootstrapResult.ownerSetupCode}\n`,
+      `\n[mcpsuite] First run: created a pending owner account — email: ${bootstrapResult.ownerEmail}\n` +
+        `[mcpsuite] Set the owner password at ${base}/set-password\n` +
+        `[mcpsuite] One-time setup code: ${bootstrapResult.ownerSetupCode}\n`,
     );
   }
   return {
@@ -166,9 +166,9 @@ export async function createRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env)
 
 const PG_STARTUP_PING_TIMEOUT_MS = 10_000;
 
-/** Startup ping budget; override with EMCP_PG_STARTUP_TIMEOUT_MS. */
+/** Startup ping budget; override with MCPSUITE_PG_STARTUP_TIMEOUT_MS. */
 function pgStartupTimeoutMs(env: NodeJS.ProcessEnv): number {
-  const parsed = Number(env.EMCP_PG_STARTUP_TIMEOUT_MS);
+  const parsed = Number(env.MCPSUITE_PG_STARTUP_TIMEOUT_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : PG_STARTUP_PING_TIMEOUT_MS;
 }
 

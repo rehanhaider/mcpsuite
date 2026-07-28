@@ -1,5 +1,5 @@
 [Unit]
-Description=emcp MCP HTTP server (agents connect via Bearer API key)
+Description=mcpsuite MCP HTTP server (agents connect via Bearer API key)
 After=network-online.target
 
 [Service]

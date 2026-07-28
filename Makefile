@@ -1,5 +1,5 @@
 # =============================================================================
-# emcp — agent-native CRM (pnpm workspace: apps/web, apps/mcp, packages/*)
+# mcpsuite — agent-native CRM (pnpm workspace: apps/web, apps/mcp, packages/*)
 # =============================================================================
 # Local automation. Run from a mise-activated shell (node 22 + pnpm 10) so
 # DB_PATH and the toolchain resolve. Run `make` or `make help` to list targets.
@@ -11,15 +11,15 @@
 # to one, e.g. `make autostart SVC=web` or `make autostart-off SVC=mcp`.
 SVC ?= web mcp
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
-_units := $(SVC:web=emcp-web.service)
-_units := $(_units:mcp=emcp-mcp-http.service)
+_units := $(SVC:web=mcpsuite-web.service)
+_units := $(_units:mcp=mcpsuite-mcp-http.service)
 
 .PHONY: help setup db-setup dev build start mcp mcp-http \
         test typecheck smoke clean deploy \
         autostart autostart-off autostart-status
 
 help: ## Show this help message
-	@echo "emcp — available targets:"
+	@echo "mcpsuite — available targets:"
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 	@echo ""
@@ -54,7 +54,7 @@ typecheck: ## Typecheck every package
 	pnpm -s typecheck
 
 smoke: ## Exercise every catalog operation against the live DB (safe, self-cleaning)
-	pnpm --filter @emcp/db smoke
+	pnpm --filter @mcpsuite/db smoke
 
 deploy: ## Build the web app and restart the systemd services
 	$(MAKE) build
@@ -82,7 +82,7 @@ autostart-off: ## Disable + stop web UI & MCP autostart (SVC=web|mcp to limit)
 	@echo ">>> Autostart OFF ($(SVC)): stopped; will not start on boot."
 
 autostart-status: ## Show enabled/active state of the web UI & MCP services
-	@for u in emcp-web.service emcp-mcp-http.service; do \
+	@for u in mcpsuite-web.service mcpsuite-mcp-http.service; do \
 		printf "  %-22s enabled=%-9s active=%s\n" "$$u" \
 			"$$(systemctl --user is-enabled $$u 2>/dev/null || echo absent)" \
 			"$$(systemctl --user is-active  $$u 2>/dev/null || echo inactive)"; \
@@ -94,11 +94,11 @@ autostart-status: ## Show enabled/active state of the web UI & MCP services
 # -----------------------------------------------------------------------------
 
 RELEASE_SCRIPTS := .scripts/release/build-tarball.sh \
-                   .scripts/release/payload/emcp-run \
-                   .scripts/release/payload/emcp-tsx \
+                   .scripts/release/payload/mcpsuite-run \
+                   .scripts/release/payload/mcpsuite-tsx \
                    .scripts/installer/install.sh \
                    .scripts/installer/launcher.sh \
-                   .scripts/installer/emcp
+                   .scripts/installer/mcpsuite
 
 .PHONY: release-tarball release-check
 

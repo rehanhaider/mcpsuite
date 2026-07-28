@@ -2,7 +2,7 @@
  * The CRM side of the hosted access read contract
  * (packages/hosting-control/README.md, "The read contract").
  *
- * `hc_workspace_access` is owned and created by @emcp/hosting-control; the
+ * `hc_workspace_access` is owned and created by @mcpsuite/hosting-control; the
  * CRM only ever READS it, here:
  *
  *   - table missing (self-host: hosting control never ran)   -> active
@@ -16,12 +16,12 @@
  * string comparison. The CRM knows nothing beyond this generic state — no
  * plans, trials, or billing concepts.
  *
- * @emcp/hosting-control re-exports `resolveWorkspaceAccess`; the
+ * @mcpsuite/hosting-control re-exports `resolveWorkspaceAccess`; the
  * implementation lives here so every CRM surface (web server functions,
  * /api routes, MCP transports) can consult it through their existing
- * @emcp/db dependency.
+ * @mcpsuite/db dependency.
  */
-import { nowIso, type OpResult } from "@emcp/core";
+import { nowIso, type OpResult } from "@mcpsuite/core";
 import type { Db } from "./connection.ts";
 
 export interface WorkspaceAccess {

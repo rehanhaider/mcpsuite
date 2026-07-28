@@ -14,7 +14,7 @@ import type {
   ContactListWithCounts,
   HomeStats,
   SemanticColor,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { formatMoneyMinor, relativeTime, truncate } from "~/lib/format.ts";

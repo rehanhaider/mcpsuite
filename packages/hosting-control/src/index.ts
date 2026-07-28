@@ -17,9 +17,9 @@ export {
   type WorkspaceControlState,
 } from "./lifecycle.ts";
 export { deliveryMode, retryPendingAuthDeliveries, type DeliveryMode } from "./auth-delivery.ts";
-// The product-owned auth-code seams this package rides on (@emcp/db openauth):
+// The product-owned auth-code seams this package rides on (@mcpsuite/db openauth):
 // issue-at-send + hosted/display delivery, re-exported for hosting callers.
-export { deliverAuthCode, issueAuthCodeSync, type AuthCodePurpose } from "@emcp/db";
+export { deliverAuthCode, issueAuthCodeSync, type AuthCodePurpose } from "@mcpsuite/db";
 export {
   ensureHcTables,
   getAccess,
@@ -31,8 +31,8 @@ export {
 } from "./hc-store.ts";
 // The CRM-side read contract for hc_workspace_access ("no row = active",
 // locked when mode = 'locked' or expiry <= now, missing table = active).
-// The implementation lives in @emcp/db so CRM surfaces can consult it without
+// The implementation lives in @mcpsuite/db so CRM surfaces can consult it without
 // depending on this package; it is re-exported here as part of the hosting
 // contract this package owns.
-export { resolveWorkspaceAccess, type WorkspaceAccess } from "@emcp/db";
+export { resolveWorkspaceAccess, type WorkspaceAccess } from "@mcpsuite/db";
 export { HcError } from "./errors.ts";

@@ -15,10 +15,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 // The runtime opens DB_PATH lazily on first use — point it at a temp file
 // before any handler runs.
-const dir = mkdtempSync(join(tmpdir(), "emcp-web-lock-"));
+const dir = mkdtempSync(join(tmpdir(), "mcpsuite-web-lock-"));
 process.env.DB_PATH = join(dir, "web-test.db");
 
-import { closeDb, createSession, getRuntime } from "@emcp/db";
+import { closeDb, createSession, getRuntime } from "@mcpsuite/db";
 import { Route as OpsRoute } from "../src/routes/api.ops.$name.ts";
 import { Route as MeRoute } from "../src/routes/api.me.ts";
 
@@ -37,7 +37,7 @@ beforeAll(() => {
   // only resolve for active users — simulate the completed first login.
   runtime.db.$client.prepare("UPDATE users SET status = 'active' WHERE id = ?").run(runtime.bootstrapResult.ownerUserId);
   const { token } = createSession(runtime.db, runtime.bootstrapResult.ownerUserId);
-  cookie = `emcp_session=${encodeURIComponent(token)}`;
+  cookie = `mcpsuite_session=${encodeURIComponent(token)}`;
 });
 
 afterAll(() => {

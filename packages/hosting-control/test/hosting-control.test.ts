@@ -4,7 +4,7 @@
  * on an EPHEMERAL port (port 0) for every test, and the auth-code delivery
  * seam is exercised against a local ephemeral sink listener (also port 0).
  *
- * Delivery modes: with EMCP_AUTH_DELIVERY_URL unset the seam is in "display"
+ * Delivery modes: with MCPSUITE_AUTH_DELIVERY_URL unset the seam is in "display"
  * mode (responses may carry a one-time code); with it set, codes are POSTed
  * to the URL and must never appear in responses or storage. Both env vars are
  * cleared around every test.
@@ -16,7 +16,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { normalizeAuthCode, openDatabase, sha256Hex, type Db } from "@emcp/db";
+import { normalizeAuthCode, openDatabase, sha256Hex, type Db } from "@mcpsuite/db";
 import {
   createHostingControlServer,
   resolveWorkspaceAccess,
@@ -33,9 +33,9 @@ let hc: HostingControlServer;
 let port: number;
 
 beforeEach(async () => {
-  delete process.env.EMCP_AUTH_DELIVERY_URL;
-  delete process.env.EMCP_AUTH_DELIVERY_KEY;
-  dir = mkdtempSync(join(tmpdir(), "emcp-hc-"));
+  delete process.env.MCPSUITE_AUTH_DELIVERY_URL;
+  delete process.env.MCPSUITE_AUTH_DELIVERY_KEY;
+  dir = mkdtempSync(join(tmpdir(), "mcpsuite-hc-"));
   // `await` tolerates the db layer staying sync or becoming async.
   db = await openDatabase(join(dir, "hc-test.db"));
   hc = createHostingControlServer({ db, serviceKeys: [KEY], host: "127.0.0.1", port: 0 });
@@ -43,8 +43,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  delete process.env.EMCP_AUTH_DELIVERY_URL;
-  delete process.env.EMCP_AUTH_DELIVERY_KEY;
+  delete process.env.MCPSUITE_AUTH_DELIVERY_URL;
+  delete process.env.MCPSUITE_AUTH_DELIVERY_KEY;
   await hc.close();
   db.$client.close();
   rmSync(dir, { recursive: true, force: true });
@@ -300,8 +300,8 @@ describe("workspace provisioning", () => {
   it("hosted mode: POSTs {email, code, purpose} with the delivery key and never returns the code", async () => {
     const sink = await startDeliverySink();
     try {
-      process.env.EMCP_AUTH_DELIVERY_URL = sink.url;
-      process.env.EMCP_AUTH_DELIVERY_KEY = DELIVERY_KEY;
+      process.env.MCPSUITE_AUTH_DELIVERY_URL = sink.url;
+      process.env.MCPSUITE_AUTH_DELIVERY_KEY = DELIVERY_KEY;
       const res = await provision("hosted@acme.com", "hosted-1");
       expect(res.status).toBe(201);
       expect(res.json.data.setupDelivery).toBe("queued");
@@ -328,7 +328,7 @@ describe("workspace provisioning", () => {
   });
 
   it("hosted mode: a delivery outage keeps the 201, defers to the outbox, and the sweep delivers", async () => {
-    process.env.EMCP_AUTH_DELIVERY_URL = "http://127.0.0.1:1/unreachable"; // connection refused
+    process.env.MCPSUITE_AUTH_DELIVERY_URL = "http://127.0.0.1:1/unreachable"; // connection refused
     const res = await provision("deferred@acme.com", "deferred-1");
     expect(res.status).toBe(201); // the committed outbox row IS the acknowledgement
     expect(res.json.data.setupDelivery).toBe("queued");
@@ -342,8 +342,8 @@ describe("workspace provisioning", () => {
 
     const sink = await startDeliverySink();
     try {
-      process.env.EMCP_AUTH_DELIVERY_URL = sink.url;
-      process.env.EMCP_AUTH_DELIVERY_KEY = DELIVERY_KEY;
+      process.env.MCPSUITE_AUTH_DELIVERY_URL = sink.url;
+      process.env.MCPSUITE_AUTH_DELIVERY_KEY = DELIVERY_KEY;
       const swept = await retryPendingAuthDeliveries(db);
       expect(swept).toEqual({ attempted: 1, sent: 1 });
       expect(sink.hits).toHaveLength(1);
@@ -776,8 +776,8 @@ describe("owner recovery", () => {
     activateUser(ownerUserId);
     const sink = await startDeliverySink();
     try {
-      process.env.EMCP_AUTH_DELIVERY_URL = sink.url;
-      process.env.EMCP_AUTH_DELIVERY_KEY = DELIVERY_KEY;
+      process.env.MCPSUITE_AUTH_DELIVERY_URL = sink.url;
+      process.env.MCPSUITE_AUTH_DELIVERY_KEY = DELIVERY_KEY;
       const res = await recover("rec-hosted");
       expect(res.status).toBe(202);
       expect(res.json.data).toEqual({
@@ -939,7 +939,7 @@ describe("permanent workspace deletion", () => {
   });
 
   it("removes the workspace's queued auth-code deliveries", async () => {
-    process.env.EMCP_AUTH_DELIVERY_URL = "http://127.0.0.1:1/unreachable"; // leave the outbox row pending
+    process.env.MCPSUITE_AUTH_DELIVERY_URL = "http://127.0.0.1:1/unreachable"; // leave the outbox row pending
     const res = await provision("gone@acme.com", "del-outbox");
     const wsId = res.json.data.workspaceId as string;
     expect(count("SELECT COUNT(*) AS c FROM hc_auth_delivery_outbox WHERE workspace_id = ?", wsId)).toBe(1);

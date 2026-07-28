@@ -1,4 +1,4 @@
-# @emcp/hosting-control
+# @mcpsuite/hosting-control
 
 The private-network **hosting control API** from
 `docs/architecture/hosting-control-api.md`: the narrow HTTP boundary a hosting
@@ -14,7 +14,7 @@ private SaaS -> private HTTPS -> hosting control API -> CRM database transaction
 ## Run
 
 ```bash
-HC_SERVICE_KEY=<at least 32 random chars> pnpm --filter @emcp/hosting-control start
+HC_SERVICE_KEY=<at least 32 random chars> pnpm --filter @mcpsuite/hosting-control start
 ```
 
 | Env | Default | Meaning |
@@ -23,9 +23,9 @@ HC_SERVICE_KEY=<at least 32 random chars> pnpm --filter @emcp/hosting-control st
 | `HC_SERVICE_KEY_SECONDARY` | — | Optional second key so rotation can overlap. |
 | `HC_HOST` | `127.0.0.1` | Bind address. Keep it on the private network. |
 | `HC_PORT` | `8787` | Listen port. |
-| `DB_PATH` | `./data/emcp.db` | The shared CRM SQLite file (mise sets it). |
-| `EMCP_AUTH_DELIVERY_URL` | — | **Hosted mode** when set: one-time setup/reset codes are POSTed here as `{ email, code, purpose }` and never appear in any response, log, or stored row. Unset = **display mode** (self-host/dev): the response may carry the code exactly once. |
-| `EMCP_AUTH_DELIVERY_KEY` | — | Optional bearer key sent as `Authorization: Bearer …` with each delivery POST. |
+| `DB_PATH` | `./data/mcpsuite.db` | The shared CRM SQLite file (mise sets it). |
+| `MCPSUITE_AUTH_DELIVERY_URL` | — | **Hosted mode** when set: one-time setup/reset codes are POSTed here as `{ email, code, purpose }` and never appear in any response, log, or stored row. Unset = **display mode** (self-host/dev): the response may carry the code exactly once. |
+| `MCPSUITE_AUTH_DELIVERY_KEY` | — | Optional bearer key sent as `Authorization: Bearer …` with each delivery POST. |
 
 Every non-health request needs `Authorization: Bearer <key>` (SHA-256 +
 `timingSafeEqual` verification). Health is intentionally keyless so a load
@@ -53,15 +53,15 @@ errors `{ error: { code, message, retryable }, requestId }`; the
 ### One-time codes and the delivery seam
 
 Setup/reset codes are issued through the CRM's single-use code store
-(`issueAuthCodeSync` from `@emcp/db` — hash at rest, redeemable by the login
+(`issueAuthCodeSync` from `@mcpsuite/db` — hash at rest, redeemable by the login
 flow, superseding earlier codes of the same purpose; `reset` also ends the
 owner's sessions) inside the same transaction as the mutation, then routed
 through the product delivery seam (`deliverAuthCode`). The raw code never
 enters storage or logs:
 
-- **Hosted mode** (`EMCP_AUTH_DELIVERY_URL` set): the code is POSTed to the
+- **Hosted mode** (`MCPSUITE_AUTH_DELIVERY_URL` set): the code is POSTed to the
   delivery endpoint as `{ email, code, purpose }` (bearer-authenticated with
-  `EMCP_AUTH_DELIVERY_KEY` when set) and the HTTP response only confirms
+  `MCPSUITE_AUTH_DELIVERY_KEY` when set) and the HTTP response only confirms
   initiation (`"queued"`) — it **never** contains the code.
 - **Display mode** (no URL — self-host/dev): nothing is sent anywhere; the
   live response carries the code exactly once so the operator can hand it
@@ -105,7 +105,7 @@ This package creates its own SQLite tables at startup — it never touches
 Enforcement inside the CRM (web, operation API, MCP) is deliberately **not**
 implemented by this package. The contract is implemented as
 `resolveWorkspaceAccess(db, workspaceId, now?) → { mode, expiresAt }` — it
-lives in `@emcp/db` (so CRM surfaces consult it through their existing
+lives in `@mcpsuite/db` (so CRM surfaces consult it through their existing
 dependency) and is re-exported here as part of the contract this package
 owns. The CRM consults it in the web server functions (`op`, `whoami`,
 `changePassword`), `POST /api/ops/:name`, `GET /api/me`, and per tool call /
@@ -143,7 +143,7 @@ Implemented for the current single-node SQLite product; known deviations:
 - **Owner setup/recovery codes**: the doc has OpenAuth run its own recovery
   flow and hosted email deliver it. Here the redeemable code comes from the
   CRM code store (`issueAuthCodeSync`) and travels through the
-  `EMCP_AUTH_DELIVERY_URL` seam; in display mode (self-host/dev, no URL) the
+  `MCPSUITE_AUTH_DELIVERY_URL` seam; in display mode (self-host/dev, no URL) the
   live response may carry the one-time code — a documented convenience the
   doc does not have. Replays never repeat a code, and hosted responses never
   contain one. The recovery outbox commits with the acknowledgement per the

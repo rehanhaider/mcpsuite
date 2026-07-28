@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Settings2 } from "lucide-react";
 import { useState } from "react";
-import type { CustomFieldDef, CustomFieldValue } from "@emcp/core/domain";
+import type { CustomFieldDef, CustomFieldValue } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
 import { SectionCard } from "./ui.tsx";

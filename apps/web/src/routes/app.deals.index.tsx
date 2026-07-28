@@ -16,7 +16,7 @@ import type {
   Pipeline,
   Tag,
   User,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { daysUntil, formatMoneyMinor, relativeTime } from "~/lib/format.ts";

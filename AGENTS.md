@@ -10,7 +10,7 @@ This is a pnpm workspace managed by mise (Node 22 and pnpm 10).
 
 - `packages/core` contains dependency-free domain types, zod schemas, policy,
   persistence ports, the operation catalog, and business operations. Browser
-  code may import `@emcp/core/domain` and `@emcp/core/policy`; the root barrel
+  code may import `@mcpsuite/core/domain` and `@mcpsuite/core/policy`; the root barrel
   is server-only.
 - `packages/db` is the only package that touches SQLite. It owns the Drizzle
   schema, the hand-written SQL schema, repository implementations, bootstrap,
@@ -21,7 +21,7 @@ This is a pnpm workspace managed by mise (Node 22 and pnpm 10).
   `src/server/fns.ts`, and the client data layer is in `src/lib/api.ts`.
 - `apps/mcp` turns catalog operations marked `mcpExpose` into MCP tools. It
   supports authenticated stdio and HTTP transports.
-- `data/emcp.db` is the SQLite WAL database created on first run.
+- `data/mcpsuite.db` is the SQLite WAL database created on first run.
 
 ## Commands
 
@@ -65,7 +65,7 @@ destructive-risk operation.
 ## Conventions
 
 - Data flow is UI or MCP → operation catalog → ports → Drizzle. Routes and
-  components never import `@emcp/db`; only the server composition layer does.
+  components never import `@mcpsuite/db`; only the server composition layer does.
 - React Query keys are `["op", name, input]`. Mutations use the invalidation
   graph in `apps/web/src/lib/api.ts`. Zustand stores client-only UI state.
 - Use semantic theme variables and the existing Base UI primitives. Do not add

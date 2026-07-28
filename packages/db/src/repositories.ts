@@ -62,7 +62,7 @@ import {
   type UserStatus,
   type Workspace,
   type WorkspaceSettings,
-} from "@emcp/core";
+} from "@mcpsuite/core";
 import type { Db } from "./connection.ts";
 import * as t from "./schema.ts";
 import { endUserSessions, issueAuthCode, removeOpenAuthCredential, invalidateSubjectRefreshTokens } from "./openauth.ts";
@@ -2457,7 +2457,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       const dir = join(dirname(dbPath), "backups");
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-      const dest = join(dir, `emcp-${stamp}.db`);
+      const dest = join(dir, `mcpsuite-${stamp}.db`);
       sqlite.pragma("wal_checkpoint(TRUNCATE)");
       sqlite.exec(`VACUUM INTO '${dest.replace(/'/g, "''")}'`);
       return dest;

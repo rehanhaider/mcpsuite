@@ -21,7 +21,7 @@ import {
   type TrustProfile,
   type User,
   type UserStatus,
-} from "@emcp/core";
+} from "@mcpsuite/core";
 import type { Db } from "./connection.ts";
 import * as t from "./schema.ts";
 import { sha256Hex, verifyPassword } from "./services.ts";

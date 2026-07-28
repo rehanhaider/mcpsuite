@@ -16,7 +16,7 @@ interface UiState {
 
 function persistSidebar(open: boolean): void {
   try {
-    localStorage.setItem("emcp:sidebar", open ? "1" : "0");
+    localStorage.setItem("mcpsuite:sidebar", open ? "1" : "0");
   } catch {
     /* SSR/no storage */
   }
@@ -39,7 +39,7 @@ export const useUi = create<UiState>((set, get) => ({
   setTheme: (theme) => {
     set({ theme });
     try {
-      localStorage.setItem("emcp:theme", theme);
+      localStorage.setItem("mcpsuite:theme", theme);
       document.documentElement.dataset.theme = theme;
       document.documentElement.style.colorScheme = theme;
     } catch {
@@ -51,13 +51,13 @@ export const useUi = create<UiState>((set, get) => ({
 /** Hydrate persisted UI prefs on the client (called once from the shell). */
 export function hydrateUiPrefs(): void {
   try {
-    const sidebar = localStorage.getItem("emcp:sidebar");
-    const stored = localStorage.getItem("emcp:theme");
-    // Migrate pre-0.2 values ("emcp"/"emcplight") to "dark"/"light".
+    const sidebar = localStorage.getItem("mcpsuite:sidebar");
+    const stored = localStorage.getItem("mcpsuite:theme");
+    // Migrate pre-0.2 values ("mcpsuite"/"mcpsuitelight") to "dark"/"light".
     const theme: Theme | null =
-      stored === "dark" || stored === "emcp"
+      stored === "dark" || stored === "mcpsuite"
         ? "dark"
-        : stored === "light" || stored === "emcplight"
+        : stored === "light" || stored === "mcpsuitelight"
           ? "light"
           : null;
     useUi.setState({

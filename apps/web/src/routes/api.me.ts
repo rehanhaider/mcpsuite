@@ -4,10 +4,10 @@
  * app and `whoami`; returns only identity and workspace facts, never
  * credentials or CRM records.
  *
- *   curl -b "emcp_session=…" http://localhost:2222/api/me
+ *   curl -b "mcpsuite_session=…" http://localhost:2222/api/me
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntimeAsync, isUnprovisionedSession, resolveSessionAny, resolveWorkspaceAccess } from "@emcp/db";
+import { getRuntimeAsync, isUnprovisionedSession, resolveSessionAny, resolveWorkspaceAccess } from "@mcpsuite/db";
 
 export const Route = createFileRoute("/api/me")({
   server: {
@@ -19,7 +19,7 @@ export const Route = createFileRoute("/api/me")({
           // cannot authenticate this surface (hosted identity is separate).
           return Response.json({ error: "unauthorized" }, { status: 401 });
         }
-        const session = resolveSessionAny(runtime.db, cookieValue(request.headers.get("cookie"), "emcp_session"));
+        const session = resolveSessionAny(runtime.db, cookieValue(request.headers.get("cookie"), "mcpsuite_session"));
         if (!session) {
           return Response.json({ error: "unauthorized" }, { status: 401 });
         }

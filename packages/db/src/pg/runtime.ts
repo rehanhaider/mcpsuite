@@ -12,7 +12,7 @@ import {
   type OpResult,
   type Ports,
   type RequestContext,
-} from "@emcp/core";
+} from "@mcpsuite/core";
 import { authServices, csvServices } from "../services.ts";
 import {
   connectPg,

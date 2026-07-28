@@ -1,5 +1,5 @@
 {
-  "name": "@emcp/web",
+  "name": "@mcpsuite/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,9 +13,9 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
-    "@emcp/core": "workspace:*",
-    "@emcp/db": "workspace:*",
-    "@emcp/mcp": "workspace:*",
+    "@mcpsuite/core": "workspace:*",
+    "@mcpsuite/db": "workspace:*",
+    "@mcpsuite/mcp": "workspace:*",
     "@fontsource-variable/geist": "^5.2.9",
     "@fontsource-variable/geist-mono": "^5.2.8",
     "@openauthjs/openauth": "^0.4.3",

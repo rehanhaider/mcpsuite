@@ -1,13 +1,13 @@
 /**
- * Hosting-control's side of the product auth-code seams (@emcp/db openauth):
+ * Hosting-control's side of the product auth-code seams (@mcpsuite/db openauth):
  *
  *   - `issueAuthCodeSync(db, { userId, purpose })` issues a REDEEMABLE
  *     single-use code (hash-at-rest, supersedes earlier codes; "reset" also
  *     ends the user's sessions). It joins an open transaction via a
  *     savepoint, so lifecycle code calls it inside the mutation transaction.
  *   - `deliverAuthCode({ email, code, purpose })` honors
- *     EMCP_AUTH_DELIVERY_URL (hosted: POST as JSON, optional
- *     `Authorization: Bearer EMCP_AUTH_DELIVERY_KEY`) and falls back to
+ *     MCPSUITE_AUTH_DELIVERY_URL (hosted: POST as JSON, optional
+ *     `Authorization: Bearer MCPSUITE_AUTH_DELIVERY_KEY`) and falls back to
  *     display mode when unset — the caller may then surface the code exactly
  *     once. Codes are never logged in either mode.
  *
@@ -16,14 +16,14 @@
  * purpose — never an email or a code) is the durable acknowledgement, and
  * pending rows are re-sent with a freshly issued code.
  */
-import { deliverAuthCode, issueAuthCodeSync, type Db } from "@emcp/db";
+import { deliverAuthCode, issueAuthCodeSync, type Db } from "@mcpsuite/db";
 import { listPendingOutbox, markOutbox } from "./hc-store.ts";
 
 export type DeliveryMode = "hosted" | "display";
 
 /** Hosted when a delivery URL is configured; display (show-once) otherwise. */
 export function deliveryMode(): DeliveryMode {
-  return process.env.EMCP_AUTH_DELIVERY_URL?.trim() ? "hosted" : "display";
+  return process.env.MCPSUITE_AUTH_DELIVERY_URL?.trim() ? "hosted" : "display";
 }
 
 interface OutboxUserRow {

@@ -6,17 +6,17 @@
  * ── How to run (once the `pg` driver install is signed off) ────────────────
  *
  *   1. Install the driver (NOT yet a dependency — awaiting signoff):
- *        mise exec -- pnpm --filter @emcp/db add pg
+ *        mise exec -- pnpm --filter @mcpsuite/db add pg
  *   2. Start a disposable PostgreSQL 17 (any free local port; 55432 below
  *      avoids every port this repo uses):
- *        docker run --rm -d --name emcp-pg-test \
+ *        docker run --rm -d --name mcpsuite-pg-test \
  *          -e POSTGRES_PASSWORD=postgres -p 127.0.0.1:55432:5432 \
  *          postgres:17-alpine
  *   3. Run just this suite:
  *        cd packages/db && PG_TESTS=1 \
  *          DATABASE_URL=postgres://postgres:postgres@127.0.0.1:55432/postgres \
  *          mise exec -- pnpm vitest run pg-isolation
- *   4. Tear down:  docker rm -f emcp-pg-test
+ *   4. Tear down:  docker rm -f mcpsuite-pg-test
  *
  * DATABASE_URL must be a superuser/deployment credential: the harness drops +
  * re-applies the crm schema and sets a throwaway password on the crm_app
@@ -28,7 +28,7 @@
  * default `make test` suite ignores it (and never needs the pg driver).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { OpError, type ActorStamp } from "@emcp/core";
+import { OpError, type ActorStamp } from "@mcpsuite/core";
 import {
   connectPg,
   createPgPorts,
@@ -218,7 +218,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     const client = await ports.mcpClients.create({
       name: `${label} agent`,
       tokenHash,
-      tokenPrefix: "emcp_test",
+      tokenPrefix: "mcpsuite_test",
       scopes: ["read", "write"],
       trust: "review_risky_actions",
       createdByUserId: user.id,

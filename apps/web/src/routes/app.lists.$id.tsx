@@ -26,7 +26,7 @@ import type {
   ListableType,
   Page,
   PersonListItem,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { dotClass } from "~/lib/colors.ts";
 import { EntityPicker, useCompanyOptions, useDealOptions, useEngagementOptions, usePersonOptions } from "~/components/pickers.tsx";

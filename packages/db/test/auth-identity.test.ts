@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { systemContext } from "@emcp/core";
+import { systemContext } from "@mcpsuite/core";
 import { initSchema, type Db } from "../src/connection.ts";
 import * as schema from "../src/schema.ts";
 import { bootstrap } from "../src/bootstrap.ts";
@@ -269,11 +269,11 @@ describe("bootstrap + delivery seam", () => {
     expect(Object.keys(boot).some((k) => k.toLowerCase().includes("password"))).toBe(false);
   });
 
-  it("deliverAuthCode is display-mode without EMCP_AUTH_DELIVERY_URL and posts when set", async () => {
-    const prevUrl = process.env.EMCP_AUTH_DELIVERY_URL;
-    const prevKey = process.env.EMCP_AUTH_DELIVERY_KEY;
-    delete process.env.EMCP_AUTH_DELIVERY_URL;
-    delete process.env.EMCP_AUTH_DELIVERY_KEY;
+  it("deliverAuthCode is display-mode without MCPSUITE_AUTH_DELIVERY_URL and posts when set", async () => {
+    const prevUrl = process.env.MCPSUITE_AUTH_DELIVERY_URL;
+    const prevKey = process.env.MCPSUITE_AUTH_DELIVERY_KEY;
+    delete process.env.MCPSUITE_AUTH_DELIVERY_URL;
+    delete process.env.MCPSUITE_AUTH_DELIVERY_KEY;
     const received: Array<{ auth: string | undefined; body: unknown }> = [];
     const server = createServer((req, res) => {
       let raw = "";
@@ -289,8 +289,8 @@ describe("bootstrap + delivery seam", () => {
       // Hosted mode: POSTs {email, code, purpose} with the bearer key.
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const port = (server.address() as AddressInfo).port; // ephemeral test port
-      process.env.EMCP_AUTH_DELIVERY_URL = `http://127.0.0.1:${port}/codes`;
-      process.env.EMCP_AUTH_DELIVERY_KEY = "seam-key-1";
+      process.env.MCPSUITE_AUTH_DELIVERY_URL = `http://127.0.0.1:${port}/codes`;
+      process.env.MCPSUITE_AUTH_DELIVERY_KEY = "seam-key-1";
       expect(await deliverAuthCode({ email: "B@X.test", code: "AAAA-BBBB-CCCC", purpose: "reset" })).toEqual({
         mode: "delivered",
       });
@@ -307,10 +307,10 @@ describe("bootstrap + delivery seam", () => {
       );
     } finally {
       server.close();
-      if (prevUrl !== undefined) process.env.EMCP_AUTH_DELIVERY_URL = prevUrl;
-      else delete process.env.EMCP_AUTH_DELIVERY_URL;
-      if (prevKey !== undefined) process.env.EMCP_AUTH_DELIVERY_KEY = prevKey;
-      else delete process.env.EMCP_AUTH_DELIVERY_KEY;
+      if (prevUrl !== undefined) process.env.MCPSUITE_AUTH_DELIVERY_URL = prevUrl;
+      else delete process.env.MCPSUITE_AUTH_DELIVERY_URL;
+      if (prevKey !== undefined) process.env.MCPSUITE_AUTH_DELIVERY_KEY = prevKey;
+      else delete process.env.MCPSUITE_AUTH_DELIVERY_KEY;
     }
   });
 });

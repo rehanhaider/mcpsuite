@@ -6,7 +6,7 @@ import {
   SEMANTIC_COLORS,
   type SemanticColor,
   type Tag,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { EmptyState, Modal, Spinner } from "~/components/ui.tsx";

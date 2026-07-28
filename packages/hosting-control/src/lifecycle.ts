@@ -16,7 +16,7 @@
  * created PENDING (no password, no credential material in the request); they
  * activate through a single-use setup code routed via the delivery seam.
  */
-import { DEFAULT_WORKSPACE_SETTINGS, OpError, newId, nowIso } from "@emcp/core";
+import { DEFAULT_WORKSPACE_SETTINGS, OpError, newId, nowIso } from "@mcpsuite/core";
 import {
   DEFAULT_DEAL_STAGES,
   DEFAULT_ENGAGEMENT_STAGES,
@@ -26,7 +26,7 @@ import {
   schema,
   type AuthCodePurpose,
   type Db,
-} from "@emcp/db";
+} from "@mcpsuite/db";
 import { deliveryMode, type DeliveryMode } from "./auth-delivery.ts";
 import { HcError } from "./errors.ts";
 import {

@@ -3,11 +3,11 @@
  * (curl, scripts, future mobile). Same session cookie auth as the app; the
  * response is the raw OpResult envelope (ok | error | pending_approval).
  *
- *   curl -X POST -H "content-type: application/json" -b "emcp_session=…" \
+ *   curl -X POST -H "content-type: application/json" -b "mcpsuite_session=…" \
  *     http://localhost:2222/api/ops/company.list -d '{"limit":5}'
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntimeAsync, resolveSession, resolveWorkspaceAccess, webContext, workspaceLockedResult } from "@emcp/db";
+import { getRuntimeAsync, resolveSession, resolveWorkspaceAccess, webContext, workspaceLockedResult } from "@mcpsuite/db";
 
 export const Route = createFileRoute("/api/ops/$name")({
   server: {
@@ -22,7 +22,7 @@ export const Route = createFileRoute("/api/ops/$name")({
             { status: 401 },
           );
         }
-        const session = resolveSession(runtime.db, cookieValue(request.headers.get("cookie"), "emcp_session"));
+        const session = resolveSession(runtime.db, cookieValue(request.headers.get("cookie"), "mcpsuite_session"));
         if (!session) {
           return Response.json(
             { status: "error", error: { code: "unauthorized", message: "Sign in first" } },

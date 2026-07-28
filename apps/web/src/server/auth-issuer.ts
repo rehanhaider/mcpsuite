@@ -5,8 +5,8 @@
  * Custom-UI PasswordProvider: every provider screen is a 302 redirect to a
  * CRM page (/login, /reset-password, or the hosted signup URL) — the issuer
  * never renders HTML. Identity linking happens in the `success` callback via
- * @emcp/db's resolveAuthSuccess; token claims are never authority — after any
- * successful flow the CRM issues its own emcp_session cookie linked to the
+ * @mcpsuite/db's resolveAuthSuccess; token claims are never authority — after any
+ * successful flow the CRM issues its own mcpsuite_session cookie linked to the
  * OpenAuth subject.
  */
 import { issuer } from "@openauthjs/openauth";
@@ -26,13 +26,13 @@ import {
   sqliteAuthKv,
   userMustChangePassword,
   type Db,
-} from "@emcp/db";
+} from "@mcpsuite/db";
 
 /**
  * Internal origin for the in-process login dance. Never leaves the process:
  * requests are dispatched straight into the issuer's fetch handler.
  */
-const INTERNAL_ORIGIN = "http://emcp.internal";
+const INTERNAL_ORIGIN = "http://mcpsuite.internal";
 const CLIENT_ID = "crm-web";
 const MOUNT = "/api/auth";
 
@@ -51,7 +51,7 @@ const subjects = {
   account: {
     "~standard": {
       version: 1,
-      vendor: "emcp",
+      vendor: "mcpsuite",
       validate(value: unknown) {
         const email = (value as { email?: unknown } | null)?.email;
         if (typeof email === "string" && email.length > 0) {
@@ -92,7 +92,7 @@ async function registerUi(
   form?: FormData,
   error?: { type: string; message?: string },
 ): Promise<Response> {
-  const signupUrl = process.env.EMCP_AUTH_SIGNUP_URL?.trim();
+  const signupUrl = process.env.MCPSUITE_AUTH_SIGNUP_URL?.trim();
   if (!signupUrl) return redirect("/login?error=signup_disabled");
   return redirect(
     withParams(signupUrl, {
@@ -152,7 +152,7 @@ export function getAuthApp(db: Db): FetchApp {
           const delivery = await deliverAuthCode({ email, code, purpose: "verify" });
           if (delivery.mode === "display") {
             // Display mode (self-host): the terminal IS the delivery channel.
-            console.log(`[emcp] verification code for ${email}: ${code}`);
+            console.log(`[mcpsuite] verification code for ${email}: ${code}`);
           }
         },
       }),
@@ -161,7 +161,7 @@ export function getAuthApp(db: Db): FetchApp {
       const linked = await resolveAuthSuccess(db, value.email, {
         // Hosted open registration: a configured signup URL means verified
         // identities may exist before their CRM user does (trial-first).
-        openRegistration: Boolean(process.env.EMCP_AUTH_SIGNUP_URL?.trim()),
+        openRegistration: Boolean(process.env.MCPSUITE_AUTH_SIGNUP_URL?.trim()),
       });
       if (linked.status === "not_invited") return redirect("/login?error=not_invited");
       if (linked.status === "disabled") return redirect("/login?error=account_disabled");
@@ -233,7 +233,7 @@ export const LOGIN_ERROR_MESSAGES: Record<LoginErrorCode, string> = {
 
 /**
  * Run the complete OAuth code flow against the in-process issuer and mint an
- * emcp_session row for the resolved user. Pure function of (db, credentials)
+ * mcpsuite_session row for the resolved user. Pure function of (db, credentials)
  * — the HTTP layers only translate the result.
  */
 export async function performPasswordLogin(
@@ -314,7 +314,7 @@ function sessionFromTokens(db: Db, tokens: { access: string; refresh: string }):
     // travels in the subject properties of the access token.
     const props = (payload as { properties?: { email?: unknown } } | null)?.properties;
     const email = typeof props?.email === "string" ? props.email : null;
-    if (process.env.EMCP_AUTH_SIGNUP_URL?.trim() && email) {
+    if (process.env.MCPSUITE_AUTH_SIGNUP_URL?.trim() && email) {
       const { token, expiresAt } = createSession(db, null, {
         authSubject: subject,
         authRefresh: tokens.refresh,
@@ -341,7 +341,7 @@ function sessionFromTokens(db: Db, tokens: { access: string; refresh: string }):
 // /api/auth/* request handling (the catch-all route delegates here)
 // ---------------------------------------------------------------------------
 
-const SESSION_COOKIE = "emcp_session";
+const SESSION_COOKIE = "mcpsuite_session";
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60; // seconds — matches the DB row TTL
 
 function requestIsSecure(request: Request): boolean {
@@ -350,7 +350,7 @@ function requestIsSecure(request: Request): boolean {
   return new URL(request.url).protocol === "https:";
 }
 
-/** emcp_session cookie: HttpOnly; SameSite=Lax; Path=/; host-only; Secure per X-Forwarded-Proto. */
+/** mcpsuite_session cookie: HttpOnly; SameSite=Lax; Path=/; host-only; Secure per X-Forwarded-Proto. */
 export function sessionCookie(token: string, request: Request): string {
   return [
     `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
@@ -452,7 +452,7 @@ export async function handleAuthRequest(db: Db, request: Request): Promise<Respo
     if (!tokens) return redirect("/login?error=expired_flow");
     const result = sessionFromTokens(db, tokens);
     if (!result.ok) return redirect(`/login?error=${result.error}`);
-    const signupUrl = process.env.EMCP_AUTH_SIGNUP_URL?.trim();
+    const signupUrl = process.env.MCPSUITE_AUTH_SIGNUP_URL?.trim();
     const location = result.unprovisioned
       ? withParams(signupUrl ?? "/login", { state: "registered" })
       : result.mustChangePassword

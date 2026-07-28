@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import type { Activity, User } from "@emcp/core/domain";
+import type { Activity, User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { daysUntil, formatDateTime, relativeTime } from "~/lib/format.ts";
 import { chipClass } from "~/lib/colors.ts";

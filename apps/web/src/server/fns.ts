@@ -6,7 +6,7 @@
  *   - `changePassword` — logged-in password change (OpenAuth storage)
  *   - `setPassword`    — redeem a setup/reset code (docs/auth-api.md)
  *
- * Nothing else touches @emcp/db. Pages compose these via React Query.
+ * Nothing else touches @mcpsuite/db. Pages compose these via React Query.
  * Authentication is the OpenAuth issuer mounted at /api/auth/* (see
  * src/server/auth-issuer.ts); these functions drive it in-process. Runtime
  * acquisition awaits the DATABASE_URL adapter selection (`getRuntimeAsync`);
@@ -22,7 +22,7 @@ import {
   verifyOpenAuthPassword,
   workspaceLockedResult,
   WORKSPACE_LOCKED_MESSAGE,
-} from "@emcp/db";
+} from "@mcpsuite/db";
 import { LOGIN_ERROR_MESSAGES, performPasswordLogin } from "./auth-issuer.ts";
 import { currentSession, requireContext, sessionRuntime, setSessionCookie, revokeSession } from "./session.ts";
 
@@ -68,7 +68,7 @@ export const whoami = createServerFn({ method: "GET" }).handler(async () => {
 
 /**
  * Password login through the in-process OpenAuth flow (docs/auth-api.md):
- * authorize → password/authorize → token exchange → subject → emcp_session.
+ * authorize → password/authorize → token exchange → subject → mcpsuite_session.
  */
 export const login = createServerFn({ method: "POST" })
   .validator(z.object({ email: z.string().email(), password: z.string().min(1) }))

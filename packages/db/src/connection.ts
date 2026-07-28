@@ -11,7 +11,7 @@ export type Db = BetterSQLite3Database<typeof schema> & { $client: Database.Data
 let singleton: Db | null = null;
 
 /**
- * Resolve the SQLite path. Defaults to <cwd>/data/emcp.db; override with
+ * Resolve the SQLite path. Defaults to <cwd>/data/mcpsuite.db; override with
  * DB_PATH. A `file:` DATABASE_URL (adapter selection, docs/issues/0023) wins
  * over both, so the async runtime and the SQLite-only scripts agree on one
  * file. With DATABASE_URL unset the resolution is unchanged.
@@ -19,7 +19,7 @@ let singleton: Db | null = null;
 export function resolveDbPath(env: NodeJS.ProcessEnv = process.env): string {
   const url = env.DATABASE_URL?.trim();
   if (url && url.toLowerCase().startsWith("file:")) return resolve(sqlitePathFromFileUrl(url));
-  return resolve(env.DB_PATH ?? "./data/emcp.db");
+  return resolve(env.DB_PATH ?? "./data/mcpsuite.db");
 }
 
 /** Accepts file:./relative, file:/absolute and file:///absolute forms. */

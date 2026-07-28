@@ -28,8 +28,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { newId, nowIso } from "@emcp/core";
-import { deliverAuthCode, sha256Hex, type Db } from "@emcp/db";
+import { newId, nowIso } from "@mcpsuite/core";
+import { deliverAuthCode, sha256Hex, type Db } from "@mcpsuite/db";
 import { HcError } from "./errors.ts";
 import { errorNote, retryPendingAuthDeliveries } from "./auth-delivery.ts";
 import {

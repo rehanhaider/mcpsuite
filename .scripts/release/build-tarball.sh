@@ -13,14 +13,14 @@
 #                             (setup / reset-owner, run via bundled tsx)
 #   node_modules/ (+ per-pkg) production dependencies installed with pnpm
 #                             (better-sqlite3 is a NATIVE module -> per-arch)
-#   bin/emcp-run              production entrypoint (systemd ExecStart)
-#   bin/emcp-tsx              maintenance-script runner (bundled node + tsx)
-#   installer/                install.sh, launcher.sh, emcp CLI, emcp.service
+#   bin/mcpsuite-run              production entrypoint (systemd ExecStart)
+#   bin/mcpsuite-tsx              maintenance-script runner (bundled node + tsx)
+#   installer/                install.sh, launcher.sh, mcpsuite CLI, mcpsuite.service
 #   VERSION                   shell-sourceable build metadata
 #
 # Usage:  .scripts/release/build-tarball.sh [--arch x86_64|arm64] [--skip-build]
 # Env:    NODE_VERSION (default pinned below), OUT_DIR (default dist-release),
-#         EMCP_BUILD_DIR (staging dir override; default mktemp -d)
+#         MCPSUITE_BUILD_DIR (staging dir override; default mktemp -d)
 #
 # Cross-arch note: better-sqlite3 (and tsx's esbuild) ship native binaries, so
 # a release for another CPU needs that CPU's node_modules. Building for an
@@ -102,8 +102,8 @@ mkdir -p "$OUT_DIR" "$CACHE_DIR"
 if [[ "$SKIP_BUILD" -eq 1 ]]; then
   log "skipping web build (--skip-build)"
 else
-  log "building web app (pnpm --filter @emcp/web build)"
-  (cd "$REPO_ROOT" && pnpm --filter @emcp/web build)
+  log "building web app (pnpm --filter @mcpsuite/web build)"
+  (cd "$REPO_ROOT" && pnpm --filter @mcpsuite/web build)
 fi
 [[ -f "$REPO_ROOT/apps/web/dist/server/server.js" ]] || die "apps/web/dist/server/server.js missing — build failed?"
 [[ -d "$REPO_ROOT/apps/web/dist/client" ]] || die "apps/web/dist/client missing — build failed?"
@@ -129,12 +129,12 @@ curl -fsSL --retry 3 -o "$CACHE_DIR/SHASUMS256-v${NODE_VERSION}.txt" "$SHASUMS_U
 log "node runtime checksum OK"
 
 # ---------------------------------------------------------------- 3. staging
-if [[ -n "${EMCP_BUILD_DIR:-}" ]]; then
-  STAGE="$EMCP_BUILD_DIR/stage"
+if [[ -n "${MCPSUITE_BUILD_DIR:-}" ]]; then
+  STAGE="$MCPSUITE_BUILD_DIR/stage"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
 else
-  STAGE="$(mktemp -d -t emcp-release.XXXXXX)"
+  STAGE="$(mktemp -d -t mcpsuite-release.XXXXXX)"
   trap 'rm -rf "$STAGE"' EXIT
 fi
 log "staging in $STAGE"
@@ -143,7 +143,7 @@ log "staging in $STAGE"
 # packages/hosting-control ships as a package.json-only skeleton so the
 # lockfile importer set matches; the filtered install below never materialises
 # its node_modules. apps/mcp ships with src: the ONE web process serves /mcp
-# and depends on @emcp/mcp (workspace TS source).
+# and depends on @mcpsuite/mcp (workspace TS source).
 mkdir -p "$STAGE/apps/web" "$STAGE/apps/mcp" \
   "$STAGE/packages/core" "$STAGE/packages/db" "$STAGE/packages/hosting-control" \
   "$STAGE/bin"
@@ -164,7 +164,7 @@ log "installing production dependencies (pnpm install --prod, web+db subtree)"
 (
   cd "$STAGE"
   CI=1 pnpm install --prod --frozen-lockfile \
-    --filter "@emcp/web..." --filter "@emcp/db..." \
+    --filter "@mcpsuite/web..." --filter "@mcpsuite/db..." \
     >/dev/null
 )
 [[ -e "$STAGE/apps/web/node_modules/srvx" ]] || die "srvx missing from staged node_modules"
@@ -198,24 +198,24 @@ if [[ "$TARGET_ARCH" == "$HOST_ARCH" ]]; then
 fi
 
 # ------------------------------------------------------- 6. wrappers + meta
-cp "$REPO_ROOT/.scripts/release/payload/emcp-run" "$STAGE/bin/emcp-run"
-cp "$REPO_ROOT/.scripts/release/payload/emcp-tsx" "$STAGE/bin/emcp-tsx"
-chmod 0755 "$STAGE/bin/emcp-run" "$STAGE/bin/emcp-tsx"
+cp "$REPO_ROOT/.scripts/release/payload/mcpsuite-run" "$STAGE/bin/mcpsuite-run"
+cp "$REPO_ROOT/.scripts/release/payload/mcpsuite-tsx" "$STAGE/bin/mcpsuite-tsx"
+chmod 0755 "$STAGE/bin/mcpsuite-run" "$STAGE/bin/mcpsuite-tsx"
 
 mkdir -p "$STAGE/installer"
 cp "$REPO_ROOT/.scripts/installer/install.sh" \
    "$REPO_ROOT/.scripts/installer/launcher.sh" \
-   "$REPO_ROOT/.scripts/installer/emcp" \
-   "$REPO_ROOT/.scripts/installer/emcp.service" \
+   "$REPO_ROOT/.scripts/installer/mcpsuite" \
+   "$REPO_ROOT/.scripts/installer/mcpsuite.service" \
    "$STAGE/installer/"
-chmod 0755 "$STAGE/installer/install.sh" "$STAGE/installer/launcher.sh" "$STAGE/installer/emcp"
+chmod 0755 "$STAGE/installer/install.sh" "$STAGE/installer/launcher.sh" "$STAGE/installer/mcpsuite"
 
 cat > "$STAGE/VERSION" <<EOF
-EMCP_VERSION=$VERSION
-EMCP_ARCH=$TARGET_ARCH
-EMCP_NODE=v$NODE_VERSION
-EMCP_GIT=$GIT_SHA
-EMCP_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+MCPSUITE_VERSION=$VERSION
+MCPSUITE_ARCH=$TARGET_ARCH
+MCPSUITE_NODE=v$NODE_VERSION
+MCPSUITE_GIT=$GIT_SHA
+MCPSUITE_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
 # ---------------------------------------------------------------- 7. package

@@ -1,5 +1,5 @@
 {
-  "name": "@emcp/hosting-control",
+  "name": "@mcpsuite/hosting-control",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,8 +14,8 @@
     "start": "tsx src/main.ts"
   },
   "dependencies": {
-    "@emcp/core": "workspace:*",
-    "@emcp/db": "workspace:*",
+    "@mcpsuite/core": "workspace:*",
+    "@mcpsuite/db": "workspace:*",
     "tsx": "^4.20.0"
   },
   "devDependencies": {

@@ -8,7 +8,7 @@ import {
   type CustomFieldDef,
   type CustomFieldEntity,
   type CustomFieldType,
-} from "@emcp/core/domain";
+} from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { EmptyState, Field, Modal, Spinner } from "~/components/ui.tsx";

@@ -12,7 +12,7 @@ import Database from "better-sqlite3";
 import { SCHEMA_VERSION } from "../src/schema-sql.ts";
 import { openDatabase } from "../src/connection.ts";
 
-const tmp = mkdtempSync(join(tmpdir(), "emcp-schema-init-test-"));
+const tmp = mkdtempSync(join(tmpdir(), "mcpsuite-schema-init-test-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
 /** Full name+sql snapshot of every object, for exact before/after comparison. */

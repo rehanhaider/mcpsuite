@@ -2,12 +2,12 @@
 # install.sh — machine-wide installer for MCP Suite CRM (Linux + systemd).
 #
 # Layout it creates:
-#   /opt/emcp/releases/<version>   self-contained release (bundled Node 22)
-#   /opt/emcp/current              symlink to the active release
-#   /etc/emcp/emcp.env             configuration (preserved on reinstall)
-#   /var/lib/emcp                  mutable data: emcp.db + backups/ (user emcp)
-#   /usr/local/bin/emcp            admin CLI
-#   /etc/systemd/system/emcp.service
+#   /opt/mcpsuite/releases/<version>   self-contained release (bundled Node 22)
+#   /opt/mcpsuite/current              symlink to the active release
+#   /etc/mcpsuite/mcpsuite.env             configuration (preserved on reinstall)
+#   /var/lib/mcpsuite                  mutable data: mcpsuite.db + backups/ (user mcpsuite)
+#   /usr/local/bin/mcpsuite            admin CLI
+#   /etc/systemd/system/mcpsuite.service
 #
 # Usage (as root):
 #   install.sh --tarball /path/to/mcpsuite-crm-<v>-linux-<arch>.tar.gz
@@ -17,33 +17,33 @@
 # Options:
 #   --tarball PATH   install from a local release tarball
 #   --version X      pin a release version (default: latest GitHub release)
-#   --port N         WEB_PORT written to a NEW /etc/emcp/emcp.env (default 2222)
-#   --base-url URL   EMCP_BASE_URL written to a NEW env file (default http://localhost:PORT)
+#   --port N         WEB_PORT written to a NEW /etc/mcpsuite/mcpsuite.env (default 2222)
+#   --base-url URL   MCPSUITE_BASE_URL written to a NEW env file (default http://localhost:PORT)
 #
 # Secrets: this script never asks for, reads, or logs credentials. First run
 # creates a pending owner; the one-time setup code printed by database setup
 # is surfaced exactly once on your terminal and stored nowhere else.
 #
-# Testing: set EMCP_INSTALL_ROOT=/some/dir to install into that prefix without
+# Testing: set MCPSUITE_INSTALL_ROOT=/some/dir to install into that prefix without
 # root, users, or systemd (layout + files only; used by the repo's dry-run).
 set -euo pipefail
 
-REPO="${EMCP_REPO:-rehanhaider/mcpsuite}"
-PREFIX="${EMCP_INSTALL_ROOT:-}"
+REPO="${MCPSUITE_REPO:-rehanhaider/mcpsuite}"
+PREFIX="${MCPSUITE_INSTALL_ROOT:-}"
 TEST_MODE=0
 [[ -n "$PREFIX" ]] && TEST_MODE=1
 
-OPT_DIR="$PREFIX/opt/emcp"
-ETC_DIR="$PREFIX/etc/emcp"
-ENV_FILE="$ETC_DIR/emcp.env"
-VAR_DIR="$PREFIX/var/lib/emcp"
+OPT_DIR="$PREFIX/opt/mcpsuite"
+ETC_DIR="$PREFIX/etc/mcpsuite"
+ENV_FILE="$ETC_DIR/mcpsuite.env"
+VAR_DIR="$PREFIX/var/lib/mcpsuite"
 BIN_DIR="$PREFIX/usr/local/bin"
 UNIT_DIR="$PREFIX/etc/systemd/system"
-SERVICE="emcp"
+SERVICE="mcpsuite"
 
-log()  { printf '\033[36m[emcp-install]\033[0m %s\n' "$*"; }
-warn() { printf '\033[33m[emcp-install] WARNING:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[31m[emcp-install] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+log()  { printf '\033[36m[mcpsuite-install]\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m[mcpsuite-install] WARNING:\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m[mcpsuite-install] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- arguments
 TARBALL=""
@@ -105,7 +105,7 @@ if [[ -z "$TARBALL" ]]; then
 fi
 
 # ------------------------------------------------------------ obtain release
-WORK="$(mktemp -d -t emcp-install.XXXXXX)"
+WORK="$(mktemp -d -t mcpsuite-install.XXXXXX)"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
 
@@ -148,12 +148,12 @@ mkdir -p "$WORK/release"
 tar -xzf "$TARBALL" -C "$WORK/release"
 [[ -f "$WORK/release/VERSION" ]] || die "invalid release: VERSION file missing"
 # shellcheck disable=SC1091
-VERSION="$(. "$WORK/release/VERSION" && echo "${EMCP_VERSION:-}")"
-REL_ARCH="$(. "$WORK/release/VERSION" && echo "${EMCP_ARCH:-}")"
-[[ -n "$VERSION" ]] || die "invalid release: EMCP_VERSION missing from VERSION"
+VERSION="$(. "$WORK/release/VERSION" && echo "${MCPSUITE_VERSION:-}")"
+REL_ARCH="$(. "$WORK/release/VERSION" && echo "${MCPSUITE_ARCH:-}")"
+[[ -n "$VERSION" ]] || die "invalid release: MCPSUITE_VERSION missing from VERSION"
 [[ "$REL_ARCH" == "$ARCH" ]] || die "release is for $REL_ARCH but this machine is $ARCH"
-[[ -x "$WORK/release/bin/emcp-run" && -x "$WORK/release/node/bin/node" ]] \
-  || die "invalid release: bin/emcp-run or bundled node missing"
+[[ -x "$WORK/release/bin/mcpsuite-run" && -x "$WORK/release/node/bin/node" ]] \
+  || die "invalid release: bin/mcpsuite-run or bundled node missing"
 log "release: mcpsuite-crm $VERSION (linux/$ARCH)"
 
 # ------------------------------------------------------------- user + dirs
@@ -161,7 +161,7 @@ if [[ "$TEST_MODE" -eq 0 ]]; then
   if ! id -u "$SERVICE" >/dev/null 2>&1; then
     log "creating system user '$SERVICE'"
     nologin="/usr/sbin/nologin"; [[ -x "$nologin" ]] || nologin="/sbin/nologin"; [[ -x "$nologin" ]] || nologin="/bin/false"
-    useradd --system --user-group --home-dir /var/lib/emcp --no-create-home --shell "$nologin" "$SERVICE"
+    useradd --system --user-group --home-dir /var/lib/mcpsuite --no-create-home --shell "$nologin" "$SERVICE"
   fi
 fi
 
@@ -197,11 +197,11 @@ else
   base_url="${BASE_URL:-http://localhost:$port}"
   log "writing $ENV_FILE (WEB_PORT=$port)"
   cat > "$ENV_FILE" <<EOF
-# emcp configuration — read by systemd (EnvironmentFile=) and the emcp CLI.
-# After editing: sudo systemctl restart emcp
+# mcpsuite configuration — read by systemd (EnvironmentFile=) and the mcpsuite CLI.
+# After editing: sudo systemctl restart mcpsuite
 WEB_PORT=$port
-EMCP_BASE_URL=$base_url
-DB_PATH=/var/lib/emcp/emcp.db
+MCPSUITE_BASE_URL=$base_url
+DB_PATH=/var/lib/mcpsuite/mcpsuite.db
 EOF
   chmod 0640 "$ENV_FILE"
   [[ "$TEST_MODE" -eq 0 ]] && chown "root:$SERVICE" "$ENV_FILE"
@@ -209,29 +209,29 @@ fi
 # shellcheck disable=SC1090
 WEB_PORT="$(. "$ENV_FILE" && echo "${WEB_PORT:-2222}")"
 # shellcheck disable=SC1090
-EMCP_BASE_URL="$(. "$ENV_FILE" && echo "${EMCP_BASE_URL:-http://localhost:$WEB_PORT}")"
+MCPSUITE_BASE_URL="$(. "$ENV_FILE" && echo "${MCPSUITE_BASE_URL:-http://localhost:$WEB_PORT}")"
 # shellcheck disable=SC1090
-DB_PATH="$(. "$ENV_FILE" && echo "${DB_PATH:-/var/lib/emcp/emcp.db}")"
-[[ "$TEST_MODE" -eq 1 && "$DB_PATH" == /var/lib/emcp/* ]] && DB_PATH="$PREFIX$DB_PATH"
+DB_PATH="$(. "$ENV_FILE" && echo "${DB_PATH:-/var/lib/mcpsuite/mcpsuite.db}")"
+[[ "$TEST_MODE" -eq 1 && "$DB_PATH" == /var/lib/mcpsuite/* ]] && DB_PATH="$PREFIX$DB_PATH"
 
 # ------------------------------------------------------------- CLI + unit
-install -m 0755 "$REL_DIR/installer/emcp" "$BIN_DIR/emcp"
-install -m 0644 "$REL_DIR/installer/emcp.service" "$UNIT_DIR/$SERVICE.service"
-log "installed CLI ($BIN_DIR/emcp) and unit ($UNIT_DIR/$SERVICE.service)"
+install -m 0755 "$REL_DIR/installer/mcpsuite" "$BIN_DIR/mcpsuite"
+install -m 0644 "$REL_DIR/installer/mcpsuite.service" "$UNIT_DIR/$SERVICE.service"
+log "installed CLI ($BIN_DIR/mcpsuite) and unit ($UNIT_DIR/$SERVICE.service)"
 
 # ------------------------------------------------- db setup (first-run setup)
 # Runs as the unprivileged service user with the release's bundled runtime.
 # Its stdout may contain the ONE-TIME owner setup code: capture to memory and
 # print exactly once below — never into a file or log.
 log "setting up the database (as user $SERVICE)"
-setup_cmd=("$OPT_DIR/current/bin/emcp-tsx" "packages/db/src/scripts/setup.ts")
+setup_cmd=("$OPT_DIR/current/bin/mcpsuite-tsx" "packages/db/src/scripts/setup.ts")
 if [[ "$TEST_MODE" -eq 0 ]]; then
   setup_out="$(runuser -u "$SERVICE" -- env \
-    HOME=/var/lib/emcp DB_PATH="$DB_PATH" EMCP_BASE_URL="$EMCP_BASE_URL" \
+    HOME=/var/lib/mcpsuite DB_PATH="$DB_PATH" MCPSUITE_BASE_URL="$MCPSUITE_BASE_URL" \
     "${setup_cmd[@]}" 2>&1)" || die "database setup failed:
 $setup_out"
 else
-  setup_out="$(env HOME="$VAR_DIR" DB_PATH="$DB_PATH" EMCP_BASE_URL="$EMCP_BASE_URL" \
+  setup_out="$(env HOME="$VAR_DIR" DB_PATH="$DB_PATH" MCPSUITE_BASE_URL="$MCPSUITE_BASE_URL" \
     "${setup_cmd[@]}" 2>&1)" || die "database setup failed:
 $setup_out"
 fi
@@ -265,16 +265,16 @@ cat <<EOF
 ==============================================================
  MCP Suite CRM $VERSION installed
 ==============================================================
-  URL        : $EMCP_BASE_URL
+  URL        : $MCPSUITE_BASE_URL
   Service    : $SERVICE.service ($HEALTH_NOTE)
   Config     : $ENV_FILE
   Data       : $VAR_DIR (SQLite: $DB_PATH)
-  CLI        : emcp status | logs | update | setup-code | uninstall
+  CLI        : mcpsuite status | logs | update | setup-code | uninstall
 
 --- first-run owner setup (shown once, stored nowhere) -------
 $setup_out
 --------------------------------------------------------------
 If a one-time setup code is shown above, open the printed URL
-and use it now. Lost it? Run: sudo emcp setup-code
+and use it now. Lost it? Run: sudo mcpsuite setup-code
 ==============================================================
 EOF
