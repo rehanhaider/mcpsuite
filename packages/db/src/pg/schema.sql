@@ -1235,8 +1235,10 @@ $$;
 -- Mirrors resolveSessionAny in the SQLite adapter (packages/db/src/auth.ts).
 --
 -- Like the other resolvers it returns fixed identity fields only — never
--- names, profile data or password state. The caller reads the user's profile
--- afterwards inside the resolved workspace, where row-level security applies.
+-- names, profile data or password material (the forced-change flag is part
+-- of the identity, as in crm.resolve_user_identity). The caller reads the
+-- user's profile afterwards inside the resolved workspace, where row-level
+-- security applies.
 -- `email` is set only for 'unprovisioned', and is the session's own address.
 CREATE FUNCTION crm.resolve_session(p_token_hash text)
 RETURNS TABLE (

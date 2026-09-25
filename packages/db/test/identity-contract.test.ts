@@ -26,6 +26,8 @@ import { AUTH_CODE_ISSUE_MAX, AUTH_CODE_MAX_ATTEMPTS, joinAuthKey } from "../src
 import type { IdentityStore, IdentityTestHooks } from "../src/identity.ts";
 import { connectPg, createPgPorts, provisionPgWorkspace, type PgHandle } from "../src/pg/repositories.ts";
 import { createPgIdentity } from "../src/pg/identity.ts";
+import { createPgRuntime } from "../src/pg/runtime.ts";
+import { createRuntime } from "../src/runtime.ts";
 import { initPgSchema } from "../src/pg/init.ts";
 
 const sha256Hex = (v: string): string => createHash("sha256").update(v).digest("hex");
@@ -41,6 +43,8 @@ interface Harness {
   lockWorkspace: (() => void) | null;
   /** Run a catalog query as the runtime role (PostgreSQL only). */
   catalogQuery: ((text: string) => Promise<Array<Record<string, unknown>>>) | null;
+  /** The adapter's real runtime over the same database. */
+  runtime(): Promise<{ run: (ctx: RequestContext, operation: string, input: unknown) => Promise<unknown>; close(): Promise<void> }>;
   close(): Promise<void>;
 }
 
@@ -72,6 +76,7 @@ async function sqliteHarness(): Promise<Harness> {
         .run(workspaceId, now, now);
     },
     catalogQuery: null,
+    runtime: async () => ({ run: createRuntime(db).run, close: async () => {} }),
     close: async () => {
       db.$client.close();
       rmSync(dir, { recursive: true, force: true });
@@ -119,6 +124,10 @@ async function pgHarness(): Promise<Harness> {
     // The access table arrives on PostgreSQL with #5.
     lockWorkspace: null,
     catalogQuery: async (text) => (await app.pool.query(text)).rows,
+    runtime: async () => {
+      const pg = await createPgRuntime({ databaseUrl: appUrl.toString() });
+      return { run: pg.run, close: () => pg.close() };
+    },
     close: async () => {
       await app.close();
       await admin.close();
@@ -307,6 +316,12 @@ for (const adapter of ADAPTERS) {
         expect((await identity.verifyAndConsumeCode({ email: user.email, purpose: "setup", code })).ok).toBe(false);
       });
 
+      it("rate-limit issuance through the operations' port too (user.resetPassword & co.)", async () => {
+        const user = await pendingUser("port-limit");
+        for (let i = 0; i < AUTH_CODE_ISSUE_MAX; i += 1) await ports.credentials.issueCode(user.id, "setup");
+        await expect(ports.credentials.issueCode(user.id, "setup")).rejects.toMatchObject({ code: "conflict" });
+      });
+
       it("rate-limit issuance per email and refuse users outside the workspace", async () => {
         const user = await pendingUser("issue-limit");
         for (let i = 0; i < AUTH_CODE_ISSUE_MAX; i += 1) await identity.issueCode(h.workspaceId, user.id, "setup");
@@ -474,6 +489,22 @@ for (const adapter of ADAPTERS) {
         await ports.credentials.mustChangePassword(user.id, false);
         const allowed = await runGated(catalog, identity, portsFor, ctxFor(user.id), "company.list", {});
         expect(allowed.status).toBe("ok");
+      });
+
+      it("the adapter's runtime enforces forced password change on run()", async () => {
+        const user = await activeUser("runtime-gate");
+        const rt = await h.runtime();
+        try {
+          await ports.credentials.mustChangePassword(user.id, true);
+          expect(await rt.run(ctxFor(user.id), "company.list", {})).toMatchObject({
+            status: "error",
+            error: { code: "password_change_required" },
+          });
+          await ports.credentials.mustChangePassword(user.id, false);
+          expect(await rt.run(ctxFor(user.id), "company.list", {})).toMatchObject({ status: "ok" });
+        } finally {
+          await rt.close();
+        }
       });
 
       it("reports hosted workspace access", async () => {

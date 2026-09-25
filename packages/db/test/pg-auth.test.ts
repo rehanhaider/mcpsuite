@@ -547,7 +547,12 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     expect(await codeRows(victim.id)).toHaveLength(0);
     expect(await portsA.mcpClients.get(client.id)).toBeNull();
     expect(await portsA.mcpClients.get(revoked.id)).toBeNull();
-    expect(await kvKeys()).toEqual(["oauth:refresh:sub-survivor:t1"]);
+    // Issuer state: every record of the victim is gone, including its code
+    // issue-rate record. Rate records of live users (15-minute TTL, created
+    // by the codes issued earlier in this file) are not the victim's state.
+    const keys = await kvKeys();
+    expect(keys.filter((k) => !k.startsWith("mcpsuite:code-issue"))).toEqual(["oauth:refresh:sub-survivor:t1"]);
+    expect(keys.some((k) => k.includes("victim@auth-a.test"))).toBe(false);
     expect((await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-victim"])).rows).toHaveLength(0);
 
     // …while business records survive, unassigned and nameless.

@@ -5,9 +5,11 @@
  * runs inside whatever transaction that connection has open — including
  * another request's. Two rules keep requests apart:
  *
- *   1. `txLock` (per connection) serializes every top-level unit of work:
- *      transactions AND plain reads/writes. While request A holds it, request
- *      B waits instead of executing inside A's BEGIN.
+ *   1. `txLock` (per connection) serializes every top-level unit of work
+ *      that goes through this module: transactions (ports.tx and the
+ *      identity store) and the identity store's plain reads and writes.
+ *      While request A holds it, request B waits instead of executing inside
+ *      A's BEGIN.
  *   2. Nesting is scoped to the request's async call chain through one
  *      AsyncLocalStorage per connection — not to an object (a nested call
  *      through a different object must join, not wait on the lock it already

@@ -44,7 +44,7 @@
  *   inside the same workspace transaction as the triggering mutation
  *   (disable-revocation and permanent user deletion per docs/issues/0022).
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
@@ -100,8 +100,8 @@ import {
   type WorkspaceSettings,
 } from "@mcpsuite/core";
 import * as t from "./schema.ts";
-import { generateAuthCode, normalizeAuthCode } from "../openauth.ts";
 import { inPgTransaction } from "./tx.ts";
+import { createPgIdentity } from "./identity.ts";
 
 // ---------------------------------------------------------------------------
 // Async port surface
@@ -299,10 +299,6 @@ const pgErrorCode = (e: unknown): string | undefined => {
   return undefined;
 };
 
-const sha256Hex = (value: string): string => createHash("sha256").update(value).digest("hex");
-
-/** Single-use code lifetimes: invites are handed over out-of-band (long), resets are hot (short). */
-const AUTH_CODE_TTL_MS = { setup: 7 * 86_400_000, reset: 3_600_000 } as const;
 
 // ---------------------------------------------------------------------------
 // Row mappers (Date -> ISO string, jsonb passes through)
@@ -953,30 +949,12 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
 
   const credentialsPort: AsyncPort<Ports["credentials"]> = {
     async issueCode(userId, purpose) {
-      if (purpose !== "setup" && purpose !== "reset") {
-        throw OpError.validation(`Unknown credential code purpose: ${String(purpose)}`);
-      }
-      return run(async (x) => {
-        // Same display format and normalized-hash form as the SQLite adapter
-        // (packages/db/src/openauth.ts) so codes redeem identically on every
-        // surface: XXXX-XXXX-XXXX shown once, SHA-256(normalized) at rest.
-        const code = generateAuthCode();
-        const expiresAt = new Date(Date.now() + AUTH_CODE_TTL_MS[purpose]);
-        // Workspace-guarded definer function: stores only the hash, deletes
-        // the user's earlier codes of this purpose, NULL when the user is not
-        // in this workspace (or disabled) — indistinguishable from random ids.
-        const rows = await execRows<{ id: string | null }>(
-          x,
-          sql`SELECT crm.issue_auth_code(${uid(userId)}::uuid, ${purpose}, ${sha256Hex(normalizeAuthCode(code))}, ${expiresAt.toISOString()}::timestamptz) AS id`,
-        );
-        if (!rows[0]?.id) throw OpError.notFound("user", userId);
-        if (purpose === "reset") {
-          // user.resetPassword contract: issuing a reset code ends every
-          // session, in the same transaction.
-          await execRows(x, sql`SELECT crm.delete_user_sessions(${uid(userId)}::uuid)`);
-        }
-        return { code };
-      });
+      // One code-issuing path for this adapter (./identity.ts): same display
+      // format and hash as SQLite, the per-email issue rate limit, and for
+      // `reset` ending the user's sessions and revoking their refresh tokens.
+      // It joins the operation's transaction (same workspace).
+      const { code } = await createPgIdentity(db).issueCode(ws, userId, purpose);
+      return { code };
     },
     async mustChangePassword(userId, mustChange) {
       await run(async (x) => {
