@@ -449,6 +449,12 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
       "consume_auth_code",
       "delete_user_sessions",
       "purge_openauth_identity",
+      "create_session",
+      "resolve_session",
+      "destroy_session",
+      "find_user_by_auth_subject",
+      "email_for_auth_subject",
+      "redeem_auth_code",
     ];
     const acl = await admin.pool.query(
       `SELECT proname, coalesce(proacl::text, '') AS acl, pg_get_userbyid(proowner) AS owner

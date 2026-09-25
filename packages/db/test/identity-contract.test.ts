@@ -584,6 +584,26 @@ for (const adapter of ADAPTERS) {
         expect(await identity.verifyPassword(user.email, "second-password-1")).toBe(true);
       });
 
+      it("session lookups do not take the write lock another process may need", async () => {
+        // SQLite only. Session resolution runs on every authenticated request;
+        // it must read under WAL while another process holds the write lock,
+        // not queue for (or take) that lock itself.
+        if (!h.sqliteFile) return;
+        const user = await activeUser("wal-read");
+        const { token } = await identity.createSession(user.id);
+        const other = new Database(h.sqliteFile);
+        try {
+          other.exec("BEGIN IMMEDIATE"); // another process mid-write
+          const started = Date.now();
+          expect((await identity.resolveSession(token))!.user.id).toBe(user.id);
+          expect(Date.now() - started).toBeLessThan(1000); // answered, did not wait out busy_timeout
+          other.exec("COMMIT");
+        } finally {
+          if (other.inTransaction) other.exec("ROLLBACK");
+          other.close();
+        }
+      });
+
       it("keeps requests apart: another request neither joins an open transaction nor lands in it", async () => {
         const a = await activeUser("iso-a");
         const b = await activeUser("iso-b");

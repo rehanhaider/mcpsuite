@@ -51,10 +51,15 @@ export function createSqliteIdentity(db: Db, options: { hooks?: IdentityTestHook
   const sqlite = db.$client;
   const hooks = options.hooks ?? {};
   const unit = <T>(fn: () => T | Promise<T>): Promise<T> => withConnection(sqlite, fn);
-  // Every identity transaction writes, most after reading first: take the
-  // write lock up front (see withTransaction) so another process committing
-  // in between cannot fail it with SQLITE_BUSY_SNAPSHOT.
+  // Flows that read and then write take the write lock up front (see
+  // withTransaction), so another process committing in between cannot fail
+  // them with SQLITE_BUSY_SNAPSHOT.
   const atomic = <T>(fn: () => Promise<T>): Promise<T> => withTransaction(sqlite, fn, { immediate: true });
+  // Session lookups run on every authenticated request and almost always only
+  // read: a deferred transaction takes no write lock for a read, so other
+  // processes sharing the file keep writing. Writes (minting, logout, the rare
+  // adoption) take the lock only when they happen.
+  const atomicRead = <T>(fn: () => Promise<T>): Promise<T> => withTransaction(sqlite, fn);
 
   const rawKv = sqliteAuthKv(db);
   const authKv: AuthKvStore = {
@@ -79,14 +84,14 @@ export function createSqliteIdentity(db: Db, options: { hooks?: IdentityTestHook
 
     // --- sessions ---------------------------------------------------------
     // createSession inserts, then sweeps expired rows; resolution may link
-    // and rewrite rows. Both run as one transaction.
-    createSession: (userId, link) => atomic(async () => createSession(db, userId, link)),
-    resolveSessionAny: (token) => atomic(async () => resolveSessionAny(db, token)),
+    // and rewrite rows. Each runs as one (deferred) transaction.
+    createSession: (userId, link) => atomicRead(async () => createSession(db, userId, link)),
+    resolveSessionAny: (token) => atomicRead(async () => resolveSessionAny(db, token)),
     async resolveSession(token) {
       const resolved = await identity.resolveSessionAny(token);
       return resolved && !isUnprovisionedSession(resolved) ? resolved : null;
     },
-    destroySession: (token) => atomic(async () => destroySession(db, token)),
+    destroySession: (token) => atomicRead(async () => destroySession(db, token)),
     endUserSessions: (workspaceId, userId) =>
       atomic(async () => {
         assertMember(workspaceId, userId);
