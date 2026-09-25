@@ -12,6 +12,7 @@
  */
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import Database from "better-sqlite3";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -43,6 +44,8 @@ interface Harness {
   lockWorkspace: (() => void) | null;
   /** Run a catalog query as the runtime role (PostgreSQL only). */
   catalogQuery: ((text: string) => Promise<Array<Record<string, unknown>>>) | null;
+  /** SQLite only: the database file, for a second (other-process) connection. */
+  sqliteFile: string | null;
   /** The adapter's real runtime over the same database. */
   runtime(): Promise<{ run: (ctx: RequestContext, operation: string, input: unknown) => Promise<unknown>; close(): Promise<void> }>;
   close(): Promise<void>;
@@ -76,6 +79,7 @@ async function sqliteHarness(): Promise<Harness> {
         .run(workspaceId, now, now);
     },
     catalogQuery: null,
+    sqliteFile: join(dir, "contract.db"),
     runtime: async () => ({ run: createRuntime(db).run, close: async () => {} }),
     close: async () => {
       db.$client.close();
@@ -124,6 +128,7 @@ async function pgHarness(): Promise<Harness> {
     // The access table arrives on PostgreSQL with #5.
     lockWorkspace: null,
     catalogQuery: async (text) => (await app.pool.query(text)).rows,
+    sqliteFile: null,
     runtime: async () => {
       const pg = await createPgRuntime({ databaseUrl: appUrl.toString() });
       return { run: pg.run, close: () => pg.close() };
@@ -549,6 +554,34 @@ for (const adapter of ADAPTERS) {
           });
         });
         expect(await identity.resolveSession(token)).not.toBeNull();
+      });
+
+      it("an identity transaction survives another process writing the same database", async () => {
+        // SQLite only. A second connection stands in for the MCP HTTP process
+        // or hosting control, which write the same file from another process.
+        // A deferred BEGIN that reads, then sees another commit, then writes
+        // fails with SQLITE_BUSY_SNAPSHOT; the identity store must not.
+        if (!h.sqliteFile) return;
+        const user = await activeUser("busy");
+        await identity.setPassword(user.email, "first-password-1");
+        const other = new Database(h.sqliteFile);
+        other.pragma("busy_timeout = 50");
+        let otherWrote = true;
+        try {
+          await identity.withTransaction(async () => {
+            expect(await identity.verifyPassword(user.email, "first-password-1")).toBe(true); // read
+            try {
+              other.prepare("UPDATE workspaces SET updated_at = ?").run(new Date().toISOString()); // other process commits
+            } catch {
+              otherWrote = false; // it has to wait: we already hold the write lock
+            }
+            await identity.setPassword(user.email, "second-password-1"); // write
+          });
+        } finally {
+          other.close();
+        }
+        expect(otherWrote).toBe(false);
+        expect(await identity.verifyPassword(user.email, "second-password-1")).toBe(true);
       });
 
       it("keeps requests apart: another request neither joins an open transaction nor lands in it", async () => {

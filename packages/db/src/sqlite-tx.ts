@@ -80,13 +80,23 @@ export function withConnection<T>(sqlite: Database.Database, fn: () => Promise<T
  * when it rejects. A nested call from the same call chain joins the open
  * transaction; a chain that holds the connection without a transaction
  * (withConnection) opens one here.
+ *
+ * `immediate` opens with BEGIN IMMEDIATE: the write lock is taken up front.
+ * Use it for transactions that read and then write. In WAL mode a deferred
+ * transaction cannot upgrade to a writer once another PROCESS (the MCP HTTP
+ * process, hosting control) has committed since its first read; it fails
+ * with SQLITE_BUSY_SNAPSHOT, which busy_timeout does not retry.
  */
-export function withTransaction<T>(sqlite: Database.Database, fn: () => Promise<T>): Promise<T> {
+export function withTransaction<T>(
+  sqlite: Database.Database,
+  fn: () => Promise<T>,
+  options: { immediate?: boolean } = {},
+): Promise<T> {
   const store = scopeStore(sqlite);
   const current = store.getStore();
   if (current?.inTransaction) return fn();
   const body = async (): Promise<T> => {
-    sqlite.exec("BEGIN");
+    sqlite.exec(options.immediate ? "BEGIN IMMEDIATE" : "BEGIN");
     try {
       const result = await fn();
       sqlite.exec("COMMIT");

@@ -51,7 +51,10 @@ export function createSqliteIdentity(db: Db, options: { hooks?: IdentityTestHook
   const sqlite = db.$client;
   const hooks = options.hooks ?? {};
   const unit = <T>(fn: () => T | Promise<T>): Promise<T> => withConnection(sqlite, fn);
-  const atomic = <T>(fn: () => Promise<T>): Promise<T> => withTransaction(sqlite, fn);
+  // Every identity transaction writes, most after reading first: take the
+  // write lock up front (see withTransaction) so another process committing
+  // in between cannot fail it with SQLITE_BUSY_SNAPSHOT.
+  const atomic = <T>(fn: () => Promise<T>): Promise<T> => withTransaction(sqlite, fn, { immediate: true });
 
   const rawKv = sqliteAuthKv(db);
   const authKv: AuthKvStore = {
