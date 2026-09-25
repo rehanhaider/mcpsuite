@@ -12,12 +12,14 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
   bootstrap,
   createPorts,
+  createSqliteIdentity,
   openDatabase,
   resolveSession,
   sqliteAuthKv,
   joinAuthKey,
   setOpenAuthPassword,
   type Db,
+  type IdentityStore,
 } from "@mcpsuite/db";
 import {
   handleAuthRequest,
@@ -32,6 +34,7 @@ afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 const ORIGIN = "http://localhost:7777"; // test-only origin, never bound to a socket
 
 let db: Db;
+let identity: IdentityStore;
 let ownerEmail: string;
 let ownerSetupCode: string;
 let ownerUserId: string;
@@ -42,6 +45,9 @@ beforeEach(() => {
   db = openDatabase(join(tmp, `auth-${++n}.db`));
   ownerEmail = "owner@flow.test";
   const boot = bootstrap(db, { ownerEmail, ownerName: "Owner" });
+  // The server code takes the identity store; the assertions below still
+  // read the same SQLite database directly.
+  identity = createSqliteIdentity(db);
   ownerSetupCode = boot.ownerSetupCode!;
   ownerUserId = boot.ownerUserId;
   workspaceId = boot.workspaceId;
@@ -68,7 +74,7 @@ function setCookiePairs(res: Response): string[] {
 
 async function redeemSetupCode(password = "chosen-password-1"): Promise<void> {
   const res = await handleAuthRequest(
-    db,
+    identity,
     req("/api/auth/set-password", {
       method: "POST",
       body: JSON.stringify({ email: ownerEmail, code: ownerSetupCode, purpose: "setup", password }),
@@ -83,10 +89,10 @@ describe("in-process password login", () => {
   it("setup code → password → login → subject-linked session; bad passwords fail", async () => {
     await redeemSetupCode();
 
-    const wrong = await performPasswordLogin(db, { email: ownerEmail, password: "wrong-password" });
+    const wrong = await performPasswordLogin(identity, { email: ownerEmail, password: "wrong-password" });
     expect(wrong).toEqual({ ok: false, error: "invalid_credentials" });
 
-    const login = await performPasswordLogin(db, { email: ownerEmail, password: "chosen-password-1" });
+    const login = await performPasswordLogin(identity, { email: ownerEmail, password: "chosen-password-1" });
     expect(login.ok).toBe(true);
     if (!login.ok) return;
     expect(login.mustChangePassword).toBe(false);
@@ -99,7 +105,7 @@ describe("in-process password login", () => {
     expect(session.authSubject).toMatch(/^acct_/);
 
     // First login ACTIVATED the pending owner and bound the subject once…
-    const again = await performPasswordLogin(db, { email: ownerEmail, password: "chosen-password-1" });
+    const again = await performPasswordLogin(identity, { email: ownerEmail, password: "chosen-password-1" });
     expect(again.ok).toBe(true);
     if (!again.ok) return;
     expect(resolveSession(db, again.sessionToken)!.authSubject).toBe(session.authSubject);
@@ -108,21 +114,21 @@ describe("in-process password login", () => {
   it("rejects verified-but-unknown emails as not invited", async () => {
     // A credential exists in OpenAuth storage but no CRM user was invited.
     await setOpenAuthPassword(db, "stranger@flow.test", "stranger-pass-1");
-    const res = await performPasswordLogin(db, { email: "stranger@flow.test", password: "stranger-pass-1" });
+    const res = await performPasswordLogin(identity, { email: "stranger@flow.test", password: "stranger-pass-1" });
     expect(res).toEqual({ ok: false, error: "not_invited" });
   });
 
   it("surfaces the forced-change flag and disabled accounts", async () => {
     await redeemSetupCode();
-    const first = await performPasswordLogin(db, { email: ownerEmail, password: "chosen-password-1" });
+    const first = await performPasswordLogin(identity, { email: ownerEmail, password: "chosen-password-1" });
     expect(first.ok).toBe(true);
 
     await createPorts(db, workspaceId).credentials.mustChangePassword(ownerUserId, true);
-    const flagged = await performPasswordLogin(db, { email: ownerEmail, password: "chosen-password-1" });
+    const flagged = await performPasswordLogin(identity, { email: ownerEmail, password: "chosen-password-1" });
     expect(flagged.ok && flagged.mustChangePassword).toBe(true);
 
     db.$client.prepare("UPDATE users SET status = 'disabled', disabled_at = 't' WHERE id = ?").run(ownerUserId);
-    const disabled = await performPasswordLogin(db, { email: ownerEmail, password: "chosen-password-1" });
+    const disabled = await performPasswordLogin(identity, { email: ownerEmail, password: "chosen-password-1" });
     expect(disabled).toEqual({ ok: false, error: "account_disabled" });
   });
 });
@@ -131,7 +137,7 @@ describe("/api/auth/* endpoints", () => {
   it("POST /api/auth/login sets the mcpsuite_session cookie; logout revokes it and the refresh token", async () => {
     await redeemSetupCode();
     const res = await handleAuthRequest(
-      db,
+      identity,
       req("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email: ownerEmail, password: "chosen-password-1" }),
@@ -148,22 +154,22 @@ describe("/api/auth/* endpoints", () => {
     expect(cookie).not.toContain("Secure"); // http request, no X-Forwarded-Proto
 
     const pairs = setCookiePairs(res);
-    const session = sessionFromRequest(db, req("/app", { cookies: pairs }))!;
+    const session = (await sessionFromRequest(identity, req("/app", { cookies: pairs })))!;
     expect(session.user.id).toBe(ownerUserId);
 
     // One refresh token exists for the subject; logout removes it + the row.
     const prefix = joinAuthKey(["oauth:refresh", session.authSubject!]);
     expect((await sqliteAuthKv(db).scanPrefix(prefix)).length).toBe(1);
-    const out = await handleAuthRequest(db, req("/api/auth/logout", { method: "POST", cookies: pairs }));
+    const out = await handleAuthRequest(identity, req("/api/auth/logout", { method: "POST", cookies: pairs }));
     expect(out.headers.get("set-cookie")).toContain("Max-Age=0");
-    expect(sessionFromRequest(db, req("/app", { cookies: pairs }))).toBeNull();
+    expect(await sessionFromRequest(identity, req("/app", { cookies: pairs }))).toBeNull();
     expect((await sqliteAuthKv(db).scanPrefix(prefix)).length).toBe(0);
   });
 
   it("honors X-Forwarded-Proto for the Secure attribute", async () => {
     await redeemSetupCode();
     const res = await handleAuthRequest(
-      db,
+      identity,
       req("/api/auth/login", {
         method: "POST",
         body: JSON.stringify({ email: ownerEmail, password: "chosen-password-1" }),
@@ -178,7 +184,7 @@ describe("/api/auth/* endpoints", () => {
 
     // 1. Start the flow at the mounted authorize endpoint.
     const start = await handleAuthRequest(
-      db,
+      identity,
       req(
         `/api/auth/authorize?client_id=crm-web&redirect_uri=${encodeURIComponent(`${ORIGIN}/api/auth/callback`)}&response_type=code&provider=password`,
       ),
@@ -190,45 +196,45 @@ describe("/api/auth/* endpoints", () => {
     expect(flowCookies.length).toBeGreaterThan(0);
 
     // 2. The provider's login screen is OUR /login page (custom UI redirect).
-    const screen = await handleAuthRequest(db, req("/api/auth/password/authorize", { cookies: flowCookies }));
+    const screen = await handleAuthRequest(identity, req("/api/auth/password/authorize", { cookies: flowCookies }));
     expect(screen.status).toBe(302);
     expect(screen.headers.get("location")).toBe("/login?flow=1");
 
     // 3. Submitting bad credentials re-renders the login page with the error.
     const bad = await handleAuthRequest(
-      db,
+      identity,
       req("/api/auth/password/authorize", { ...form({ email: ownerEmail, password: "nope-nope-nope" }), cookies: flowCookies }),
     );
     expect(bad.headers.get("location")).toContain("/login?flow=1&error=invalid_password");
 
     // 4. Correct credentials bounce back to the redirect_uri with a code…
     const good = await handleAuthRequest(
-      db,
+      identity,
       req("/api/auth/password/authorize", { ...form({ email: ownerEmail, password: "chosen-password-1" }), cookies: flowCookies }),
     );
     const location = good.headers.get("location")!;
     expect(location.startsWith(`${ORIGIN}/api/auth/callback?`)).toBe(true);
 
     // 5. …and the callback exchanges it, mints the session, and enters /app.
-    const callback = await handleAuthRequest(db, req(location.slice(ORIGIN.length)));
+    const callback = await handleAuthRequest(identity, req(location.slice(ORIGIN.length)));
     expect(callback.status).toBe(302);
     expect(callback.headers.get("location")).toBe("/app");
-    const session = sessionFromRequest(db, req("/app", { cookies: setCookiePairs(callback) }))!;
+    const session = (await sessionFromRequest(identity, req("/app", { cookies: setCookiePairs(callback) })))!;
     expect(session.user.id).toBe(ownerUserId);
     expect(session.authSubject).toMatch(/^acct_/);
 
     // An authorization code is single-use: replaying the callback fails safe.
-    const replay = await handleAuthRequest(db, req(location.slice(ORIGIN.length)));
+    const replay = await handleAuthRequest(identity, req(location.slice(ORIGIN.length)));
     expect(replay.headers.get("location")).toBe("/login?error=expired_flow");
   });
 
   it("serves discovery under the mount and rejects bad set-password codes", async () => {
-    const discovery = await handleAuthRequest(db, req("/api/auth/.well-known/oauth-authorization-server"));
+    const discovery = await handleAuthRequest(identity, req("/api/auth/.well-known/oauth-authorization-server"));
     expect(discovery.status).toBe(200);
     expect(await discovery.json()).toMatchObject({ issuer: ORIGIN });
 
     const bad = await handleAuthRequest(
-      db,
+      identity,
       req("/api/auth/set-password", {
         method: "POST",
         body: JSON.stringify({ email: ownerEmail, code: "WRONG-CODE-XX", purpose: "setup", password: "long-enough-pw" }),
@@ -239,7 +245,7 @@ describe("/api/auth/* endpoints", () => {
     expect(await bad.json()).toMatchObject({ ok: false, error: { code: "invalid_code" } });
 
     const short = await handleAuthRequest(
-      db,
+      identity,
       req("/api/auth/set-password", {
         method: "POST",
         body: JSON.stringify({ email: ownerEmail, code: ownerSetupCode, purpose: "setup", password: "short" }),

@@ -7,22 +7,16 @@
  *     http://localhost:2222/api/ops/company.list -d '{"limit":5}'
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntimeAsync, resolveSession, resolveWorkspaceAccess, webContext, workspaceLockedResult } from "@mcpsuite/db";
+import { getRuntimeAsync, webContext, workspaceLockedResult } from "@mcpsuite/db";
 
 export const Route = createFileRoute("/api/ops/$name")({
   server: {
     handlers: {
       POST: async ({ request, params }) => {
         const runtime = await getRuntimeAsync();
-        if (runtime.adapter !== "sqlite") {
-          // Cookie sessions resolve from the SQLite store; another adapter
-          // cannot authenticate this surface (hosted identity is separate).
-          return Response.json(
-            { status: "error", error: { code: "unauthorized", message: "Sign in first" } },
-            { status: 401 },
-          );
-        }
-        const session = resolveSession(runtime.db, cookieValue(request.headers.get("cookie"), "mcpsuite_session"));
+        const session = await runtime.identity.resolveSession(
+          cookieValue(request.headers.get("cookie"), "mcpsuite_session"),
+        );
         if (!session) {
           return Response.json(
             { status: "error", error: { code: "unauthorized", message: "Sign in first" } },
@@ -31,7 +25,7 @@ export const Route = createFileRoute("/api/ops/$name")({
         }
         // Hosted access gate: identification succeeded, but a locked
         // workspace refuses every catalog operation.
-        if (resolveWorkspaceAccess(runtime.db, session.workspaceId).mode === "locked") {
+        if ((await runtime.identity.workspaceAccess(session.workspaceId)).mode === "locked") {
           return Response.json(workspaceLockedResult(), { status: 403 });
         }
         let input: unknown = {};

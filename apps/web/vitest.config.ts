@@ -5,6 +5,9 @@
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // Same "~/*" → src/* resolution as the app (vite.config.ts), so route
+  // modules that import through the alias load under test.
+  resolve: { tsconfigPaths: true },
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],

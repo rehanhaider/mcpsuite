@@ -7,19 +7,16 @@
  *   curl -b "mcpsuite_session=…" http://localhost:2222/api/me
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { getRuntimeAsync, isUnprovisionedSession, resolveSessionAny, resolveWorkspaceAccess } from "@mcpsuite/db";
+import { getRuntimeAsync, isUnprovisionedSession } from "@mcpsuite/db";
 
 export const Route = createFileRoute("/api/me")({
   server: {
     handlers: {
       GET: async ({ request }) => {
         const runtime = await getRuntimeAsync();
-        if (runtime.adapter !== "sqlite") {
-          // Cookie sessions resolve from the SQLite store; another adapter
-          // cannot authenticate this surface (hosted identity is separate).
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
-        const session = resolveSessionAny(runtime.db, cookieValue(request.headers.get("cookie"), "mcpsuite_session"));
+        const session = await runtime.identity.resolveSessionAny(
+          cookieValue(request.headers.get("cookie"), "mcpsuite_session"),
+        );
         if (!session) {
           return Response.json({ error: "unauthorized" }, { status: 401 });
         }
@@ -41,7 +38,7 @@ export const Route = createFileRoute("/api/me")({
         }
         // Stays available while the workspace is locked; carries the generic
         // access state so first-party pages (e.g. /account) can react.
-        const access = resolveWorkspaceAccess(runtime.db, session.workspaceId);
+        const access = await runtime.identity.workspaceAccess(session.workspaceId);
         return Response.json({
           userId: session.user.id,
           subject: session.authSubject,

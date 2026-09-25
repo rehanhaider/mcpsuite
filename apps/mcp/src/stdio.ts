@@ -8,15 +8,16 @@
  * NOTE: stdout is the protocol channel; log only to stderr.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { getRuntimeAsync, mcpContext, resolveMcpToken } from "@mcpsuite/db";
-import { createMcpServer, requireSqliteRuntime } from "./server.ts";
+import { getRuntimeAsync, mcpContext } from "@mcpsuite/db";
+import { createMcpServer } from "./server.ts";
 
 // DATABASE_URL adapter selection happens inside getRuntimeAsync (unset ->
-// SQLite default, file: -> SQLite at that path); key auth below needs SQLite.
-const runtime = requireSqliteRuntime(await getRuntimeAsync(), "stdio");
+// SQLite default, file: -> SQLite at that path, postgresql:// -> PostgreSQL);
+// the key resolves through the runtime's identity store on every adapter.
+const runtime = await getRuntimeAsync();
 
 const apiKey = process.env.MCPSUITE_API_KEY?.trim();
-const client = apiKey ? resolveMcpToken(runtime.db, apiKey) : null;
+const client = apiKey ? await runtime.identity.resolveMcpToken(apiKey) : null;
 if (!client) {
   console.error(
     "[mcpsuite-mcp] MCPSUITE_API_KEY is missing or invalid. Create an API key in the " +

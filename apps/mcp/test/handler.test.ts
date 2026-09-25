@@ -120,11 +120,15 @@ describe("handleMcpRequest", () => {
     expect(res.status).toBe(401);
   });
 
-  it("answers 501 mcp_unavailable on a non-SQLite runtime instead of crashing", async () => {
-    const hosted = { adapter: "postgres" } as unknown as AnyRuntime;
-    const res = await handleMcpRequest(mcpRequest(INITIALIZE), hosted);
-    expect(res.status).toBe(501);
-    expect(((await res.json()) as { error: string }).error).toBe("mcp_unavailable");
+  it("serves any adapter's runtime: keys resolve through runtime.identity, never the adapter name", async () => {
+    // Same runtime, relabelled: before #4 the handler refused anything that
+    // was not "sqlite" with a 501. Real PostgreSQL coverage lives in
+    // apps/web/test/e2e-pg.test.ts.
+    const relabelled = { ...runtime, adapter: "postgres" } as unknown as AnyRuntime;
+    const res = await handleMcpRequest(mcpRequest(INITIALIZE), relabelled);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result?: { serverInfo?: { name?: string } } };
+    expect(body.result?.serverInfo?.name).toBe(SERVER_INFO.name);
   });
 
   it("serves an authorized initialize + tools/list JSON-RPC roundtrip", async () => {

@@ -6,22 +6,12 @@
  * row). Per-request resolution loads the CURRENT user/workspace/role/enabled
  * state — token claims are never authority (docs/auth-api.md).
  *
- * Runtime acquisition goes through the async DATABASE_URL adapter selection.
- * Cookie sessions (and their store) are SQLite-only; hosted identity is a
- * separate surface, so under the Postgres adapter every session resolves to
- * null and these helpers answer unauthenticated.
+ * Runtime acquisition goes through the async DATABASE_URL adapter selection;
+ * sessions go through the runtime's identity store, so they work on every
+ * database adapter.
  */
 import { getRequestHeader, setResponseHeader } from "@tanstack/react-start/server";
-import {
-  createSession,
-  destroySession,
-  getRuntimeAsync,
-  resolveSession,
-  webContext,
-  type Runtime,
-  type SessionLink,
-  type SessionUser,
-} from "@mcpsuite/db";
+import { getRuntimeAsync, webContext, type AnyRuntime, type SessionLink, type SessionUser } from "@mcpsuite/db";
 import type { RequestContext } from "@mcpsuite/core";
 
 const COOKIE = "mcpsuite_session";
@@ -65,21 +55,15 @@ export function clearSessionCookie(): void {
   );
 }
 
-/** The SQLite runtime, or null when DATABASE_URL selected another adapter. */
-export async function sessionRuntime(): Promise<Runtime | null> {
-  const runtime = await getRuntimeAsync();
-  return runtime.adapter === "sqlite" ? runtime : null;
-}
-
 export async function currentSession(): Promise<SessionUser | null> {
-  const runtime = await sessionRuntime();
-  return runtime ? resolveSession(runtime.db, readSessionToken()) : null;
+  const runtime = await getRuntimeAsync();
+  return runtime.identity.resolveSession(readSessionToken());
 }
 
-export async function requireContext(): Promise<{ ctx: RequestContext; session: SessionUser; runtime: Runtime }> {
-  const runtime = await sessionRuntime();
-  const session = runtime ? resolveSession(runtime.db, readSessionToken()) : null;
-  if (!runtime || !session) {
+export async function requireContext(): Promise<{ ctx: RequestContext; session: SessionUser; runtime: AnyRuntime }> {
+  const runtime = await getRuntimeAsync();
+  const session = await runtime.identity.resolveSession(readSessionToken());
+  if (!session) {
     throw new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401,
       headers: { "content-type": "application/json" },
@@ -89,9 +73,8 @@ export async function requireContext(): Promise<{ ctx: RequestContext; session: 
 }
 
 export async function issueSession(userId: string, link: SessionLink = {}): Promise<void> {
-  const runtime = await sessionRuntime();
-  if (!runtime) throw new Error("Web sessions require the SQLite adapter (hosted sign-in is a separate surface)");
-  const { token } = createSession(runtime.db, userId, link);
+  const runtime = await getRuntimeAsync();
+  const { token } = await runtime.identity.createSession(userId, link);
   setSessionCookie(token);
 }
 
@@ -99,8 +82,8 @@ export async function issueSession(userId: string, link: SessionLink = {}): Prom
 export async function revokeSession(): Promise<void> {
   const token = readSessionToken();
   if (token) {
-    const runtime = await sessionRuntime();
-    if (runtime) destroySession(runtime.db, token);
+    const runtime = await getRuntimeAsync();
+    await runtime.identity.destroySession(token);
   }
   clearSessionCookie();
 }

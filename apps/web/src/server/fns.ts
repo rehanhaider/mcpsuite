@@ -10,21 +10,14 @@
  * Authentication is the OpenAuth issuer mounted at /api/auth/* (see
  * src/server/auth-issuer.ts); these functions drive it in-process. Runtime
  * acquisition awaits the DATABASE_URL adapter selection (`getRuntimeAsync`);
- * cookie sessions live in the SQLite store, so under another adapter these
- * surfaces answer unauthenticated (hosted sign-in is a separate surface).
+ * sign-in, sessions and the request gates go through `runtime.identity`, so
+ * every surface works on every database adapter.
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import {
-  redeemAuthCodeAndSetPassword,
-  resolveWorkspaceAccess,
-  setOpenAuthPassword,
-  verifyOpenAuthPassword,
-  workspaceLockedResult,
-  WORKSPACE_LOCKED_MESSAGE,
-} from "@mcpsuite/db";
+import { getRuntimeAsync, workspaceLockedResult, WORKSPACE_LOCKED_MESSAGE } from "@mcpsuite/db";
 import { LOGIN_ERROR_MESSAGES, performPasswordLogin } from "./auth-issuer.ts";
-import { currentSession, requireContext, sessionRuntime, setSessionCookie, revokeSession } from "./session.ts";
+import { currentSession, requireContext, setSessionCookie, revokeSession } from "./session.ts";
 
 /**
  * Op results carry `unknown` payloads which fail Start's compile-time
@@ -39,7 +32,7 @@ export const op = createServerFn({ method: "POST" })
   .validator(z.object({ name: z.string().min(1), input: z.unknown().optional() }))
   .handler(async ({ data }): Promise<string> => {
     const { ctx, runtime } = await requireContext();
-    if (resolveWorkspaceAccess(runtime.db, ctx.workspaceId).mode === "locked") {
+    if ((await runtime.identity.workspaceAccess(ctx.workspaceId)).mode === "locked") {
       return JSON.stringify(workspaceLockedResult());
     }
     return JSON.stringify(await runtime.run(ctx, data.name, data.input ?? {}));
@@ -48,11 +41,10 @@ export const op = createServerFn({ method: "POST" })
 export const whoami = createServerFn({ method: "GET" }).handler(async () => {
   const session = await currentSession();
   if (!session) return null;
-  const runtime = await sessionRuntime();
-  if (!runtime) return null; // sessions only resolve on the SQLite adapter
+  const runtime = await getRuntimeAsync();
   const ports = runtime.portsFor(session.workspaceId);
   // Always reported so the UI can react (self-host resolves as active).
-  const access = resolveWorkspaceAccess(runtime.db, session.workspaceId);
+  const access = await runtime.identity.workspaceAccess(session.workspaceId);
   return {
     user: session.user,
     role: session.role,
@@ -73,11 +65,8 @@ export const whoami = createServerFn({ method: "GET" }).handler(async () => {
 export const login = createServerFn({ method: "POST" })
   .validator(z.object({ email: z.string().email(), password: z.string().min(1) }))
   .handler(async ({ data }) => {
-    const runtime = await sessionRuntime();
-    if (!runtime) {
-      return { ok: false as const, error: "Password sign-in is not available on this deployment" };
-    }
-    const result = await performPasswordLogin(runtime.db, { email: data.email, password: data.password });
+    const runtime = await getRuntimeAsync();
+    const result = await performPasswordLogin(runtime.identity, { email: data.email, password: data.password });
     if (!result.ok) return { ok: false as const, error: LOGIN_ERROR_MESSAGES[result.error] };
     setSessionCookie(result.sessionToken);
     return { ok: true as const, mustChangePassword: result.mustChangePassword };
@@ -97,16 +86,19 @@ export const changePassword = createServerFn({ method: "POST" })
   .validator(z.object({ current: z.string().min(1), next: z.string().min(10).max(200) }))
   .handler(async ({ data }) => {
     const { session, runtime } = await requireContext();
-    if (resolveWorkspaceAccess(runtime.db, session.workspaceId).mode === "locked") {
+    if ((await runtime.identity.workspaceAccess(session.workspaceId)).mode === "locked") {
       return { ok: false as const, error: WORKSPACE_LOCKED_MESSAGE };
     }
-    if (!(await verifyOpenAuthPassword(runtime.db, session.user.email, data.current))) {
-      return { ok: false as const, error: "Current password is incorrect" };
-    }
-    await setOpenAuthPassword(runtime.db, session.user.email, data.next);
-    // A self-chosen password satisfies any forced-change requirement.
-    await runtime.portsFor(session.workspaceId).credentials.mustChangePassword(session.user.id, false);
-    return { ok: true as const };
+    // One transaction: the new password and the cleared flag land together.
+    return runtime.identity.withTransaction(async () => {
+      if (!(await runtime.identity.verifyPassword(session.user.email, data.current))) {
+        return { ok: false as const, error: "Current password is incorrect" };
+      }
+      await runtime.identity.setPassword(session.user.email, data.next);
+      // A self-chosen password satisfies any forced-change requirement.
+      await runtime.portsFor(session.workspaceId).credentials.mustChangePassword(session.user.id, false);
+      return { ok: true as const };
+    });
   });
 
 /**
@@ -124,11 +116,8 @@ export const setPassword = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data }) => {
-    const runtime = await sessionRuntime();
-    if (!runtime) {
-      return { ok: false as const, error: "Password setup is not available on this deployment" };
-    }
-    const outcome = await redeemAuthCodeAndSetPassword(runtime.db, data);
+    const runtime = await getRuntimeAsync();
+    const outcome = await runtime.identity.redeemCodeAndSetPassword(data);
     if (!outcome.ok) {
       const error =
         outcome.reason === "expired_code"
