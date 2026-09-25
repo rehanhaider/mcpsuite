@@ -134,6 +134,22 @@ describe("in-process password login", () => {
 });
 
 describe("/api/auth/* endpoints", () => {
+  it("logout clears the cookie even when the session cannot be deleted", async () => {
+    const failing = {
+      ...identity,
+      destroySession: async () => {
+        throw new Error("database unavailable");
+      },
+    };
+    const res = await handleAuthRequest(
+      failing,
+      req("/api/auth/logout", { method: "POST", cookies: ["mcpsuite_session=sess_whatever"] }),
+    );
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("logout_failed");
+    expect(res.headers.get("set-cookie")).toMatch(/^mcpsuite_session=;.*Max-Age=0/);
+  });
+
   it("POST /api/auth/login sets the mcpsuite_session cookie; logout revokes it and the refresh token", async () => {
     await redeemSetupCode();
     const res = await handleAuthRequest(

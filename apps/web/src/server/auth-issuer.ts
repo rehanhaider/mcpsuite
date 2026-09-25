@@ -502,7 +502,17 @@ export async function handleAuthRequest(identity: IdentityStore, request: Reques
 
   if (sub === "/logout" && method === "POST") {
     const token = cookieValue(request.headers.get("cookie"), SESSION_COOKIE);
-    if (token) await identity.destroySession(token); // also revokes the OpenAuth refresh token
+    try {
+      if (token) await identity.destroySession(token); // also revokes the OpenAuth refresh token
+    } catch (error) {
+      // Still clear the cookie; report the failure instead of a bare 500.
+      console.error("[mcpsuite] logout could not delete the session:", error);
+      return json(
+        { ok: false, error: { code: "logout_failed", message: "Signed out here, but the session could not be ended" } },
+        500,
+        { "set-cookie": clearedSessionCookie(request) },
+      );
+    }
     return json({ ok: true }, 200, { "set-cookie": clearedSessionCookie(request) });
   }
 

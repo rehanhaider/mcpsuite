@@ -1170,12 +1170,16 @@ AS $$
 $$;
 
 -- Permanent user deletion also revokes the OpenAuth issuer's stored state for
--- that identity. The issuer keys rows by the subject (refresh tokens,
--- authorization state) AND by the normalized email (password hash,
--- email→subject binding — docs/auth-api.md §Storage), so both markers are
--- purged; substring matching is deliberate because OpenAuth joins key path
--- segments with a control separator, and both markers are globally unique
--- deployment-wide. Guarded to a user visible in the current workspace, so a
+-- that identity. Issuer keys are path segments joined with chr(31)
+-- (docs/auth-api.md §Storage), and this deletes whole-segment matches only —
+-- never a substring, since one email can sit inside another
+-- (bob@acme.com in jimbob@acme.com), in any workspace:
+--   * "email" ␟ <email> ␟ …          the password hash and the email→subject
+--                                     binding (every record for the email);
+--   * "oauth:refresh" ␟ <subject> ␟ … the subject's refresh tokens;
+--   * "mcpsuite:code-issue" ␟ <email> the setup/reset code issue-rate record.
+-- Mirrors removeOpenAuthCredential + invalidateSubjectRefreshTokens in the
+-- SQLite adapter. Guarded to a user visible in the current workspace, so a
 -- workspace transaction can never purge another workspace's credentials; call
 -- it BEFORE deleting the user row.
 CREATE FUNCTION crm.purge_openauth_identity(p_user_id uuid)
@@ -1184,13 +1188,14 @@ LANGUAGE sql VOLATILE SECURITY DEFINER
 SET search_path = crm, pg_temp
 AS $$
   WITH target AS (
-    SELECT auth_subject, email FROM crm.users
+    SELECT auth_subject, lower(email) AS email FROM crm.users
     WHERE id = p_user_id AND workspace_id = crm.current_workspace_id()
   ),
   deleted AS (
     DELETE FROM crm.openauth_kv k USING target t
-    WHERE (t.auth_subject IS NOT NULL AND position(t.auth_subject IN k.key) > 0)
-       OR position(lower(t.email) IN lower(k.key)) > 0
+    WHERE starts_with(k.key, 'email' || chr(31) || t.email || chr(31))
+       OR k.key = 'mcpsuite:code-issue' || chr(31) || t.email
+       OR (t.auth_subject IS NOT NULL AND starts_with(k.key, 'oauth:refresh' || chr(31) || t.auth_subject || chr(31)))
     RETURNING 1
   )
   SELECT count(*)::integer FROM deleted

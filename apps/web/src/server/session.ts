@@ -81,9 +81,13 @@ export async function issueSession(userId: string, link: SessionLink = {}): Prom
 /** Logout: delete the session row (revokes its OpenAuth refresh token) + clear the cookie. */
 export async function revokeSession(): Promise<void> {
   const token = readSessionToken();
-  if (token) {
-    const runtime = await getRuntimeAsync();
-    await runtime.identity.destroySession(token);
+  try {
+    if (token) {
+      const runtime = await getRuntimeAsync();
+      await runtime.identity.destroySession(token);
+    }
+  } finally {
+    // Clear the cookie even if the session could not be deleted.
+    clearSessionCookie();
   }
-  clearSessionCookie();
 }

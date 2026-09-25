@@ -30,7 +30,7 @@ import {
   type PgPorts,
 } from "../src/pg/repositories.ts";
 import { initPgSchema } from "../src/pg/init.ts";
-import { normalizeAuthCode } from "../src/openauth.ts";
+import { joinAuthKey, normalizeAuthCode } from "../src/openauth.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
 
@@ -494,11 +494,15 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     });
     await portsA.mcpClients.revoke(revoked.id);
     // Issuer rows keyed by the subject (tokens) AND by the email (password
-    // hash / email→subject binding) must both die; unrelated identities stay.
-    await app.pool.query("SELECT crm.openauth_kv_set($1, '{}'::jsonb, NULL)", ["oauth:refresh:sub-victim:t1"]);
-    await app.pool.query("SELECT crm.openauth_kv_set($1, '{}'::jsonb, NULL)", ["oauth:code:sub-victim"]);
-    await app.pool.query("SELECT crm.openauth_kv_set($1, '{}'::jsonb, NULL)", ["password:victim@auth-a.test:hash"]);
-    await app.pool.query("SELECT crm.openauth_kv_set($1, '{}'::jsonb, NULL)", ["oauth:refresh:sub-survivor:t1"]);
+    // hash / email→subject binding) must both die — real OpenAuth keys, joined
+    // with chr(31). Unrelated identities stay, including an email that CONTAINS
+    // the victim's (whole-segment match, never a substring).
+    const setKv = (key: string) => app.pool.query("SELECT crm.openauth_kv_set($1, '{}'::jsonb, NULL)", [key]);
+    await setKv(joinAuthKey(["oauth:refresh", "sub-victim", "t1"]));
+    await setKv(joinAuthKey(["email", "victim@auth-a.test", "password"]));
+    await setKv(joinAuthKey(["email", "victim@auth-a.test", "subject"]));
+    await setKv(joinAuthKey(["oauth:refresh", "sub-survivor", "t1"]));
+    await setKv(joinAuthKey(["email", "my-victim@auth-a.test", "password"]));
 
     const company = await portsA.companies.create({ name: "Victim Co", ownerUserId: victim.id });
     const task = await portsA.activities.create(
@@ -551,8 +555,10 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     // issue-rate record. Rate records of live users (15-minute TTL, created
     // by the codes issued earlier in this file) are not the victim's state.
     const keys = await kvKeys();
-    expect(keys.filter((k) => !k.startsWith("mcpsuite:code-issue"))).toEqual(["oauth:refresh:sub-survivor:t1"]);
-    expect(keys.some((k) => k.includes("victim@auth-a.test"))).toBe(false);
+    expect(keys.filter((k) => !k.startsWith("mcpsuite:code-issue"))).toEqual(
+      [joinAuthKey(["email", "my-victim@auth-a.test", "password"]), joinAuthKey(["oauth:refresh", "sub-survivor", "t1"])].sort(),
+    );
+    expect(keys).not.toContain(joinAuthKey(["mcpsuite:code-issue", "victim@auth-a.test"]));
     expect((await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-victim"])).rows).toHaveLength(0);
 
     // …while business records survive, unassigned and nameless.
