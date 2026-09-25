@@ -9,7 +9,7 @@
 import { eq } from "drizzle-orm";
 import { getDb, resolveDbPath } from "../connection.ts";
 import * as t from "../schema.ts";
-import { issueAuthCodeSync } from "../openauth.ts";
+import { createSqliteIdentity } from "../sqlite-identity.ts";
 
 const db = getDb();
 
@@ -25,7 +25,7 @@ if (!owner) {
 }
 
 const purpose = owner.status === "pending" ? "setup" : "reset";
-const { code, expiresAt } = issueAuthCodeSync(db, { userId: owner.id, purpose });
+const { code, expiresAt } = await createSqliteIdentity(db).issueCode(ownerMembership.workspaceId, owner.id, purpose);
 const base = process.env.MCPSUITE_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:2222";
 const page = purpose === "setup" ? "/set-password" : "/reset-password";
 

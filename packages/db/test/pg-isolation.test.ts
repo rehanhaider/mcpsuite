@@ -86,12 +86,20 @@ const WORKSPACE_OWNED_TABLES = [
 /** RLS'd via `id` instead of `workspace_id`. */
 const WORKSPACE_ROOT_TABLE = "workspaces";
 /**
- * RLS on, no runtime policy, no runtime grants: unreachable by crm_app and
- * crm_operator. sessions/openauth_kv/auth_codes are identity-level auth
- * storage reachable only via the SECURITY DEFINER functions in schema.sql
- * (covered in pg-auth.test.ts); schema_version is deployment-only.
+ * RLS on, no crm_app policy or grant. sessions/openauth_kv/auth_codes are
+ * identity-level auth storage reachable only via the SECURITY DEFINER
+ * functions in schema.sql (covered in pg-auth.test.ts); schema_version is
+ * deployment metadata that only hosting control (crm_operator) may read.
  */
 const DENIED_TABLES = ["sessions", "schema_version", "openauth_kv", "auth_codes"];
+
+/**
+ * Hosting control's private schema (schema.sql, "Hosting control"): reachable
+ * by crm_operator only. workspace_access is workspace data (policy on the
+ * transaction's workspace); the others are hosting control's own records.
+ */
+const HOSTING_WORKSPACE_TABLES = ["workspace_access"];
+const HOSTING_OPERATOR_TABLES = ["idempotency_receipts", "service_audit", "auth_delivery_outbox"];
 
 describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)", () => {
   let admin: PgHandle;
@@ -269,6 +277,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     // so on a virgin cluster two runs of the guarded CREATE ROLE block can
     // race — retrying is safe because schema.sql is one transaction (a failed
     // attempt rolls back completely and the guard is idempotent).
+    await admin.pool.query("DROP SCHEMA IF EXISTS hosting CASCADE");
     await admin.pool.query("DROP SCHEMA IF EXISTS crm CASCADE");
     let initError: unknown = null;
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -313,11 +322,48 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     expect(live).toEqual(expected);
   });
 
+  it("classifies every hosting table; none may exist outside the registry", async () => {
+    const res = await admin.pool.query("SELECT tablename FROM pg_tables WHERE schemaname = 'hosting' ORDER BY tablename");
+    const live = res.rows.map((r) => String(r.tablename)).sort();
+    expect(live).toEqual([...HOSTING_WORKSPACE_TABLES, ...HOSTING_OPERATOR_TABLES].sort());
+    const owners = await admin.pool.query("SELECT DISTINCT tableowner FROM pg_tables WHERE schemaname = 'hosting'");
+    expect(owners.rows.map((r) => r.tableowner)).toEqual(["crm_schema_owner"]);
+  });
+
+  it("hosting policies: workspace data bound to the workspace, records to crm_operator only", async () => {
+    const res = await admin.pool.query(
+      `SELECT tablename, policyname, roles::text[] AS roles, cmd, qual, with_check FROM pg_policies
+       WHERE schemaname = 'hosting' ORDER BY tablename, policyname`,
+    );
+    type Policy = { tablename: string; policyname: string; roles: string[]; cmd: string; qual: string; with_check: string };
+    const byTable = new Map<string, Policy[]>();
+    for (const row of res.rows as Policy[]) byTable.set(row.tablename, [...(byTable.get(row.tablename) ?? []), row]);
+    for (const table of HOSTING_WORKSPACE_TABLES) {
+      const isolation = byTable.get(table)?.find((p) => p.policyname === "workspace_isolation");
+      expect(isolation?.roles, `${table} isolation policy`).toEqual(["crm_operator"]);
+      expect(isolation?.qual).toContain("current_workspace_id()");
+      expect(isolation?.with_check).toContain("current_workspace_id()");
+      // The only other policy lets the definer access reader SELECT.
+      const others = byTable.get(table)!.filter((p) => p.policyname !== "workspace_isolation");
+      expect(others.map((p) => [p.roles, p.cmd])).toEqual([[["crm_identity_resolver"], "SELECT"]]);
+    }
+    for (const table of HOSTING_OPERATOR_TABLES) {
+      expect(byTable.get(table)?.map((p) => p.roles), `${table} policies`).toEqual([["crm_operator"]]);
+    }
+    // crm_app holds no privilege anywhere in the schema.
+    const usage = await admin.pool.query("SELECT has_schema_privilege('crm_app', 'hosting', 'USAGE') AS ok");
+    expect(usage.rows[0]?.ok).toBe(false);
+    await expect(app.pool.query("SELECT * FROM hosting.workspace_access")).rejects.toThrow(/permission denied/i);
+  });
+
   it("every table has RLS enabled AND forced", async () => {
     const res = await admin.pool.query(
       `SELECT c.relname AS name, c.relrowsecurity AS rls, c.relforcerowsecurity AS forced
        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname = 'crm' AND c.relkind = 'r'`,
+       WHERE n.nspname IN ('crm', 'hosting') AND c.relkind = 'r'`,
+    );
+    expect(res.rows.length).toBe(
+      WORKSPACE_OWNED_TABLES.length + 1 + DENIED_TABLES.length + HOSTING_WORKSPACE_TABLES.length + HOSTING_OPERATOR_TABLES.length,
     );
     for (const row of res.rows) {
       expect(row.rls, `RLS enabled on ${row.name}`).toBe(true);

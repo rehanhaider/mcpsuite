@@ -55,15 +55,12 @@ export {
   invalidateRefreshToken,
   endUserSessions,
   issueAuthCode,
-  issueAuthCodeSync,
   verifyAndConsumeAuthCode,
   generateAuthCode,
   normalizeAuthCode,
   deliverAuthCode,
   resolveAuthSuccess,
   findUserByAuthSubject,
-  hasPasswordCredentialSync,
-  emailForAuthSubjectSync,
   redeemAuthCodeAndSetPassword,
   type SetPasswordOutcome,
   AUTH_CODE_TTL_MS,
@@ -80,13 +77,15 @@ export {
   type OpenAuthScryptHash,
 } from "./openauth.ts";
 export {
-  resolveWorkspaceAccess,
   workspaceLockedResult,
   WORKSPACE_LOCKED_MESSAGE,
   type WorkspaceAccess,
 } from "./hosting-access.ts";
 export type { IdentityStore, IdentityTestHooks, IdentityUserRef } from "./identity.ts";
 export { createSqliteIdentity } from "./sqlite-identity.ts";
+export type { AccessState, HostedMember, HostingStore, OutboxRow, Receipt, ServiceAuditInput } from "./hosting.ts";
+export { createSqliteHostingStore } from "./sqlite-hosting.ts";
+export { createHostingStoreFromEnv } from "./hosting.ts";
 export type { SeededPgWorkspace } from "./pg/seed.ts";
 
 /**

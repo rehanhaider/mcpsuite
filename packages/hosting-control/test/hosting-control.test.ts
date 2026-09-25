@@ -16,13 +16,18 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { normalizeAuthCode, openDatabase, sha256Hex, type Db } from "@mcpsuite/db";
 import {
-  createHostingControlServer,
-  resolveWorkspaceAccess,
-  retryPendingAuthDeliveries,
-  type HostingControlServer,
-} from "../src/index.ts";
+  createSqliteHostingStore,
+  createSqliteIdentity,
+  normalizeAuthCode,
+  openDatabase,
+  sha256Hex,
+  type Db,
+} from "@mcpsuite/db";
+import { createHostingControlServer, retryPendingAuthDeliveries, type HostingControlServer } from "../src/index.ts";
+
+/** The CRM's access read, through the identity interface the apps use. */
+const resolveWorkspaceAccess = (d: Db, workspaceId: string) => createSqliteIdentity(d).workspaceAccess(workspaceId);
 
 const KEY = "hc_test_service_key_0123456789abcdef"; // 36 chars >= 32 minimum
 const DELIVERY_KEY = "delivery_endpoint_key_abcdef012345";
@@ -344,7 +349,7 @@ describe("workspace provisioning", () => {
     try {
       process.env.MCPSUITE_AUTH_DELIVERY_URL = sink.url;
       process.env.MCPSUITE_AUTH_DELIVERY_KEY = DELIVERY_KEY;
-      const swept = await retryPendingAuthDeliveries(db);
+      const swept = await retryPendingAuthDeliveries(createSqliteHostingStore(db));
       expect(swept).toEqual({ attempted: 1, sent: 1 });
       expect(sink.hits).toHaveLength(1);
       expect(sink.hits[0]!.body.email).toBe("deferred@acme.com");
@@ -532,21 +537,21 @@ describe("workspace access state", () => {
 
   it("feeds the CRM read contract: lock, expiry-at-read-time, and no-row default", async () => {
     // Freshly provisioned: active with no expiry; unknown workspace: no row -> active.
-    expect(resolveWorkspaceAccess(db, workspaceId)).toEqual({ mode: "active", expiresAt: null });
-    expect(resolveWorkspaceAccess(db, "never-provisioned")).toEqual({ mode: "active", expiresAt: null });
+    expect(await resolveWorkspaceAccess(db, workspaceId)).toEqual({ mode: "active", expiresAt: null });
+    expect(await resolveWorkspaceAccess(db, "never-provisioned")).toEqual({ mode: "active", expiresAt: null });
 
     await call("PUT", `/api/v1/workspaces/${workspaceId}/access`, {
       idem: "rc-lock",
       body: { accessMode: "locked" },
     });
-    expect(resolveWorkspaceAccess(db, workspaceId).mode).toBe("locked");
+    expect((await resolveWorkspaceAccess(db, workspaceId)).mode).toBe("locked");
 
     const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     await call("PUT", `/api/v1/workspaces/${workspaceId}/access`, {
       idem: "rc-active-future",
       body: { accessMode: "active", accessExpiresAt: future },
     });
-    expect(resolveWorkspaceAccess(db, workspaceId)).toEqual({ mode: "active", expiresAt: future });
+    expect(await resolveWorkspaceAccess(db, workspaceId)).toEqual({ mode: "active", expiresAt: future });
 
     const past = new Date(Date.now() - 1000).toISOString();
     await call("PUT", `/api/v1/workspaces/${workspaceId}/access`, {
@@ -555,7 +560,7 @@ describe("workspace access state", () => {
     });
     // Still "active" in the row, but the expiry has passed: reads say locked
     // without any further hosting request.
-    expect(resolveWorkspaceAccess(db, workspaceId)).toEqual({ mode: "locked", expiresAt: past });
+    expect(await resolveWorkspaceAccess(db, workspaceId)).toEqual({ mode: "locked", expiresAt: past });
   });
 
   it("returns not_found for unknown workspaces and validates the mode", async () => {

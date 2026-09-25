@@ -13,10 +13,11 @@
  * (a code or a key resolves it), so a transaction starts unbound and binds
  * once the workspace is known.
  *
- * Differences from the SQLite adapter, both deliberate:
- *   - Workspace access always resolves `active`. The hosting-control access
- *     table does not exist on PostgreSQL until #5 adds it; this stub is
- *     replaced there, not wrapped.
+ * The same store serves hosting control (crm_operator), which may call only
+ * the narrow functions its methods here use: issueCode, hasPasswordCredential
+ * and emailForAuthSubject (schema.sql, "Narrow credential functions").
+ *
+ * Difference from the SQLite adapter, deliberate:
  *   - A disabled user's setup/reset code does not redeem
  *     (crm.redeem_auth_code), as crm.consume_auth_code already behaves.
  */
@@ -29,7 +30,6 @@ import {
   AUTH_CODE_ISSUE_WINDOW_MS,
   AUTH_CODE_MAX_ATTEMPTS,
   AUTH_CODE_TTL_MS,
-  OPENAUTH_KEY_SEPARATOR,
   authPasswordKey,
   authSubjectKey,
   generateAuthCode,
@@ -66,9 +66,6 @@ const pgErrorCode = (e: unknown): string | undefined => {
   }
   return undefined;
 };
-
-/** Rate-limit record for code issuance, kept in the issuer's storage. */
-const issueLogKey = (email: string): string => joinAuthKey(["mcpsuite:code-issue", normalizeEmail(email)]);
 
 export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks } = {}): IdentityStore {
   const hooks = options.hooks ?? {};
@@ -115,12 +112,6 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
       inTx(null, async (x) => (await kvScan(x, prefix)).map((r) => ({ key: r.key, value: r.value, expiry: null }))),
   };
 
-  /** Revoke every refresh token issued to a subject. */
-  const revokeSubjectRefreshTokens = async (x: PgDb, subject: string): Promise<void> => {
-    const prefix = joinAuthKey(["oauth:refresh", subject]) + OPENAUTH_KEY_SEPARATOR;
-    for (const row of await kvScan(x, prefix)) await kvRemove(x, row.key);
-  };
-
   /** A user's subject, read under the bound workspace (RLS). */
   const subjectOf = async (x: PgDb, userId: string): Promise<string | null> => {
     const [row] = await rows<{ auth_subject: string | null }>(
@@ -132,9 +123,7 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
 
   /** Sessions + refresh tokens of a user in the bound workspace. */
   const endSessions = async (x: PgDb, userId: string): Promise<number> => {
-    const [row] = await rows<{ n: number }>(x, sql`SELECT crm.delete_user_sessions(${uid(userId)}::uuid) AS n`);
-    const subject = await subjectOf(x, userId);
-    if (subject) await revokeSubjectRefreshTokens(x, subject);
+    const [row] = await rows<{ n: number }>(x, sql`SELECT crm.end_user_sessions(${uid(userId)}::uuid) AS n`);
     return Number(row?.n ?? 0);
   };
 
@@ -253,7 +242,11 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
         const stored = await kvGet(x, authPasswordKey(email));
         return stored != null && openAuthVerifyPassword(password, JSON.parse(stored) as OpenAuthScryptHash);
       }),
-    hasPasswordCredential: (email) => inTx(null, async (x) => (await kvGet(x, authPasswordKey(email))) != null),
+    hasPasswordCredential: (email) =>
+      inTx(null, async (x) => {
+        const [row] = await rows<{ ok: boolean }>(x, sql`SELECT crm.has_password_credential(${normalizeEmail(email)}) AS ok`);
+        return row?.ok === true;
+      }),
 
     // --- codes ------------------------------------------------------------
 
@@ -266,17 +259,16 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
         if (!user) throw OpError.notFound("user", userId);
 
         // Issue rate limit per email, same window and cap as the SQLite
-        // adapter. Codes superseded by crm.issue_auth_code are deleted, so the
-        // issue history is kept in the issuer storage instead.
-        const now = Date.now();
-        const logKey = issueLogKey(user.email);
-        const logged = await kvGet(x, logKey);
-        const recent = (logged ? (JSON.parse(logged) as number[]) : []).filter((at) => at > now - AUTH_CODE_ISSUE_WINDOW_MS);
-        if (recent.length >= AUTH_CODE_ISSUE_MAX) {
+        // adapter (crm.record_code_issue keeps the history).
+        const [allowed] = await rows<{ ok: boolean }>(
+          x,
+          sql`SELECT crm.record_code_issue(${user.email}, ${AUTH_CODE_ISSUE_WINDOW_MS}, ${AUTH_CODE_ISSUE_MAX}) AS ok`,
+        );
+        if (allowed?.ok !== true) {
           throw new OpError("conflict", "Too many codes issued for this email — wait a few minutes and try again");
         }
-        await kvSet(x, logKey, JSON.stringify([...recent, now]), now + AUTH_CODE_ISSUE_WINDOW_MS);
 
+        const now = Date.now();
         const code = generateAuthCode();
         const expiresAt = new Date(now + AUTH_CODE_TTL_MS[purpose]).toISOString();
         const [issued] = await rows<{ id: string | null }>(
@@ -439,8 +431,20 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
 
     // --- gates ------------------------------------------------------------
 
-    // Part 1 stub (see the file header): replaced by #5.
-    workspaceAccess: async () => ({ mode: "active", expiresAt: null }),
+    // Hosting control's lock/expiry for the workspace (crm.workspace_access_state,
+    // same contract as ../hosting-access.ts): no row → active; locked, or
+    // active with an expiry at or before now → locked.
+    workspaceAccess: (workspaceId) =>
+      inTx(workspaceId, async (x) => {
+        const [row] = await rows<{ access_mode: string; access_expires_at: unknown }>(
+          x,
+          sql`SELECT access_mode, access_expires_at FROM crm.workspace_access_state(${uid(workspaceId)}::uuid)`,
+        );
+        if (!row) return { mode: "active" as const, expiresAt: null };
+        const expiresAt = isoN(row.access_expires_at);
+        const locked = row.access_mode === "locked" || (expiresAt !== null && expiresAt <= new Date().toISOString());
+        return { mode: locked ? ("locked" as const) : ("active" as const), expiresAt };
+      }),
 
     passwordMustChange: (workspaceId, userId) =>
       inTx(workspaceId, async (x) => {

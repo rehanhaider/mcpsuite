@@ -1,8 +1,8 @@
 -- schema.sql — the complete hand-written PostgreSQL schema for the hosted
 -- multi-tenant deployment: crm tables, same-workspace composite foreign keys,
 -- roles and least-privilege grants, forced row-level security, the narrow
--- SECURITY DEFINER identity/credential functions, and the schema_version
--- stamp. Applied in ONE transaction by src/pg/init.ts (or `psql -f`) — only
+-- SECURITY DEFINER identity/credential functions, hosting control's private
+-- `hosting` schema, and the schema_version stamp. Applied in ONE transaction by src/pg/init.ts (or `psql -f`) — only
 -- when the database is empty (no crm.workspaces) — using a deployment role
 -- (crm_migrator/superuser), never a runtime role. Requires PostgreSQL >= 15
 -- (ON DELETE SET NULL (column) form; target is PostgreSQL 17).
@@ -815,10 +815,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON crm.sessions TO crm_identity_resolver;
 -- adoption step of crm.resolve_session) — the only user write it makes.
 GRANT UPDATE (auth_subject, updated_at) ON crm.users TO crm_identity_resolver;
 
--- crm.sessions (beyond the resolver's narrow grant) and crm.schema_version
--- receive NO runtime grants at all: sessions are auth-issuer data owned by
--- the product's auth storage adapter; schema_version is deployment-only
--- metadata.
+-- crm.sessions (beyond the resolver's narrow grant) receives NO runtime
+-- grants: sessions are auth-issuer data owned by the product's auth storage
+-- adapter. crm.schema_version is deployment metadata: crm_app has no grant;
+-- hosting control may read it (health check, below).
 
 -- Deliberately NO "ALTER DEFAULT PRIVILEGES ... GRANT" here: a newly created
 -- table is inaccessible to every runtime role until a schema change
@@ -856,8 +856,8 @@ GRANT UPDATE (auth_subject, updated_at) ON crm.users TO crm_identity_resolver;
 -- The ONLY sanctioned path is the fixed SECURITY DEFINER functions below,
 -- owned by the non-login crm_identity_resolver, which receives narrow
 -- per-command grants plus an explicit all-rows policy so the fixed function
--- bodies (and nothing else) can reach the rows. schema_version gets the same
--- no-policy, no-grant denial.
+-- bodies (and nothing else) can reach the rows. schema_version is denied to
+-- crm_app the same way (hosting control may read it).
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION crm.current_workspace_id()
@@ -947,7 +947,8 @@ END
 $$;
 
 -- Auth-issuer and deployment tables: RLS on; the auth_storage policies below
--- open them to the resolver role only; schema_version stays fully denied.
+-- open them to the resolver role only; schema_version is readable by
+-- crm_operator alone (policy with the hosting schema below).
 ALTER TABLE crm.sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE crm.sessions FORCE ROW LEVEL SECURITY;
 ALTER TABLE crm.openauth_kv ENABLE ROW LEVEL SECURITY;
@@ -1407,9 +1408,235 @@ BEGIN
 END
 $$;
 
+-- --- Narrow credential functions shared with hosting control ---------------
+-- Hosting control (crm_operator) provisions owners and issues setup/reset
+-- codes, but must never read issuer storage: it has no EXECUTE on the
+-- generic crm.openauth_kv_* functions (they would return password hashes).
+-- These answer exactly one fixed question each; crm_app uses them too, so
+-- both roles run the same code path.
+
+-- Whether a password credential exists for an email (never the hash).
+CREATE FUNCTION crm.has_password_credential(p_email text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM crm.openauth_kv
+    WHERE key = 'email' || chr(31) || lower(btrim(p_email)) || chr(31) || 'password'
+      AND (expires_at IS NULL OR expires_at > now())
+  )
+$$;
+
+-- Record one code issue for an email against the fixed-window limit: false
+-- (and nothing recorded) when p_max issues already fall inside the window.
+-- The history lives in issuer storage under "mcpsuite:code-issue" ␟ <email>
+-- (codes superseded by crm.issue_auth_code are deleted, so auth_codes cannot
+-- count them), which crm.purge_openauth_identity removes with the user. The
+-- per-email lock serializes concurrent issues for one address.
+CREATE FUNCTION crm.record_code_issue(p_email text, p_window_ms bigint, p_max integer)
+RETURNS boolean
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+DECLARE
+  k text := 'mcpsuite:code-issue' || chr(31) || lower(btrim(p_email));
+  now_ms bigint := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+  prior jsonb;
+  recent jsonb;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(k, 0));
+  SELECT value INTO prior FROM crm.openauth_kv
+  WHERE key = k AND (expires_at IS NULL OR expires_at > now());
+  SELECT coalesce(jsonb_agg(e.v ORDER BY e.n), '[]'::jsonb) INTO recent
+  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(prior) = 'array' THEN prior ELSE '[]'::jsonb END)
+       WITH ORDINALITY AS e(v, n)
+  WHERE jsonb_typeof(e.v) = 'number' AND (e.v #>> '{}')::numeric > now_ms - p_window_ms;
+  IF jsonb_array_length(recent) >= p_max THEN
+    RETURN false;
+  END IF;
+  INSERT INTO crm.openauth_kv (key, value, expires_at)
+  VALUES (k, recent || to_jsonb(now_ms), to_timestamp((now_ms + p_window_ms) / 1000.0))
+  ON CONFLICT (key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at;
+  RETURN true;
+END
+$$;
+
+-- End a user's sign-ins IN THE CURRENT WORKSPACE: delete every CRM session
+-- and revoke the issuer refresh tokens of the user's subject
+-- ("oauth:refresh" ␟ <subject> ␟ …, whole segments only). Returns the number
+-- of sessions removed.
+CREATE FUNCTION crm.end_user_sessions(p_user_id uuid)
+RETURNS integer
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  WITH target AS (
+    SELECT id, auth_subject FROM crm.users
+    WHERE id = p_user_id AND workspace_id = crm.current_workspace_id()
+  ),
+  revoked AS (
+    DELETE FROM crm.openauth_kv k USING target t
+    WHERE t.auth_subject IS NOT NULL
+      AND starts_with(k.key, 'oauth:refresh' || chr(31) || t.auth_subject || chr(31))
+  ),
+  deleted AS (
+    DELETE FROM crm.sessions s USING target t WHERE s.user_id = t.id RETURNING 1
+  )
+  SELECT count(*)::integer FROM deleted
+$$;
+
+-- =============================================================================
+-- Hosting control — the `hosting` schema (packages/hosting-control).
+--
+-- The private hosting control service connects as crm_operator, with its own
+-- DATABASE_URL. Its own records live here, reachable by crm_operator only:
+--
+--   idempotency_receipts  one row per Idempotency-Key (replay / conflict);
+--   service_audit         append-mostly log of every hosting request; after
+--                         permanent deletion only the one-way target hash
+--                         remains (workspace_id is set NULL);
+--   auth_delivery_outbox  setup/reset code deliveries awaiting send;
+--   workspace_access      the lock/expiry state the CRM enforces.
+--
+-- Receipts, the service audit and the outbox are hosting control's own
+-- records, not workspace data: a receipt is read before any target is known
+-- and the delivery sweep runs across workspaces, so their policies admit
+-- crm_operator on every row. workspace_access is workspace data: its policy
+-- admits only the transaction's workspace, as for the crm tables.
+--
+-- crm_app has no USAGE on this schema. The CRM reads the access state of its
+-- OWN workspace only through crm.workspace_access_state (below).
+--
+-- Rows of a deleted workspace: workspace_access and the outbox cascade from
+-- crm.workspaces; the service audit has no foreign key (it outlives the
+-- workspace, redacted).
+-- =============================================================================
+
+CREATE SCHEMA hosting;
+
+CREATE TABLE hosting.idempotency_receipts (
+  idempotency_key text PRIMARY KEY,
+  action          text NOT NULL,
+  request_hash    text NOT NULL,
+  target_hash     text,
+  state           text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'completed')),
+  http_status     integer,
+  response_body   text,
+  request_id      text NOT NULL,
+  created_at      timestamptz NOT NULL,
+  completed_at    timestamptz
+);
+
+CREATE TABLE hosting.workspace_access (
+  workspace_id      uuid PRIMARY KEY REFERENCES crm.workspaces (id) ON DELETE CASCADE,
+  access_mode       text NOT NULL DEFAULT 'active' CHECK (access_mode IN ('active', 'locked')),
+  access_expires_at timestamptz,
+  version           integer NOT NULL DEFAULT 1,
+  created_at        timestamptz NOT NULL,
+  updated_at        timestamptz NOT NULL
+);
+
+-- workspace_id is text: a request may name an id that never existed.
+CREATE TABLE hosting.service_audit (
+  id               uuid PRIMARY KEY,
+  request_id       text NOT NULL,
+  idempotency_key  text,
+  action           text NOT NULL,
+  method           text NOT NULL,
+  path             text NOT NULL,
+  workspace_id     text,
+  target_hash      text,
+  reason           text,
+  service_identity text NOT NULL,
+  result_code      text NOT NULL,
+  http_status      integer NOT NULL,
+  retryable        boolean NOT NULL DEFAULT false,
+  product_version  text,
+  started_at       timestamptz NOT NULL,
+  completed_at     timestamptz NOT NULL
+);
+CREATE INDEX service_audit_ws_ix ON hosting.service_audit (workspace_id);
+CREATE INDEX service_audit_hash_ix ON hosting.service_audit (target_hash);
+
+CREATE TABLE hosting.auth_delivery_outbox (
+  id           uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL REFERENCES crm.workspaces (id) ON DELETE CASCADE,
+  user_id      uuid NOT NULL,
+  purpose      text NOT NULL CHECK (purpose IN ('setup', 'reset')),
+  state        text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sent', 'abandoned')),
+  attempts     integer NOT NULL DEFAULT 0,
+  last_error   text,
+  created_at   timestamptz NOT NULL,
+  updated_at   timestamptz NOT NULL
+);
+CREATE INDEX auth_outbox_state_ix ON hosting.auth_delivery_outbox (state, created_at);
+CREATE INDEX auth_outbox_ws_ix ON hosting.auth_delivery_outbox (workspace_id);
+
+ALTER SCHEMA hosting OWNER TO crm_schema_owner;
+ALTER TABLE hosting.idempotency_receipts OWNER TO crm_schema_owner;
+ALTER TABLE hosting.workspace_access OWNER TO crm_schema_owner;
+ALTER TABLE hosting.service_audit OWNER TO crm_schema_owner;
+ALTER TABLE hosting.auth_delivery_outbox OWNER TO crm_schema_owner;
+
+REVOKE ALL ON SCHEMA hosting FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA hosting FROM PUBLIC;
+GRANT USAGE ON SCHEMA hosting TO crm_operator, crm_identity_resolver;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON hosting.idempotency_receipts TO crm_operator;
+GRANT SELECT, INSERT, UPDATE, DELETE ON hosting.workspace_access TO crm_operator;
+GRANT SELECT, INSERT, UPDATE, DELETE ON hosting.auth_delivery_outbox TO crm_operator;
+-- Audit rows are never deleted; UPDATE exists for the deletion redaction.
+GRANT SELECT, INSERT, UPDATE ON hosting.service_audit TO crm_operator;
+-- The access-state reader below.
+GRANT SELECT ON hosting.workspace_access TO crm_identity_resolver;
+
+ALTER TABLE hosting.idempotency_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hosting.idempotency_receipts FORCE ROW LEVEL SECURITY;
+ALTER TABLE hosting.service_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hosting.service_audit FORCE ROW LEVEL SECURITY;
+ALTER TABLE hosting.auth_delivery_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hosting.auth_delivery_outbox FORCE ROW LEVEL SECURITY;
+ALTER TABLE hosting.workspace_access ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hosting.workspace_access FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY operator_records ON hosting.idempotency_receipts
+  TO crm_operator USING (true) WITH CHECK (true);
+CREATE POLICY operator_records ON hosting.service_audit
+  TO crm_operator USING (true) WITH CHECK (true);
+CREATE POLICY operator_records ON hosting.auth_delivery_outbox
+  TO crm_operator USING (true) WITH CHECK (true);
+CREATE POLICY workspace_isolation ON hosting.workspace_access
+  TO crm_operator
+  USING (workspace_id = crm.current_workspace_id())
+  WITH CHECK (workspace_id = crm.current_workspace_id());
+CREATE POLICY access_state_read ON hosting.workspace_access
+  FOR SELECT TO crm_identity_resolver USING (true);
+
+-- The CRM's read of its own workspace's access state (crm_app). Returns the
+-- stored row only when p_workspace_id is the transaction's workspace — never
+-- another workspace's, never a list. No row means the workspace is active;
+-- the caller applies expiry at read time.
+CREATE FUNCTION crm.workspace_access_state(p_workspace_id uuid)
+RETURNS TABLE (access_mode text, access_expires_at timestamptz)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT a.access_mode, a.access_expires_at
+  FROM hosting.workspace_access a
+  WHERE a.workspace_id = p_workspace_id
+    AND p_workspace_id = crm.current_workspace_id()
+$$;
+
+-- The deployment stamp, readable (not writable) by hosting control for its
+-- health check.
+GRANT SELECT ON crm.schema_version TO crm_operator;
+CREATE POLICY operator_read ON crm.schema_version
+  FOR SELECT TO crm_operator USING (true);
+
 -- --- Ownership + execution grants -------------------------------------------
 -- Owned by the non-login resolver role, EXECUTE revoked from PUBLIC and
--- granted only to crm_app.
+-- granted to crm_app; crm_operator receives its narrow set after the loop.
 
 DO $$
 DECLARE fn text;
@@ -1431,7 +1658,11 @@ BEGIN
     'destroy_session(text)',
     'find_user_by_auth_subject(text)',
     'email_for_auth_subject(text)',
-    'redeem_auth_code(text, text, text, integer)'
+    'redeem_auth_code(text, text, text, integer)',
+    'has_password_credential(text)',
+    'record_code_issue(text, bigint, integer)',
+    'end_user_sessions(uuid)',
+    'workspace_access_state(uuid)'
   ] LOOP
     EXECUTE format('ALTER FUNCTION crm.%s OWNER TO crm_identity_resolver', fn);
     EXECUTE format('REVOKE ALL ON FUNCTION crm.%s FROM PUBLIC', fn);
@@ -1439,6 +1670,18 @@ BEGIN
   END LOOP;
 END
 $$;
+
+-- Hosting control (crm_operator) gets exactly what provisioning, owner
+-- recovery and permanent deletion need — no generic issuer storage, no
+-- session minting, no resolvers:
+GRANT EXECUTE ON FUNCTION
+  crm.email_for_auth_subject(text),
+  crm.has_password_credential(text),
+  crm.record_code_issue(text, bigint, integer),
+  crm.issue_auth_code(uuid, text, text, timestamptz),
+  crm.end_user_sessions(uuid),
+  crm.purge_openauth_identity(uuid)
+TO crm_operator;
 
 -- --- Version stamp -----------------------------------------------------------
 
