@@ -805,8 +805,9 @@ TO crm_app, crm_operator;
 
 -- The identity resolver role touches only what its fixed SECURITY DEFINER
 -- functions (below) need: read the identity tables, read/write the OpenAuth
--- issuer storage and code bookkeeping, and read/delete sessions for the fixed
--- revocation path. It has no login and no other access.
+-- issuer storage and code bookkeeping, create/resolve/delete sessions, and
+-- write users.auth_subject for the one-time subject binding in
+-- crm.resolve_session. It has no login and no other access.
 GRANT SELECT ON crm.users, crm.memberships, crm.mcp_clients TO crm_identity_resolver;
 GRANT SELECT, INSERT, UPDATE, DELETE ON crm.openauth_kv, crm.auth_codes TO crm_identity_resolver;
 GRANT SELECT, INSERT, UPDATE, DELETE ON crm.sessions TO crm_identity_resolver;
@@ -1225,27 +1226,27 @@ AS $$
   VALUES (gen_random_uuid(), p_token_hash, p_user_id, lower(p_email), p_auth_subject, p_auth_refresh, p_expires_at, now())
 $$;
 
--- Resolve a session token to the CURRENT user state (token claims are never
+-- Resolve a session token to the CURRENT identity (token claims are never
 -- authority). A user-less session is adopted when an active user with its
 -- email now exists: the session's subject is bound to that user once and the
 -- session row upgraded in place. If that user already bound a different
 -- subject, the session can never own it and is deleted. Otherwise the session
 -- surfaces as 'unprovisioned'. Only active, enabled members resolve as 'user'.
 -- Mirrors resolveSessionAny in the SQLite adapter (packages/db/src/auth.ts).
+--
+-- Like the other resolvers it returns fixed identity fields only — never
+-- names, profile data or password state. The caller reads the user's profile
+-- afterwards inside the resolved workspace, where row-level security applies.
+-- `email` is set only for 'unprovisioned', and is the session's own address.
 CREATE FUNCTION crm.resolve_session(p_token_hash text)
 RETURNS TABLE (
   kind text,
   user_id uuid,
   workspace_id uuid,
   role text,
-  email text,
-  name text,
-  status text,
-  has_password boolean,
-  disabled_at timestamptz,
-  created_at timestamptz,
   password_must_change boolean,
-  auth_subject text
+  auth_subject text,
+  email text
 )
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = crm, pg_temp
@@ -1254,6 +1255,7 @@ AS $$
 DECLARE
   s crm.sessions%ROWTYPE;
   c crm.users%ROWTYPE;
+  bound_subject text;
   resolved_user uuid;
 BEGIN
   SELECT * INTO s FROM crm.sessions WHERE token_hash = p_token_hash;
@@ -1273,21 +1275,29 @@ BEGIN
         RETURN;
       END IF;
       IF c.auth_subject IS NULL AND s.auth_subject IS NOT NULL THEN
-        UPDATE crm.users SET auth_subject = s.auth_subject, updated_at = now() WHERE id = c.id;
+        -- Bind once: a sign-in binding a different subject at the same moment
+        -- wins the row; this session then conflicts and is deleted.
+        UPDATE crm.users SET auth_subject = s.auth_subject, updated_at = now()
+        WHERE id = c.id AND auth_subject IS NULL;
+        IF NOT FOUND THEN
+          SELECT u.auth_subject INTO bound_subject FROM crm.users u WHERE u.id = c.id;
+          IF bound_subject IS DISTINCT FROM s.auth_subject THEN
+            DELETE FROM crm.sessions WHERE id = s.id;
+            RETURN;
+          END IF;
+        END IF;
       END IF;
       UPDATE crm.sessions SET user_id = c.id, email = NULL WHERE id = s.id;
       resolved_user := c.id;
     ELSE
       RETURN QUERY SELECT
-        'unprovisioned'::text, NULL::uuid, NULL::uuid, NULL::text, s.email, NULL::text,
-        NULL::text, NULL::boolean, NULL::timestamptz, NULL::timestamptz, NULL::boolean, s.auth_subject;
+        'unprovisioned'::text, NULL::uuid, NULL::uuid, NULL::text, NULL::boolean, s.auth_subject, s.email;
       RETURN;
     END IF;
   END IF;
 
   RETURN QUERY
-    SELECT 'user'::text, u.id, u.workspace_id, m.role, u.email, u.name, u.status,
-           (u.password_hash IS NOT NULL), u.disabled_at, u.created_at, u.password_must_change, s.auth_subject
+    SELECT 'user'::text, u.id, u.workspace_id, m.role, u.password_must_change, s.auth_subject, NULL::text
     FROM crm.users u
     JOIN crm.memberships m ON m.user_id = u.id AND m.workspace_id = u.workspace_id
     WHERE u.id = resolved_user AND u.status = 'active' AND u.disabled_at IS NULL;

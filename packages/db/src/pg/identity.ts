@@ -185,19 +185,36 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
             authSubject: (row.auth_subject as string | null) ?? null,
           } satisfies UnprovisionedSession;
         }
+        // The resolver returns fixed identity fields only; the profile is read
+        // inside the resolved workspace, under row-level security.
+        const workspaceId = String(row.workspace_id);
+        await bindAmbientWorkspace(db, workspaceId);
+        const [profile] = await rows<{
+          email: string;
+          name: string;
+          status: string;
+          has_password: boolean;
+          disabled_at: unknown;
+          created_at: unknown;
+        }>(
+          x,
+          sql`SELECT email, name, status, (password_hash IS NOT NULL) AS has_password, disabled_at, created_at
+              FROM crm.users WHERE id = ${String(row.user_id)}::uuid`,
+        );
+        if (!profile) return null;
         const role = row.role as Role;
         return {
           user: {
             id: String(row.user_id),
-            email: String(row.email),
-            name: String(row.name),
+            email: profile.email,
+            name: profile.name,
             role,
-            status: row.status as UserStatus,
-            hasPassword: row.has_password === true,
-            disabledAt: isoN(row.disabled_at),
-            createdAt: iso(row.created_at),
+            status: profile.status as UserStatus,
+            hasPassword: profile.has_password === true,
+            disabledAt: isoN(profile.disabled_at),
+            createdAt: iso(profile.created_at),
           },
-          workspaceId: String(row.workspace_id),
+          workspaceId,
           role,
           passwordMustChange: row.password_must_change === true,
           authSubject: (row.auth_subject as string | null) ?? null,
@@ -328,16 +345,29 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
           }
         } else {
           // First successful sign-in (pending invite, or an active user after
-          // an owner-recovery code): bind the subject once and activate.
-          subject = `acct_${newId()}`;
+          // an owner-recovery code): bind the subject once and activate. The
+          // `auth_subject IS NULL` guard makes the bind happen exactly once
+          // under concurrency: a second sign-in racing this one waits on the
+          // row, finds it already bound, and adopts that subject instead of
+          // overwriting it.
+          const minted = `acct_${newId()}`;
+          let bound: Array<{ id: string }>;
           try {
-            await rows(
+            bound = await rows<{ id: string }>(
               x,
-              sql`UPDATE crm.users SET auth_subject = ${subject}, status = 'active', updated_at = now() WHERE id = ${user.user_id}::uuid`,
+              sql`UPDATE crm.users SET auth_subject = ${minted}, status = 'active', updated_at = now()
+                  WHERE id = ${user.user_id}::uuid AND auth_subject IS NULL RETURNING id`,
             );
           } catch (e) {
             if (pgErrorCode(e) === "23505") throw new OpError("conflict", "That login identity is already linked to another user");
             throw e;
+          }
+          if (bound.length === 1) {
+            subject = minted;
+          } else {
+            const existing = await subjectOf(x, user.user_id);
+            if (!existing) throw new OpError("conflict", "The account changed during sign-in — try again");
+            subject = existing;
           }
         }
         await hooks.afterSubjectBound?.();

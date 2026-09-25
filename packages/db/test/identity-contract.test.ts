@@ -39,6 +39,8 @@ interface Harness {
   workspaceId: string;
   /** Lock the workspace the way hosting control does, or null where unsupported. */
   lockWorkspace: (() => void) | null;
+  /** Run a catalog query as the runtime role (PostgreSQL only). */
+  catalogQuery: ((text: string) => Promise<Array<Record<string, unknown>>>) | null;
   close(): Promise<void>;
 }
 
@@ -69,6 +71,7 @@ async function sqliteHarness(): Promise<Harness> {
         )
         .run(workspaceId, now, now);
     },
+    catalogQuery: null,
     close: async () => {
       db.$client.close();
       rmSync(dir, { recursive: true, force: true });
@@ -115,6 +118,7 @@ async function pgHarness(): Promise<Harness> {
     workspaceId,
     // The access table arrives on PostgreSQL with #5.
     lockWorkspace: null,
+    catalogQuery: async (text) => (await app.pool.query(text)).rows,
     close: async () => {
       await app.close();
       await admin.close();
@@ -244,6 +248,22 @@ for (const adapter of ADAPTERS) {
         expect(await identity.findUserByAuthSubject("acct_someone_else")).toBeNull();
       });
 
+      it("session resolution returns fixed identity fields only, never profile data", async () => {
+        // PostgreSQL: the SECURITY DEFINER resolver must not hand the runtime
+        // role names or password state (those are read afterwards under RLS).
+        if (!h.catalogQuery) return;
+        const [row] = await h.catalogQuery(
+          "SELECT pg_get_function_result('crm.resolve_session(text)'::regprocedure) AS result",
+        );
+        const columns = String(row?.result)
+          .replace(/^TABLE\(|\)$/g, "")
+          .split(",")
+          .map((c) => c.trim().split(" ")[0]);
+        expect(columns.sort()).toEqual(
+          ["auth_subject", "email", "kind", "password_must_change", "role", "user_id", "workspace_id"].sort(),
+        );
+      });
+
       it("endUserSessions ends every session of the user", async () => {
         const user = await activeUser("end");
         const a = await identity.createSession(user.id);
@@ -351,6 +371,17 @@ for (const adapter of ADAPTERS) {
         expect(await identity.emailForAuthSubject("acct_nobody")).toBeNull();
       });
 
+      it("binds the subject exactly once when two sign-ins race", async () => {
+        const user = await pendingUser("link-race");
+        const [a, b] = await Promise.all([identity.resolveAuthSuccess(user.email), identity.resolveAuthSuccess(user.email)]);
+        expect(a).toMatchObject({ status: "linked", userId: user.id });
+        // Both sign-ins get the ONE bound subject; neither overwrites the other.
+        expect(b).toEqual(a);
+        const subject = (a as { subject: string }).subject;
+        expect(await identity.findUserByAuthSubject(subject)).toMatchObject({ id: user.id });
+        expect(await identity.emailForAuthSubject(subject)).toBe(user.email);
+      });
+
       it("rejects unknown and disabled identities; open registration mints a stable subject", async () => {
         const stranger = email("stranger");
         expect(await identity.resolveAuthSuccess(stranger)).toEqual({ status: "not_invited" });
@@ -446,13 +477,16 @@ for (const adapter of ADAPTERS) {
       it("identity.withTransaction nested in ports.tx joins it; a failure rolls everything back", async () => {
         const user = await activeUser("nest");
         let token = "";
+        let code = "";
         await expect(
           ports.tx(async () => {
             await ports.credentials.mustChangePassword(user.id, true);
             await identity.withTransaction(async () => {
               token = (await identity.createSession(user.id)).token;
               // A method with its own transaction (code issuance) joins too.
-              await identity.issueCode(h.workspaceId, user.id, "reset");
+              // A setup code leaves sessions alone, so only the rollback can
+              // remove the session and the code below.
+              code = (await identity.issueCode(h.workspaceId, user.id, "setup")).code;
             });
             throw new Error("boom");
           }),
@@ -460,6 +494,7 @@ for (const adapter of ADAPTERS) {
         expect(await identity.passwordMustChange(h.workspaceId, user.id)).toBe(false);
         expect(token).not.toBe("");
         expect(await identity.resolveSession(token)).toBeNull();
+        expect((await identity.verifyAndConsumeCode({ email: user.email, purpose: "setup", code })).ok).toBe(false);
 
         // The same nesting commits when nothing fails.
         await ports.tx(async () => {
