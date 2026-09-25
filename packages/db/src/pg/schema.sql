@@ -805,11 +805,15 @@ TO crm_app, crm_operator;
 
 -- The identity resolver role touches only what its fixed SECURITY DEFINER
 -- functions (below) need: read the identity tables, read/write the OpenAuth
--- issuer storage and code bookkeeping, and read/delete sessions for the fixed
--- revocation path. It has no login and no other access.
+-- issuer storage and code bookkeeping, create/resolve/delete sessions, and
+-- write users.auth_subject for the one-time subject binding in
+-- crm.resolve_session. It has no login and no other access.
 GRANT SELECT ON crm.users, crm.memberships, crm.mcp_clients TO crm_identity_resolver;
 GRANT SELECT, INSERT, UPDATE, DELETE ON crm.openauth_kv, crm.auth_codes TO crm_identity_resolver;
-GRANT SELECT, DELETE ON crm.sessions TO crm_identity_resolver;
+GRANT SELECT, INSERT, UPDATE, DELETE ON crm.sessions TO crm_identity_resolver;
+-- Session resolution binds a verified subject to its user once (the
+-- adoption step of crm.resolve_session) — the only user write it makes.
+GRANT UPDATE (auth_subject, updated_at) ON crm.users TO crm_identity_resolver;
 
 -- crm.sessions (beyond the resolver's narrow grant) and crm.schema_version
 -- receive NO runtime grants at all: sessions are auth-issuer data owned by
@@ -974,6 +978,9 @@ CREATE POLICY identity_resolution ON crm.memberships
   FOR SELECT TO crm_identity_resolver USING (true);
 CREATE POLICY identity_resolution ON crm.mcp_clients
   FOR SELECT TO crm_identity_resolver USING (true);
+-- The subject binding in crm.resolve_session (column-limited by the grant).
+CREATE POLICY identity_linking ON crm.users
+  FOR UPDATE TO crm_identity_resolver USING (true) WITH CHECK (true);
 
 -- resolve_user_identity — the AUTHENTICATION authority — keys on the VERIFIED
 -- OpenAuth subject and returns a row ONLY for status = 'active' users:
@@ -1163,12 +1170,16 @@ AS $$
 $$;
 
 -- Permanent user deletion also revokes the OpenAuth issuer's stored state for
--- that identity. The issuer keys rows by the subject (refresh tokens,
--- authorization state) AND by the normalized email (password hash,
--- email→subject binding — docs/auth-api.md §Storage), so both markers are
--- purged; substring matching is deliberate because OpenAuth joins key path
--- segments with a control separator, and both markers are globally unique
--- deployment-wide. Guarded to a user visible in the current workspace, so a
+-- that identity. Issuer keys are path segments joined with chr(31)
+-- (docs/auth-api.md §Storage), and this deletes whole-segment matches only —
+-- never a substring, since one email can sit inside another
+-- (bob@acme.com in jimbob@acme.com), in any workspace:
+--   * "email" ␟ <email> ␟ …          the password hash and the email→subject
+--                                     binding (every record for the email);
+--   * "oauth:refresh" ␟ <subject> ␟ … the subject's refresh tokens;
+--   * "mcpsuite:code-issue" ␟ <email> the setup/reset code issue-rate record.
+-- Mirrors removeOpenAuthCredential + invalidateSubjectRefreshTokens in the
+-- SQLite adapter. Guarded to a user visible in the current workspace, so a
 -- workspace transaction can never purge another workspace's credentials; call
 -- it BEFORE deleting the user row.
 CREATE FUNCTION crm.purge_openauth_identity(p_user_id uuid)
@@ -1177,16 +1188,223 @@ LANGUAGE sql VOLATILE SECURITY DEFINER
 SET search_path = crm, pg_temp
 AS $$
   WITH target AS (
-    SELECT auth_subject, email FROM crm.users
+    SELECT auth_subject, lower(email) AS email FROM crm.users
     WHERE id = p_user_id AND workspace_id = crm.current_workspace_id()
   ),
   deleted AS (
     DELETE FROM crm.openauth_kv k USING target t
-    WHERE (t.auth_subject IS NOT NULL AND position(t.auth_subject IN k.key) > 0)
-       OR position(lower(t.email) IN lower(k.key)) > 0
+    WHERE starts_with(k.key, 'email' || chr(31) || t.email || chr(31))
+       OR k.key = 'mcpsuite:code-issue' || chr(31) || t.email
+       OR (t.auth_subject IS NOT NULL AND starts_with(k.key, 'oauth:refresh' || chr(31) || t.auth_subject || chr(31)))
     RETURNING 1
   )
   SELECT count(*)::integer FROM deleted
+$$;
+
+-- --- Sessions (docs/auth-api.md §Sessions) ---------------------------------
+--
+-- A session is minted after a successful sign-in, before any workspace
+-- transaction exists, so these functions are keyed on the token hash and not
+-- workspace-guarded — the same model as crm.resolve_mcp_key. crm_app can
+-- already verify credentials and mint issuer tokens through the functions
+-- above; minting the CRM session row adds no authority beyond that.
+
+-- Insert a session and sweep expired ones. user_id NULL is an unprovisioned
+-- session for a verified identity whose CRM user does not exist yet; its
+-- email is then the adoption key.
+CREATE FUNCTION crm.create_session(
+  p_token_hash text,
+  p_user_id uuid,
+  p_email text,
+  p_auth_subject text,
+  p_auth_refresh text,
+  p_expires_at timestamptz
+)
+RETURNS void
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  WITH swept AS (
+    DELETE FROM crm.sessions WHERE expires_at <= now()
+  )
+  INSERT INTO crm.sessions (id, token_hash, user_id, email, auth_subject, auth_refresh, expires_at, created_at)
+  VALUES (gen_random_uuid(), p_token_hash, p_user_id, lower(p_email), p_auth_subject, p_auth_refresh, p_expires_at, now())
+$$;
+
+-- Resolve a session token to the CURRENT identity (token claims are never
+-- authority). A user-less session is adopted when an active user with its
+-- email now exists: the session's subject is bound to that user once and the
+-- session row upgraded in place. If that user already bound a different
+-- subject, the session can never own it and is deleted. Otherwise the session
+-- surfaces as 'unprovisioned'. Only active, enabled members resolve as 'user'.
+-- Mirrors resolveSessionAny in the SQLite adapter (packages/db/src/auth.ts).
+--
+-- Like the other resolvers it returns fixed identity fields only — never
+-- names, profile data or password material (the forced-change flag is part
+-- of the identity, as in crm.resolve_user_identity). The caller reads the
+-- user's profile afterwards inside the resolved workspace, where row-level
+-- security applies.
+-- `email` is set only for 'unprovisioned', and is the session's own address.
+CREATE FUNCTION crm.resolve_session(p_token_hash text)
+RETURNS TABLE (
+  kind text,
+  user_id uuid,
+  workspace_id uuid,
+  role text,
+  password_must_change boolean,
+  auth_subject text,
+  email text
+)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+#variable_conflict use_column
+DECLARE
+  s crm.sessions%ROWTYPE;
+  c crm.users%ROWTYPE;
+  bound_subject text;
+  resolved_user uuid;
+BEGIN
+  SELECT * INTO s FROM crm.sessions WHERE token_hash = p_token_hash;
+  IF NOT FOUND OR s.expires_at <= now() THEN
+    RETURN;
+  END IF;
+  resolved_user := s.user_id;
+
+  IF resolved_user IS NULL THEN
+    IF s.email IS NULL THEN
+      RETURN;
+    END IF;
+    SELECT * INTO c FROM crm.users WHERE email = s.email;
+    IF FOUND AND c.disabled_at IS NULL AND c.status = 'active' THEN
+      IF c.auth_subject IS NOT NULL AND s.auth_subject IS NOT NULL AND c.auth_subject <> s.auth_subject THEN
+        DELETE FROM crm.sessions WHERE id = s.id;
+        RETURN;
+      END IF;
+      IF c.auth_subject IS NULL AND s.auth_subject IS NOT NULL THEN
+        -- Bind once: a sign-in binding a different subject at the same moment
+        -- wins the row; this session then conflicts and is deleted.
+        UPDATE crm.users SET auth_subject = s.auth_subject, updated_at = now()
+        WHERE id = c.id AND auth_subject IS NULL;
+        IF NOT FOUND THEN
+          SELECT u.auth_subject INTO bound_subject FROM crm.users u WHERE u.id = c.id;
+          IF bound_subject IS DISTINCT FROM s.auth_subject THEN
+            DELETE FROM crm.sessions WHERE id = s.id;
+            RETURN;
+          END IF;
+        END IF;
+      END IF;
+      UPDATE crm.sessions SET user_id = c.id, email = NULL WHERE id = s.id;
+      resolved_user := c.id;
+    ELSE
+      RETURN QUERY SELECT
+        'unprovisioned'::text, NULL::uuid, NULL::uuid, NULL::text, NULL::boolean, s.auth_subject, s.email;
+      RETURN;
+    END IF;
+  END IF;
+
+  RETURN QUERY
+    SELECT 'user'::text, u.id, u.workspace_id, m.role, u.password_must_change, s.auth_subject, NULL::text
+    FROM crm.users u
+    JOIN crm.memberships m ON m.user_id = u.id AND m.workspace_id = u.workspace_id
+    WHERE u.id = resolved_user AND u.status = 'active' AND u.disabled_at IS NULL;
+END
+$$;
+
+-- Logout: delete the session and return the refresh token it was minted with,
+-- so the caller can revoke it in the same transaction.
+CREATE FUNCTION crm.destroy_session(p_token_hash text)
+RETURNS text
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  DELETE FROM crm.sessions WHERE token_hash = p_token_hash RETURNING auth_refresh
+$$;
+
+-- The CRM user a verified OpenAuth subject is bound to, in ANY status: the
+-- sign-in step distinguishes a disabled account from an unknown identity.
+-- Fixed fields only.
+CREATE FUNCTION crm.find_user_by_auth_subject(p_subject text)
+RETURNS TABLE (user_id uuid, workspace_id uuid, status text, email text)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT u.id, u.workspace_id, u.status, u.email
+  FROM crm.users u
+  JOIN crm.memberships m ON m.user_id = u.id AND m.workspace_id = u.workspace_id
+  WHERE u.auth_subject IS NOT NULL AND u.auth_subject = p_subject
+$$;
+
+-- Reverse lookup: the verified email an OpenAuth subject was minted for, from
+-- the issuer's email → subject records ("email" ␟ <email> ␟ "subject").
+CREATE FUNCTION crm.email_for_auth_subject(p_subject text)
+RETURNS text
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT split_part(key, chr(31), 2)
+  FROM crm.openauth_kv
+  WHERE starts_with(key, 'email' || chr(31))
+    AND array_length(string_to_array(key, chr(31)), 1) = 3
+    AND split_part(key, chr(31), 3) = 'subject'
+    AND value = to_jsonb(p_subject)
+    AND (expires_at IS NULL OR expires_at > now())
+  ORDER BY key
+  LIMIT 1
+$$;
+
+-- Redeem a code the way the redemption screens ask for it: email + purpose +
+-- code. Takes the latest unused code for (email, purpose); an expired code or
+-- one at its attempt cap is refused; a wrong code counts an attempt and burns
+-- the code at the cap; the right code is consumed. Returns one outcome row:
+-- 'ok' with the user and workspace, or the refusal reason. Mirrors
+-- verifyAndConsumeAuthCode in the SQLite adapter; unlike it, a disabled
+-- user's code does not redeem (as crm.consume_auth_code).
+CREATE FUNCTION crm.redeem_auth_code(p_email text, p_purpose text, p_code_hash text, p_max_attempts integer)
+RETURNS TABLE (outcome text, user_id uuid, workspace_id uuid)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+#variable_conflict use_column
+DECLARE
+  c crm.auth_codes%ROWTYPE;
+  ws uuid;
+BEGIN
+  SELECT * INTO c FROM crm.auth_codes
+  WHERE email = lower(p_email) AND purpose = p_purpose AND used_at IS NULL
+  ORDER BY created_at DESC
+  LIMIT 1
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'invalid_code'::text, NULL::uuid, NULL::uuid;
+    RETURN;
+  END IF;
+  IF c.expires_at <= now() THEN
+    RETURN QUERY SELECT 'expired_code'::text, NULL::uuid, NULL::uuid;
+    RETURN;
+  END IF;
+  IF c.attempts >= p_max_attempts THEN
+    RETURN QUERY SELECT 'rate_limited'::text, NULL::uuid, NULL::uuid;
+    RETURN;
+  END IF;
+  IF c.code_hash <> p_code_hash THEN
+    UPDATE crm.auth_codes
+    SET attempts = c.attempts + 1,
+        used_at = CASE WHEN c.attempts + 1 >= p_max_attempts THEN now() ELSE NULL END
+    WHERE id = c.id;
+    RETURN QUERY SELECT
+      (CASE WHEN c.attempts + 1 >= p_max_attempts THEN 'rate_limited' ELSE 'invalid_code' END)::text,
+      NULL::uuid, NULL::uuid;
+    RETURN;
+  END IF;
+  SELECT u.workspace_id INTO ws FROM crm.users u WHERE u.id = c.user_id AND u.status <> 'disabled';
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT 'invalid_code'::text, NULL::uuid, NULL::uuid;
+    RETURN;
+  END IF;
+  UPDATE crm.auth_codes SET used_at = now() WHERE id = c.id;
+  RETURN QUERY SELECT 'ok'::text, c.user_id, ws;
+END
 $$;
 
 -- --- Ownership + execution grants -------------------------------------------
@@ -1207,7 +1425,13 @@ BEGIN
     'issue_auth_code(uuid, text, text, timestamptz)',
     'consume_auth_code(text, text)',
     'delete_user_sessions(uuid)',
-    'purge_openauth_identity(uuid)'
+    'purge_openauth_identity(uuid)',
+    'create_session(text, uuid, text, text, text, timestamptz)',
+    'resolve_session(text)',
+    'destroy_session(text)',
+    'find_user_by_auth_subject(text)',
+    'email_for_auth_subject(text)',
+    'redeem_auth_code(text, text, text, integer)'
   ] LOOP
     EXECUTE format('ALTER FUNCTION crm.%s OWNER TO crm_identity_resolver', fn);
     EXECUTE format('REVOKE ALL ON FUNCTION crm.%s FROM PUBLIC', fn);

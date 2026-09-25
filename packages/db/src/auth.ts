@@ -27,7 +27,8 @@ import * as t from "./schema.ts";
 import { sha256Hex, verifyPassword } from "./services.ts";
 import { invalidateRefreshToken } from "./openauth.ts";
 
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+/** Session lifetime, shared by every adapter. */
+export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 export interface SessionUser {
   user: User;

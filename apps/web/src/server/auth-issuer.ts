@@ -5,27 +5,20 @@
  * Custom-UI PasswordProvider: every provider screen is a 302 redirect to a
  * CRM page (/login, /reset-password, or the hosted signup URL) — the issuer
  * never renders HTML. Identity linking happens in the `success` callback via
- * @mcpsuite/db's resolveAuthSuccess; token claims are never authority — after any
+ * the runtime's identity store; token claims are never authority — after any
  * successful flow the CRM issues its own mcpsuite_session cookie linked to the
- * OpenAuth subject.
+ * OpenAuth subject. Everything here takes an `IdentityStore`, never a
+ * database handle, so it runs on every database adapter.
  */
 import { issuer } from "@openauthjs/openauth";
 import { PasswordProvider } from "@openauthjs/openauth/provider/password";
 import type { StorageAdapter } from "@openauthjs/openauth/storage/storage";
 import {
   createOpenAuthStorage,
-  createSession,
   deliverAuthCode,
-  destroySession,
-  findUserByAuthSubject,
   joinAuthKey,
   normalizeEmail,
-  redeemAuthCodeAndSetPassword,
-  resolveAuthSuccess,
-  resolveSession,
-  sqliteAuthKv,
-  userMustChangePassword,
-  type Db,
+  type IdentityStore,
 } from "@mcpsuite/db";
 
 /**
@@ -122,16 +115,16 @@ async function changeUi(
 }
 
 // ---------------------------------------------------------------------------
-// Issuer assembly (one per process/db)
+// Issuer assembly (one per process/runtime)
 // ---------------------------------------------------------------------------
 
 type FetchApp = { fetch: (request: Request) => Response | Promise<Response> };
 
-let cached: { db: Db; app: FetchApp } | null = null;
+let cached: { identity: IdentityStore; app: FetchApp } | null = null;
 
-export function getAuthApp(db: Db): FetchApp {
-  if (cached && cached.db === db) return cached.app;
-  const storage = createOpenAuthStorage(sqliteAuthKv(db)) as StorageAdapter;
+export function getAuthApp(identity: IdentityStore): FetchApp {
+  if (cached && cached.identity === identity) return cached.app;
+  const storage = createOpenAuthStorage(identity.authKv) as StorageAdapter;
   const app = issuer({
     storage,
     subjects,
@@ -158,7 +151,7 @@ export function getAuthApp(db: Db): FetchApp {
       }),
     },
     async success(ctx, value) {
-      const linked = await resolveAuthSuccess(db, value.email, {
+      const linked = await identity.resolveAuthSuccess(value.email, {
         // Hosted open registration: a configured signup URL means verified
         // identities may exist before their CRM user does (trial-first).
         openRegistration: Boolean(process.env.MCPSUITE_AUTH_SIGNUP_URL?.trim()),
@@ -177,16 +170,16 @@ export function getAuthApp(db: Db): FetchApp {
       return redirect("/login?error=expired_flow");
     },
   });
-  cached = { db, app };
+  cached = { identity, app };
   return app;
 }
 
 /** Dispatch a mount-stripped request straight into the issuer (no network). */
-function issuerFetch(db: Db, path: string, init?: RequestInit & { cookies?: string[] }): Promise<Response> {
+function issuerFetch(identity: IdentityStore, path: string, init?: RequestInit & { cookies?: string[] }): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (init?.cookies?.length) headers.set("cookie", init.cookies.join("; "));
   const request = new Request(`${INTERNAL_ORIGIN}${path}`, { ...init, headers, redirect: "manual" });
-  return Promise.resolve(getAuthApp(db).fetch(request));
+  return Promise.resolve(getAuthApp(identity).fetch(request));
 }
 
 /** First name=value pair of each Set-Cookie header (enough to replay a flow). */
@@ -233,17 +226,17 @@ export const LOGIN_ERROR_MESSAGES: Record<LoginErrorCode, string> = {
 
 /**
  * Run the complete OAuth code flow against the in-process issuer and mint an
- * mcpsuite_session row for the resolved user. Pure function of (db, credentials)
- * — the HTTP layers only translate the result.
+ * mcpsuite_session row for the resolved user. Pure function of (identity,
+ * credentials) — the HTTP layers only translate the result.
  */
 export async function performPasswordLogin(
-  db: Db,
+  identity: IdentityStore,
   input: { email: string; password: string },
 ): Promise<PasswordLoginResult> {
   const redirectUri = `${INTERNAL_ORIGIN}${MOUNT}/callback`;
   // 1. Start the flow: stores the encrypted authorization state cookie.
   const start = await issuerFetch(
-    db,
+    identity,
     withParams("/authorize", {
       client_id: CLIENT_ID,
       redirect_uri: redirectUri,
@@ -256,7 +249,7 @@ export async function performPasswordLogin(
 
   // 2. Present the credentials to the password provider.
   const form = new URLSearchParams({ email: normalizeEmail(input.email), password: input.password });
-  const attempt = await issuerFetch(db, "/password/authorize", {
+  const attempt = await issuerFetch(identity, "/password/authorize", {
     method: "POST",
     body: form.toString(),
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -274,19 +267,19 @@ export async function performPasswordLogin(
   if (!code) return { ok: false, error: "expired_flow" };
 
   // 3. Exchange the single-use code for tokens.
-  const tokens = await exchangeCode(db, code, redirectUri);
+  const tokens = await exchangeCode(identity, code, redirectUri);
   if (!tokens) return { ok: false, error: "expired_flow" };
 
   // 4. Resolve the subject to the CURRENT user and mint the CRM session.
-  return sessionFromTokens(db, tokens);
+  return sessionFromTokens(identity, tokens);
 }
 
 async function exchangeCode(
-  db: Db,
+  identity: IdentityStore,
   code: string,
   redirectUri: string,
 ): Promise<{ access: string; refresh: string } | null> {
-  const res = await issuerFetch(db, "/token", {
+  const res = await issuerFetch(identity, "/token", {
     method: "POST",
     body: new URLSearchParams({
       grant_type: "authorization_code",
@@ -302,11 +295,14 @@ async function exchangeCode(
   return { access: json.access_token, refresh: json.refresh_token };
 }
 
-function sessionFromTokens(db: Db, tokens: { access: string; refresh: string }): PasswordLoginResult {
+async function sessionFromTokens(
+  identity: IdentityStore,
+  tokens: { access: string; refresh: string },
+): Promise<PasswordLoginResult> {
   const payload = decodeJwtPayload(tokens.access);
   const subject = typeof payload?.sub === "string" ? payload.sub : null;
   if (!subject) return { ok: false, error: "expired_flow" };
-  const user = findUserByAuthSubject(db, subject);
+  const user = await identity.findUserByAuthSubject(subject);
   if (!user) {
     // Hosted open registration (docs/auth-api.md): a verified identity whose
     // CRM user is not provisioned yet holds an UNPROVISIONED session — the
@@ -315,7 +311,7 @@ function sessionFromTokens(db: Db, tokens: { access: string; refresh: string }):
     const props = (payload as { properties?: { email?: unknown } } | null)?.properties;
     const email = typeof props?.email === "string" ? props.email : null;
     if (process.env.MCPSUITE_AUTH_SIGNUP_URL?.trim() && email) {
-      const { token, expiresAt } = createSession(db, null, {
+      const { token, expiresAt } = await identity.createSession(null, {
         authSubject: subject,
         authRefresh: tokens.refresh,
         email,
@@ -327,13 +323,13 @@ function sessionFromTokens(db: Db, tokens: { access: string; refresh: string }):
   // The success callback binds/activates before tokens are issued, so an
   // unknown-but-bound subject state means the user changed in between.
   if (user.status !== "active") return { ok: false, error: "account_disabled" };
-  const { token, expiresAt } = createSession(db, user.id, { authSubject: subject, authRefresh: tokens.refresh });
+  const { token, expiresAt } = await identity.createSession(user.id, { authSubject: subject, authRefresh: tokens.refresh });
   return {
     ok: true,
     sessionToken: token,
     expiresAt,
     userId: user.id,
-    mustChangePassword: userMustChangePassword(db, user.id),
+    mustChangePassword: await identity.passwordMustChange(user.workspaceId, user.id),
   };
 }
 
@@ -421,7 +417,7 @@ function json(body: unknown, status = 200, headers: Record<string, string> = {})
  * OpenAuth issuer with the mount prefix stripped (issuer-internal redirect
  * Locations re-prefixed on the way out).
  */
-export async function handleAuthRequest(db: Db, request: Request): Promise<Response> {
+export async function handleAuthRequest(identity: IdentityStore, request: Request): Promise<Response> {
   const url = new URL(request.url);
   const sub = url.pathname.slice(MOUNT.length) || "/";
   const method = request.method.toUpperCase();
@@ -433,7 +429,7 @@ export async function handleAuthRequest(db: Db, request: Request): Promise<Respo
     if (!body.email || !body.password) {
       return json({ ok: false, error: { code: "validation", message: "email and password are required" } }, 400);
     }
-    const result = await performPasswordLogin(db, { email: body.email, password: body.password });
+    const result = await performPasswordLogin(identity, { email: body.email, password: body.password });
     if (!result.ok) {
       return json({ ok: false, error: { code: result.error, message: LOGIN_ERROR_MESSAGES[result.error] } }, 401);
     }
@@ -448,9 +444,9 @@ export async function handleAuthRequest(db: Db, request: Request): Promise<Respo
     const code = url.searchParams.get("code");
     if (!code) return redirect(withParams("/login", { error: url.searchParams.get("error") ?? "expired_flow" }));
     // The browser flow must have started with this exact redirect_uri.
-    const tokens = await exchangeCode(db, code, `${externalOrigin(request)}${MOUNT}/callback`);
+    const tokens = await exchangeCode(identity, code, `${externalOrigin(request)}${MOUNT}/callback`);
     if (!tokens) return redirect("/login?error=expired_flow");
-    const result = sessionFromTokens(db, tokens);
+    const result = await sessionFromTokens(identity, tokens);
     if (!result.ok) return redirect(`/login?error=${result.error}`);
     const signupUrl = process.env.MCPSUITE_AUTH_SIGNUP_URL?.trim();
     const location = result.unprovisioned
@@ -485,7 +481,7 @@ export async function handleAuthRequest(db: Db, request: Request): Promise<Respo
         400,
       );
     }
-    const outcome = await redeemAuthCodeAndSetPassword(db, {
+    const outcome = await identity.redeemCodeAndSetPassword({
       email: body.email,
       purpose,
       code: body.code,
@@ -506,7 +502,17 @@ export async function handleAuthRequest(db: Db, request: Request): Promise<Respo
 
   if (sub === "/logout" && method === "POST") {
     const token = cookieValue(request.headers.get("cookie"), SESSION_COOKIE);
-    if (token) destroySession(db, token); // also revokes the OpenAuth refresh token
+    try {
+      if (token) await identity.destroySession(token); // also revokes the OpenAuth refresh token
+    } catch (error) {
+      // Still clear the cookie; report the failure instead of a bare 500.
+      console.error("[mcpsuite] logout could not delete the session:", error);
+      return json(
+        { ok: false, error: { code: "logout_failed", message: "Signed out here, but the session could not be ended" } },
+        500,
+        { "set-cookie": clearedSessionCookie(request) },
+      );
+    }
     return json({ ok: true }, 200, { "set-cookie": clearedSessionCookie(request) });
   }
 
@@ -514,7 +520,7 @@ export async function handleAuthRequest(db: Db, request: Request): Promise<Respo
 
   const stripped = new URL(request.url);
   stripped.pathname = sub;
-  const response = await getAuthApp(db).fetch(
+  const response = await getAuthApp(identity).fetch(
     new Request(stripped.toString(), {
       method: request.method,
       headers: request.headers,
@@ -535,8 +541,8 @@ export async function handleAuthRequest(db: Db, request: Request): Promise<Respo
 }
 
 /** For tests: the session a request's cookie resolves to. */
-export function sessionFromRequest(db: Db, request: Request) {
-  return resolveSession(db, cookieValue(request.headers.get("cookie"), SESSION_COOKIE));
+export function sessionFromRequest(identity: IdentityStore, request: Request) {
+  return identity.resolveSession(cookieValue(request.headers.get("cookie"), SESSION_COOKIE));
 }
 
 /** Test seam: reset the per-process issuer cache (fresh DB per test). */

@@ -26,7 +26,6 @@
  */
 import {
   buildCatalog,
-  runOperation,
   type Catalog,
   type OpResult,
   type Ports,
@@ -36,7 +35,9 @@ import { getDb, openDatabase, resolveDbPath, type Db } from "./connection.ts";
 import { createPorts } from "./repositories.ts";
 import { bootstrap, type BootstrapResult } from "./bootstrap.ts";
 import { authServices, csvServices } from "./services.ts";
-import { passwordChangeRequiredResult, userMustChangePassword } from "./auth.ts";
+import type { IdentityStore } from "./identity.ts";
+import { createSqliteIdentity } from "./sqlite-identity.ts";
+import { runGated } from "./gated-run.ts";
 
 /**
  * The narrow adapter-independent surface: what every caller may rely on no
@@ -47,13 +48,15 @@ export interface RuntimeCore {
   adapter: "sqlite" | "postgres";
   catalog: Catalog;
   portsFor(workspaceId: string): Ports;
+  /** Sign-in, sessions, codes, MCP keys and the request gates (./identity.ts). */
+  identity: IdentityStore;
   run(ctx: RequestContext, operation: string, input: unknown): Promise<OpResult>;
 }
 
 /**
- * The SQLite runtime. Extras over RuntimeCore: the raw handle (the
- * credential/session/hosted-access helpers in auth.ts and hosting-access.ts
- * are SQLite-typed) and the first-run bootstrap result.
+ * The SQLite runtime. Extras over RuntimeCore: the raw handle (for the
+ * SQLite-only scripts, hosting control and tests; the apps use
+ * `identity` and `portsFor`) and the first-run bootstrap result.
  */
 export interface Runtime extends RuntimeCore {
   adapter: "sqlite";
@@ -90,23 +93,16 @@ export function createRuntime(db: Db = getDb()): Runtime {
         `[mcpsuite] One-time setup code: ${bootstrapResult.ownerSetupCode}\n`,
     );
   }
+  const identity = createSqliteIdentity(db);
+  const portsFor = (workspaceId: string) => createPorts(db, workspaceId);
   return {
     adapter: "sqlite",
     db,
     catalog,
     bootstrapResult,
-    portsFor: (workspaceId: string) => createPorts(db, workspaceId),
-    async run(ctx, operation, input) {
-      // Forced password change (docs/issues/0022 addendum): while set, the op
-      // layer refuses every catalog operation — for the user's own sessions
-      // AND for agents acting on their behalf — with a stable typed error.
-      // Password change, logout and whoami are not catalog operations, so
-      // they stay reachable. Mirrors the workspace_locked gate pattern.
-      if (ctx.userId && userMustChangePassword(db, ctx.userId)) {
-        return passwordChangeRequiredResult();
-      }
-      return runOperation(catalog, this.portsFor(ctx.workspaceId), ctx, operation, input);
-    },
+    identity,
+    portsFor,
+    run: (ctx, operation, input) => runGated(catalog, identity, portsFor, ctx, operation, input),
   };
 }
 
@@ -196,6 +192,7 @@ async function createHostedRuntime(databaseUrl: string, pingTimeoutMs: number): 
     adapter: "postgres",
     catalog: pg.catalog,
     portsFor: pg.portsFor,
+    identity: pg.identity,
     run: pg.run,
     close: () => pg.close(),
   };

@@ -10,39 +10,16 @@ import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodRawShape } from "zod";
 import type { z } from "zod";
 import type { OperationDef, OpResult, RequestContext } from "@mcpsuite/core";
-import {
-  resolveWorkspaceAccess,
-  WORKSPACE_LOCKED_MESSAGE,
-  workspaceLockedResult,
-  type AnyRuntime,
-  type Runtime,
-} from "@mcpsuite/db";
+import { WORKSPACE_LOCKED_MESSAGE, workspaceLockedResult, type AnyRuntime } from "@mcpsuite/db";
 
 export const SERVER_INFO = { name: "mcpsuite-crm", version: "0.1.0" } as const;
-
-/**
- * Both MCP transports authenticate API keys and read the hosted-access lock
- * from the SQLite store (auth.ts / hosting-access.ts are SQLite-typed), so a
- * DATABASE_URL that selects another adapter cannot serve MCP yet: fail at
- * startup with a clear stderr message instead of refusing every request.
- */
-export function requireSqliteRuntime(runtime: AnyRuntime, transport: string): Runtime {
-  if (runtime.adapter !== "sqlite") {
-    console.error(
-      `[mcpsuite-mcp] The MCP ${transport} transport requires the SQLite adapter (DATABASE_URL unset or file:); ` +
-        `DATABASE_URL selected "${runtime.adapter}". API keys and workspace access state resolve from the SQLite store.`,
-    );
-    process.exit(1);
-  }
-  return runtime;
-}
 
 // ---------------------------------------------------------------------------
 // Hosted access gate (packages/hosting-control/README.md read contract).
 // Key auth may succeed — identification is allowed — but a locked workspace
-// refuses every tool call and resource read. Checked per call so long-lived
-// transports (stdio) pick up lock/unlock without a restart; self-host
-// databases (no hc_workspace_access table) always resolve as active.
+// refuses every tool call and resource read. Checked per call, through the
+// runtime's identity store, so long-lived transports (stdio) pick up
+// lock/unlock without a restart; self-host always resolves as active.
 // ---------------------------------------------------------------------------
 
 /** JSON-RPC error code for a locked workspace (implementation-defined range). */
@@ -50,8 +27,8 @@ export const WORKSPACE_LOCKED_RPC_CODE = -32003;
 
 const WORKSPACE_LOCKED_RPC_MESSAGE = `workspace_locked: ${WORKSPACE_LOCKED_MESSAGE}`;
 
-function workspaceLocked(runtime: Runtime, ctx: RequestContext): boolean {
-  return resolveWorkspaceAccess(runtime.db, ctx.workspaceId).mode === "locked";
+async function workspaceLocked(runtime: AnyRuntime, ctx: RequestContext): Promise<boolean> {
+  return (await runtime.identity.workspaceAccess(ctx.workspaceId)).mode === "locked";
 }
 
 function lockedMcpError(): McpError {
@@ -133,7 +110,7 @@ export function toolName(operationName: string): string {
   return operationName.replace(/\./g, "_");
 }
 
-export function createMcpServer(runtime: Runtime, ctx: RequestContext): McpServer {
+export function createMcpServer(runtime: AnyRuntime, ctx: RequestContext): McpServer {
   const server = new McpServer(SERVER_INFO, {
     instructions:
       "mcpsuite CRM — agent-native sales CRM. Naming: engagements are outreach leads; deals carry money. " +
@@ -155,12 +132,12 @@ export function createMcpServer(runtime: Runtime, ctx: RequestContext): McpServe
  * pipeline/stage config, saved views, pending approvals, and per-record
  * context bundles. Reads go through the catalog so scopes still apply.
  */
-function registerResources(server: McpServer, runtime: Runtime, ctx: RequestContext): void {
+function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestContext): void {
   const json = (uri: string, data: unknown) => ({
     contents: [{ uri, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
   });
   const runOrThrow = async (name: string, input: Record<string, unknown> = {}): Promise<unknown> => {
-    if (workspaceLocked(runtime, ctx)) throw lockedMcpError();
+    if (await workspaceLocked(runtime, ctx)) throw lockedMcpError();
     const result = await runtime.run(ctx, name, input);
     if (result.status !== "ok") {
       throw new Error(result.status === "error" ? `${result.error.code}: ${result.error.message}` : result.message);
@@ -176,8 +153,8 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
       description: "Every operation this CRM exposes: name, risk category, required scope/role.",
       mimeType: "application/json",
     },
-    (uri) => {
-      if (workspaceLocked(runtime, ctx)) throw lockedMcpError();
+    async (uri) => {
+      if (await workspaceLocked(runtime, ctx)) throw lockedMcpError();
       return json(
         uri.href,
         [...runtime.catalog.values()].map((op) => ({
@@ -242,7 +219,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
       mimeType: "application/json",
     },
     async (uri, variables) => {
-      if (workspaceLocked(runtime, ctx)) throw lockedMcpError();
+      if (await workspaceLocked(runtime, ctx)) throw lockedMcpError();
       const type = String(variables.type ?? "");
       const opName = CONTEXT_OPS[type];
       if (!opName) throw new Error(`Unknown context type "${type}" (use company|person|engagement|deal)`);
@@ -251,7 +228,7 @@ function registerResources(server: McpServer, runtime: Runtime, ctx: RequestCont
   );
 }
 
-function registerTool(server: McpServer, runtime: Runtime, ctx: RequestContext, op: OperationDef): void {
+function registerTool(server: McpServer, runtime: AnyRuntime, ctx: RequestContext, op: OperationDef): void {
   const objectSchema = op.input as unknown as z.ZodObject<ZodRawShape>;
   const shape: ZodRawShape = typeof objectSchema.shape === "object" ? objectSchema.shape : {};
   server.registerTool(
@@ -264,7 +241,7 @@ function registerTool(server: McpServer, runtime: Runtime, ctx: RequestContext, 
     async (args: Record<string, unknown>) => {
       // Locked workspaces answer with the same catalog error envelope agents
       // already understand; the operation is never executed.
-      if (workspaceLocked(runtime, ctx)) return toText(workspaceLockedResult());
+      if (await workspaceLocked(runtime, ctx)) return toText(workspaceLockedResult());
       return toText(await runtime.run(ctx, op.name, args ?? {}));
     },
   );

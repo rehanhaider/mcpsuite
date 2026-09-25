@@ -224,7 +224,9 @@ come from admin/owner action (or bootstrap).
 ### `POST /api/auth/logout`
 
 Deletes the session row, revokes the session's OpenAuth refresh token, clears
-the cookie. `200 {"ok":true}`. (The TanStack `logout` server fn does the same
+the cookie. `200 {"ok":true}`. If the session cannot be deleted (for example the
+database is unavailable) the cookie is still cleared and the answer is
+`500 {"ok":false,"error":{"code":"logout_failed",…}}`. (The TanStack `logout` server fn does the same
 for the app UI.)
 
 ## Session cookie

@@ -10,9 +10,10 @@
  *   equivalent of `SET LOCAL app.workspace_id`. It evaporates at
  *   COMMIT/ROLLBACK, so pooled connections cannot leak context. Reads are not
  *   exempt: there is no query path outside this wrapper.
- * - Nested calls (ports.tx(...), or port methods invoking other port methods)
- *   join the ambient transaction via AsyncLocalStorage and cannot replace its
- *   workspace.
+ * - Nested calls (ports.tx(...), port methods invoking other port methods,
+ *   another Ports object, or the identity store) join the ambient
+ *   transaction via one AsyncLocalStorage per database (./tx.ts) and cannot
+ *   replace its workspace.
  * - Row-level security (schema.sql) enforces the same predicate
  *   independently; this adapter STILL writes an explicit workspace predicate
  *   into every query and subquery — two independent layers, per the doc.
@@ -43,8 +44,7 @@
  *   inside the same workspace transaction as the triggering mutation
  *   (disable-revocation and permanent user deletion per docs/issues/0022).
  */
-import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
@@ -100,7 +100,8 @@ import {
   type WorkspaceSettings,
 } from "@mcpsuite/core";
 import * as t from "./schema.ts";
-import { generateAuthCode, normalizeAuthCode } from "../openauth.ts";
+import { inPgNestedTransaction, inPgTransaction } from "./tx.ts";
+import { createPgIdentity } from "./identity.ts";
 
 // ---------------------------------------------------------------------------
 // Async port surface
@@ -298,10 +299,6 @@ const pgErrorCode = (e: unknown): string | undefined => {
   return undefined;
 };
 
-const sha256Hex = (value: string): string => createHash("sha256").update(value).digest("hex");
-
-/** Single-use code lifetimes: invites are handed over out-of-band (long), resets are hot (short). */
-const AUTH_CODE_TTL_MS = { setup: 7 * 86_400_000, reset: 3_600_000 } as const;
 
 // ---------------------------------------------------------------------------
 // Row mappers (Date -> ISO string, jsonb passes through)
@@ -528,20 +525,13 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
   const ws = uid(workspaceId);
 
   /**
-   * The ambient workspace transaction. Entering `run` outside a transaction
-   * opens one and installs the workspace GUC before anything else; entering
-   * it inside one joins it (and cannot change its workspace).
+   * The ambient workspace transaction (./tx.ts). Entering `run` outside a
+   * transaction opens one and installs the workspace GUC before anything
+   * else; entering it inside one joins it — including a transaction opened by
+   * another Ports object or by the identity store — and binds or checks its
+   * workspace (a transaction can never change workspaces).
    */
-  const als = new AsyncLocalStorage<PgDb>();
-  const run = async <T>(fn: (x: PgDb) => Promise<T>): Promise<T> => {
-    const ambient = als.getStore();
-    if (ambient) return fn(ambient);
-    return db.transaction(async (txx) => {
-      const x = txx as unknown as PgDb;
-      await x.execute(sql`select set_config('app.workspace_id', ${ws}, true)`);
-      return als.run(x, () => fn(x));
-    });
-  };
+  const run = <T>(fn: (x: PgDb) => Promise<T>): Promise<T> => inPgTransaction(db, ws, fn);
 
   /** Normalized raw-SQL rows (node-postgres returns a QueryResult). */
   const execRows = async <T = Record<string, unknown>>(x: PgDb, q: SQL): Promise<T[]> => {
@@ -959,30 +949,12 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
 
   const credentialsPort: AsyncPort<Ports["credentials"]> = {
     async issueCode(userId, purpose) {
-      if (purpose !== "setup" && purpose !== "reset") {
-        throw OpError.validation(`Unknown credential code purpose: ${String(purpose)}`);
-      }
-      return run(async (x) => {
-        // Same display format and normalized-hash form as the SQLite adapter
-        // (packages/db/src/openauth.ts) so codes redeem identically on every
-        // surface: XXXX-XXXX-XXXX shown once, SHA-256(normalized) at rest.
-        const code = generateAuthCode();
-        const expiresAt = new Date(Date.now() + AUTH_CODE_TTL_MS[purpose]);
-        // Workspace-guarded definer function: stores only the hash, deletes
-        // the user's earlier codes of this purpose, NULL when the user is not
-        // in this workspace (or disabled) — indistinguishable from random ids.
-        const rows = await execRows<{ id: string | null }>(
-          x,
-          sql`SELECT crm.issue_auth_code(${uid(userId)}::uuid, ${purpose}, ${sha256Hex(normalizeAuthCode(code))}, ${expiresAt.toISOString()}::timestamptz) AS id`,
-        );
-        if (!rows[0]?.id) throw OpError.notFound("user", userId);
-        if (purpose === "reset") {
-          // user.resetPassword contract: issuing a reset code ends every
-          // session, in the same transaction.
-          await execRows(x, sql`SELECT crm.delete_user_sessions(${uid(userId)}::uuid)`);
-        }
-        return { code };
-      });
+      // One code-issuing path for this adapter (./identity.ts): same display
+      // format and hash as SQLite, the per-email issue rate limit, and for
+      // `reset` ending the user's sessions and revoking their refresh tokens.
+      // It joins the operation's transaction (same workspace).
+      const { code } = await createPgIdentity(db).issueCode(ws, userId, purpose);
+      return { code };
     },
     async mustChangePassword(userId, mustChange) {
       await run(async (x) => {
@@ -3054,7 +3026,9 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
 
   // TS cannot relate T to Awaited<T> for an unconstrained generic across the
   // run() boundary; the runtime shape is exactly the declared surface.
-  const tx = ((fn: () => unknown) => run(async () => await fn())) as PgPorts["tx"];
+  // Explicit ports.tx: nested inside an open transaction it runs in a
+  // savepoint, so an error the caller catches does not abort the rest (./tx.ts).
+  const tx = ((fn: () => unknown) => inPgNestedTransaction(db, ws, async () => await fn())) as PgPorts["tx"];
 
   return {
     workspace: workspacePort,

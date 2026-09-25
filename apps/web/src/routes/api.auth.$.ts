@@ -10,15 +10,7 @@ import { handleAuthRequest } from "~/server/auth-issuer.ts";
 
 async function handle(request: Request): Promise<Response> {
   const runtime = await getRuntimeAsync();
-  if (runtime.adapter !== "sqlite") {
-    // The PostgreSQL adapter's issuer storage lands with the hosted identity
-    // stream; until then this surface only exists on SQLite deployments.
-    return Response.json(
-      { ok: false, error: { code: "unavailable", message: "Authentication is not available on this deployment" } },
-      { status: 501 },
-    );
-  }
-  return handleAuthRequest(runtime.db, request);
+  return handleAuthRequest(runtime.identity, request);
 }
 
 export const Route = createFileRoute("/api/auth/$")({

@@ -85,4 +85,19 @@ export {
   WORKSPACE_LOCKED_MESSAGE,
   type WorkspaceAccess,
 } from "./hosting-access.ts";
+export type { IdentityStore, IdentityTestHooks, IdentityUserRef } from "./identity.ts";
+export { createSqliteIdentity } from "./sqlite-identity.ts";
+export type { SeededPgWorkspace } from "./pg/seed.ts";
+
+/**
+ * Seed a PostgreSQL workspace with an owner and a setup code (./pg/seed.ts).
+ * Loaded lazily: the SQLite default never loads the PostgreSQL modules.
+ */
+export async function seedPgWorkspaceWithOwner(
+  databaseUrl: string,
+  input: { workspaceName: string; ownerEmail: string; ownerName: string },
+): Promise<import("./pg/seed.ts").SeededPgWorkspace> {
+  const { seedPgWorkspaceWithOwner: seed } = await import("./pg/seed.ts");
+  return seed(databaseUrl, input);
+}
 export * as schema from "./schema.ts";

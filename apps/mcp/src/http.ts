@@ -16,14 +16,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { getRuntimeAsync } from "@mcpsuite/db";
 import { handleMcpRequest } from "./handler.ts";
-import { requireSqliteRuntime } from "./server.ts";
 
 const PORT = Number(process.env.MCP_PORT ?? 8765);
 const HOST = process.env.MCP_HOST ?? "127.0.0.1";
 
 // DATABASE_URL adapter selection happens inside getRuntimeAsync (unset ->
-// SQLite default, file: -> SQLite at that path); Bearer auth needs SQLite.
-const runtime = requireSqliteRuntime(await getRuntimeAsync(), "HTTP");
+// SQLite default, file: -> SQLite at that path, postgresql:// -> PostgreSQL);
+// Bearer keys resolve through the runtime's identity store on every adapter.
+const runtime = await getRuntimeAsync();
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));

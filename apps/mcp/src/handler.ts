@@ -15,7 +15,7 @@
  * Stateless mode: a fresh McpServer + transport per request, no session ids.
  */
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { mcpContext, resolveMcpToken, resolveWorkspaceAccess, type AnyRuntime, type Runtime } from "@mcpsuite/db";
+import { mcpContext, type AnyRuntime } from "@mcpsuite/db";
 import type { RequestContext } from "@mcpsuite/core";
 import { createMcpServer, lockedRpcRejection } from "./server.ts";
 
@@ -26,10 +26,10 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
   });
 }
 
-function resolveContext(request: Request, runtime: Runtime): RequestContext | null {
+async function resolveContext(request: Request, runtime: AnyRuntime): Promise<RequestContext | null> {
   const header = request.headers.get("authorization");
   if (header?.startsWith("Bearer ")) {
-    const client = resolveMcpToken(runtime.db, header.slice("Bearer ".length).trim());
+    const client = await runtime.identity.resolveMcpToken(header.slice("Bearer ".length).trim());
     return client ? mcpContext(client) : null;
   }
   return null;
@@ -57,18 +57,7 @@ export async function handleMcpRequest(request: Request, runtime: AnyRuntime): P
       return json(405, { error: "method_not_allowed" }, { allow: "POST" });
     }
 
-    if (runtime.adapter !== "sqlite") {
-      // Bearer API keys and workspace access state resolve from the SQLite
-      // store (same constraint as requireSqliteRuntime). A hosted deployment
-      // on another adapter runs the standalone MCP process instead of this
-      // in-process mount — answer clearly instead of crashing.
-      return json(501, {
-        error: "mcp_unavailable",
-        message: "This deployment does not serve MCP in-process; it requires the SQLite runtime.",
-      });
-    }
-
-    const ctx = resolveContext(request, runtime);
+    const ctx = await resolveContext(request, runtime);
     if (!ctx) {
       return json(401, {
         error: "unauthorized",
@@ -81,7 +70,7 @@ export async function handleMcpRequest(request: Request, runtime: AnyRuntime): P
     // Hosted access gate: the key identified a client (auth succeeded), but a
     // locked workspace refuses tool calls and resource reads at the JSON-RPC
     // layer. Handshake and listing methods still pass through.
-    if (resolveWorkspaceAccess(runtime.db, ctx.workspaceId).mode === "locked") {
+    if ((await runtime.identity.workspaceAccess(ctx.workspaceId)).mode === "locked") {
       const rejection = lockedRpcRejection(body);
       if (rejection) return json(200, rejection);
     }

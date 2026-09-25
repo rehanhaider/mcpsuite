@@ -10,8 +10,8 @@
  *     -H "content-type: application/json" \
  *     -H "accept: application/json, text/event-stream" -d '…'
  *
- * On a non-SQLite runtime (hosted Postgres) the handler answers a clear 501
- * JSON error — hosted deployments run the standalone MCP process instead.
+ * Keys and the workspace lock resolve through the runtime's identity store,
+ * so this works on every database adapter.
  */
 import { createFileRoute } from "@tanstack/react-router";
 import { getRuntimeAsync } from "@mcpsuite/db";

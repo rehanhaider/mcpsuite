@@ -5,15 +5,11 @@
  * (`provisionPgWorkspace`), never on process boot — a fresh hosted deployment
  * legitimately starts with zero workspaces.
  */
-import {
-  buildCatalog,
-  runOperation,
-  type Catalog,
-  type OpResult,
-  type Ports,
-  type RequestContext,
-} from "@mcpsuite/core";
+import { buildCatalog, type Catalog, type OpResult, type Ports, type RequestContext } from "@mcpsuite/core";
 import { authServices, csvServices } from "../services.ts";
+import { runGated } from "../gated-run.ts";
+import type { IdentityStore } from "../identity.ts";
+import { createPgIdentity } from "./identity.ts";
 import {
   connectPg,
   createPgPorts,
@@ -25,6 +21,7 @@ export interface PgRuntime {
   handle: PgHandle;
   catalog: Catalog;
   portsFor(workspaceId: string): Ports;
+  identity: IdentityStore;
   run(ctx: RequestContext, operation: string, input: unknown): Promise<OpResult>;
   close(): Promise<void>;
 }
@@ -34,11 +31,14 @@ export async function createPgRuntime(options: PgConnectOptions): Promise<PgRunt
   const catalog = buildCatalog({ auth: authServices, csv: csvServices });
   // PgPorts is structurally assignable to the async Ports contract.
   const portsFor = (workspaceId: string) => createPgPorts(handle.db, workspaceId) as unknown as Ports;
+  const identity = createPgIdentity(handle.db);
   return {
     handle,
     catalog,
     portsFor,
-    run: (ctx, operation, input) => runOperation(catalog, portsFor(ctx.workspaceId), ctx, operation, input),
+    identity,
+    // Same forced-password-change gate as the SQLite runtime.
+    run: (ctx, operation, input) => runGated(catalog, identity, portsFor, ctx, operation, input),
     close: () => handle.close(),
   };
 }
