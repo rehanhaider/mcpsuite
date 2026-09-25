@@ -66,6 +66,7 @@ import {
 import type { Db } from "./connection.ts";
 import * as t from "./schema.ts";
 import { endUserSessions, issueAuthCode, removeOpenAuthCredential, invalidateSubjectRefreshTokens } from "./openauth.ts";
+import { withTransaction } from "./sqlite-tx.ts";
 
 type Row<T> = T extends { $inferSelect: infer R } ? R : never;
 
@@ -81,13 +82,6 @@ function json<T>(value: string | null | undefined, fallback: T): T {
 function bool(v: number | boolean): boolean {
   return v === 1 || v === true;
 }
-
-/**
- * One promise-chain lock per SQLite connection: serializes top-level
- * transactions across all Ports instances sharing that connection.
- * See the transaction section at the bottom of createPorts.
- */
-const txLock = new WeakMap<object, Promise<void>>();
 
 // ---------------------------------------------------------------------------
 // Row mappers
@@ -2488,47 +2482,22 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   //   1. Every port method in this adapter is async-signature but internally
   //      synchronous — awaits between statements only yield microtasks, never
   //      real I/O, so a transaction still completes promptly.
-  //   2. txLock (per database connection, module scope) serializes top-level
-  //      transactions. The fully-sync adapter serialized them implicitly by
-  //      blocking the event loop; with async handlers two in-flight requests
-  //      could otherwise interleave BEGINs on the shared connection.
+  //   2. The connection lock in ./sqlite-tx.ts serializes top-level units of
+  //      work. The fully-sync adapter serialized them implicitly by blocking
+  //      the event loop; with async handlers two in-flight requests could
+  //      otherwise interleave BEGINs on the shared connection.
   //
-  // Nested tx() calls join the outer transaction, exactly as before (the
-  // depth counter is per-Ports instance; a request runs on one instance, so
-  // its nested calls see depth > 0 while other requests queue on txLock).
+  // Nested tx() calls join the outer transaction. Nesting is scoped to the
+  // request's async call chain (one AsyncLocalStorage per connection, shared
+  // with the identity store), so a nested call through a different Ports
+  // instance or through the identity store joins too, while other requests
+  // queue on the lock.
   //
   // Async-capable adapters (e.g. a future Postgres one) should NOT copy this
   // shape — they can use real client transactions (BEGIN…COMMIT on a
   // dedicated connection, awaits welcome) behind the same port signature.
 
-  let txDepth = 0;
-  const tx = async <T>(fn: () => Promise<T>): Promise<T> => {
-    if (txDepth > 0) return fn(); // nested: join the outer transaction
-    const previous = txLock.get(sqlite) ?? Promise.resolve();
-    let release!: () => void;
-    txLock.set(
-      sqlite,
-      new Promise<void>((resolve) => {
-        release = resolve;
-      }),
-    );
-    await previous;
-    txDepth++;
-    try {
-      sqlite.exec("BEGIN");
-      try {
-        const result = await fn();
-        sqlite.exec("COMMIT");
-        return result;
-      } catch (e) {
-        if (sqlite.inTransaction) sqlite.exec("ROLLBACK");
-        throw e;
-      }
-    } finally {
-      txDepth--;
-      release();
-    }
-  };
+  const tx = <T>(fn: () => Promise<T>): Promise<T> => withTransaction(sqlite, fn);
 
   return {
     workspace: workspacePort,
