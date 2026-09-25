@@ -10,9 +10,10 @@
  *   equivalent of `SET LOCAL app.workspace_id`. It evaporates at
  *   COMMIT/ROLLBACK, so pooled connections cannot leak context. Reads are not
  *   exempt: there is no query path outside this wrapper.
- * - Nested calls (ports.tx(...), or port methods invoking other port methods)
- *   join the ambient transaction via AsyncLocalStorage and cannot replace its
- *   workspace.
+ * - Nested calls (ports.tx(...), port methods invoking other port methods,
+ *   another Ports object, or the identity store) join the ambient
+ *   transaction via one AsyncLocalStorage per database (./tx.ts) and cannot
+ *   replace its workspace.
  * - Row-level security (schema.sql) enforces the same predicate
  *   independently; this adapter STILL writes an explicit workspace predicate
  *   into every query and subquery — two independent layers, per the doc.
@@ -43,7 +44,6 @@
  *   inside the same workspace transaction as the triggering mutation
  *   (disable-revocation and permanent user deletion per docs/issues/0022).
  */
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
@@ -101,6 +101,7 @@ import {
 } from "@mcpsuite/core";
 import * as t from "./schema.ts";
 import { generateAuthCode, normalizeAuthCode } from "../openauth.ts";
+import { inPgTransaction } from "./tx.ts";
 
 // ---------------------------------------------------------------------------
 // Async port surface
@@ -528,20 +529,13 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
   const ws = uid(workspaceId);
 
   /**
-   * The ambient workspace transaction. Entering `run` outside a transaction
-   * opens one and installs the workspace GUC before anything else; entering
-   * it inside one joins it (and cannot change its workspace).
+   * The ambient workspace transaction (./tx.ts). Entering `run` outside a
+   * transaction opens one and installs the workspace GUC before anything
+   * else; entering it inside one joins it — including a transaction opened by
+   * another Ports object or by the identity store — and binds or checks its
+   * workspace (a transaction can never change workspaces).
    */
-  const als = new AsyncLocalStorage<PgDb>();
-  const run = async <T>(fn: (x: PgDb) => Promise<T>): Promise<T> => {
-    const ambient = als.getStore();
-    if (ambient) return fn(ambient);
-    return db.transaction(async (txx) => {
-      const x = txx as unknown as PgDb;
-      await x.execute(sql`select set_config('app.workspace_id', ${ws}, true)`);
-      return als.run(x, () => fn(x));
-    });
-  };
+  const run = <T>(fn: (x: PgDb) => Promise<T>): Promise<T> => inPgTransaction(db, ws, fn);
 
   /** Normalized raw-SQL rows (node-postgres returns a QueryResult). */
   const execRows = async <T = Record<string, unknown>>(x: PgDb, q: SQL): Promise<T[]> => {

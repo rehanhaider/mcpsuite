@@ -136,6 +136,11 @@ export function normalizeEmail(email: string): string {
 const passwordKey = (email: string): string[] => ["email", normalizeEmail(email), "password"];
 const subjectKey = (email: string): string[] => ["email", normalizeEmail(email), "subject"];
 
+/** Joined storage key of an email's password credential. */
+export const authPasswordKey = (email: string): string => joinAuthKey(passwordKey(email));
+/** Joined storage key of an email's bound OpenAuth subject. */
+export const authSubjectKey = (email: string): string => joinAuthKey(subjectKey(email));
+
 /**
  * OpenAuth's default ScryptHasher output shape (provider/password.ts):
  * scrypt(password, salt, 32) with N=16384, r=8, p=1, base64-encoded. We write
@@ -435,9 +440,22 @@ export async function resolveAuthSuccess(
   email: string,
   opts: { openRegistration?: boolean } = {},
 ): Promise<AuthLinkResult> {
-  const normalized = normalizeEmail(email);
   let result: AuthLinkResult = { status: "not_invited" };
   atomically(db, () => {
+    result = bindAuthSuccessSync(db, email, opts);
+  });
+  return result;
+}
+
+/**
+ * The synchronous body of `resolveAuthSuccess`, for callers that already hold
+ * a transaction (the identity store runs it together with the email → subject
+ * record). Not atomic on its own.
+ */
+export function bindAuthSuccessSync(db: Db, email: string, opts: { openRegistration?: boolean } = {}): AuthLinkResult {
+  const normalized = normalizeEmail(email);
+  let result: AuthLinkResult = { status: "not_invited" };
+  (() => {
     const user = db.select().from(t.users).where(eq(t.users.email, normalized)).get();
     if (!user) {
       if (opts.openRegistration) {
@@ -478,7 +496,7 @@ export async function resolveAuthSuccess(
     const subject = `acct_${newId()}`;
     db.update(t.users).set({ authSubject: subject, status: "active", updatedAt: nowIso() }).where(eq(t.users.id, user.id)).run();
     result = { status: "linked", userId: user.id, subject };
-  });
+  })();
   return result;
 }
 
