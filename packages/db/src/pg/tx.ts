@@ -67,6 +67,29 @@ export function inPgTransaction<T>(db: PgDb, workspaceId: string | null, fn: (x:
 }
 
 /**
+ * An explicit nested transaction (`ports.tx` inside an open transaction). On
+ * PostgreSQL a failed statement aborts the whole transaction, so an error the
+ * caller catches would poison everything after it ("current transaction is
+ * aborted"). A savepoint scopes it: an error rolls back to the savepoint and
+ * the outer transaction carries on, which is what SQLite already does. The
+ * outermost call opens a transaction exactly as inPgTransaction.
+ */
+export function inPgNestedTransaction<T>(db: PgDb, workspaceId: string | null, fn: (x: PgDb) => Promise<T>): Promise<T> {
+  const store = storeFor(db);
+  const ambient = store.getStore();
+  if (!ambient) return inPgTransaction(db, workspaceId, fn);
+  return (async () => {
+    if (workspaceId !== null) await bindWorkspace(ambient, workspaceId);
+    return (ambient.x as unknown as { transaction<R>(f: (sp: unknown) => Promise<R>): Promise<R> }).transaction(
+      async (sp) => {
+        const scoped: Ambient = { x: sp as PgDb, workspaceId: ambient.workspaceId };
+        return store.run(scoped, () => fn(scoped.x));
+      },
+    );
+  })();
+}
+
+/**
  * Bind the call chain's open transaction to a workspace discovered part-way
  * through (after a code or key resolved it). Throws outside a transaction.
  */

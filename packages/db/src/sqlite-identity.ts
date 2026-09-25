@@ -5,8 +5,9 @@
  * ./hosting-access.ts without changing what they do, and adds the one thing
  * they lacked: every method runs as a unit of work on the shared connection
  * (./sqlite-tx.ts). A plain read or write waits for other requests'
- * transactions instead of executing inside one; a method with more than one
- * write runs in a transaction.
+ * transactions instead of executing inside one. Flows that read and then
+ * write run in a BEGIN IMMEDIATE transaction; session lookups, minting and
+ * logout run as plain statements, as before.
  *
  * Deliberate differences from calling those functions directly:
  *   - Code redemption is atomic: consuming the code, writing the credential,
@@ -55,11 +56,7 @@ export function createSqliteIdentity(db: Db, options: { hooks?: IdentityTestHook
   // withTransaction), so another process committing in between cannot fail
   // them with SQLITE_BUSY_SNAPSHOT.
   const atomic = <T>(fn: () => Promise<T>): Promise<T> => withTransaction(sqlite, fn, { immediate: true });
-  // Session lookups run on every authenticated request and almost always only
-  // read: a deferred transaction takes no write lock for a read, so other
-  // processes sharing the file keep writing. Writes (minting, logout, the rare
-  // adoption) take the lock only when they happen.
-  const atomicRead = <T>(fn: () => Promise<T>): Promise<T> => withTransaction(sqlite, fn);
+
 
   const rawKv = sqliteAuthKv(db);
   const authKv: AuthKvStore = {
@@ -83,15 +80,18 @@ export function createSqliteIdentity(db: Db, options: { hooks?: IdentityTestHook
     withTransaction: atomic,
 
     // --- sessions ---------------------------------------------------------
-    // createSession inserts, then sweeps expired rows; resolution may link
-    // and rewrite rows. Each runs as one (deferred) transaction.
-    createSession: (userId, link) => atomicRead(async () => createSession(db, userId, link)),
-    resolveSessionAny: (token) => atomicRead(async () => resolveSessionAny(db, token)),
+    // Session lookups run on every authenticated request. They run as plain
+    // statements (as before this adapter existed), each autocommitting and
+    // waiting through busy_timeout: no transaction holds the file's write lock
+    // for a read, and a write never needs to upgrade a read transaction,
+    // which SQLite refuses at once while another process holds the lock.
+    createSession: (userId, link) => unit(() => createSession(db, userId, link)),
+    resolveSessionAny: (token) => unit(() => resolveSessionAny(db, token)),
     async resolveSession(token) {
       const resolved = await identity.resolveSessionAny(token);
       return resolved && !isUnprovisionedSession(resolved) ? resolved : null;
     },
-    destroySession: (token) => atomicRead(async () => destroySession(db, token)),
+    destroySession: (token) => unit(() => destroySession(db, token)),
     endUserSessions: (workspaceId, userId) =>
       atomic(async () => {
         assertMember(workspaceId, userId);

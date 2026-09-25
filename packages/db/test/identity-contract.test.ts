@@ -10,8 +10,9 @@
  *
  * Without PG_TESTS the PostgreSQL half self-skips; the SQLite half always runs.
  */
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import Database from "better-sqlite3";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -602,6 +603,92 @@ for (const adapter of ADAPTERS) {
           if (other.inTransaction) other.exec("ROLLBACK");
           other.close();
         }
+      });
+
+      it("logout and session adoption wait out another process's write lock", { timeout: 20_000 }, async () => {
+        // SQLite only. A real second PROCESS takes the file's write lock and
+        // commits a write a moment later (as the MCP HTTP process or hosting
+        // control do). Logout and adoption must wait through busy_timeout and
+        // succeed.
+        //
+        // Limit: inside this test worker the variant that ran these methods in
+        // a deferred read-then-write transaction ALSO passes, although the same
+        // sequence fails with SQLITE_BUSY between two standalone processes (PR
+        // #6 review round 7). This test guards the waiting behaviour, not that
+        // regression.
+        if (!h.sqliteFile) return;
+        const holdWriteLock = async (ms: number): Promise<Promise<void>> => {
+          // The child signals through a marker file, polled synchronously here:
+          // pipe output reaches this test worker only after a delay as long as
+          // the hold itself, which would miss the window every time.
+          const marker = `${h.sqliteFile}.locked-${++seq}`;
+          const child = spawn(
+            process.execPath,
+            [
+              "-e",
+              `const D = require("better-sqlite3"); const db = new D(process.argv[1]);
+               db.exec("BEGIN IMMEDIATE");
+               db.prepare("UPDATE workspaces SET updated_at = ?").run(new Date().toISOString());
+               require("node:fs").writeFileSync(process.argv[3], "locked");
+               Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.argv[2]));
+               db.exec("COMMIT"); db.close();`,
+              h.sqliteFile!,
+              String(ms),
+              marker,
+            ],
+            { cwd: join(import.meta.dirname, ".."), stdio: ["ignore", "ignore", "inherit"] },
+          );
+          const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
+          const deadline = Date.now() + 10_000;
+          while (!existsSync(marker)) {
+            if (Date.now() > deadline) throw new Error("lock holder never took the lock");
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+          }
+          // Prove the lock is held right now, so the test can never silently miss the window.
+          const probe = new Database(h.sqliteFile!);
+          probe.pragma("busy_timeout = 0");
+          expect(() => probe.exec("BEGIN IMMEDIATE")).toThrow(/locked/);
+          probe.close();
+          return exited;
+        };
+
+        const user = await activeUser("xproc-logout");
+        const { token } = await identity.createSession(user.id);
+        expect(await identity.resolveSession(token)).not.toBeNull(); // logout has a row to delete
+        let released = await holdWriteLock(2000);
+        await identity.destroySession(token);
+        await released;
+        expect(await identity.resolveSession(token)).toBeNull();
+
+        const address = email("xproc-adopt");
+        const subject = `acct_xproc_${seq}`;
+        const { token: pending } = await identity.createSession(null, { email: address, authSubject: subject });
+        const created = await ports.users.create({ name: "Adopted", email: address, role: "member", passwordHash: null });
+        released = await holdWriteLock(2000);
+        const adopted = await identity.resolveSession(pending);
+        await released;
+        expect(adopted!.user.id).toBe(created.id);
+      });
+
+      it("an error caught inside a nested ports.tx does not abort the outer transaction", async () => {
+        // The approval flow does this: it runs the approved operation in a
+        // nested ports.tx, catches its error, and records the failure. On
+        // PostgreSQL a failed statement aborts the whole transaction unless
+        // the nested tx is a savepoint.
+        const user = await activeUser("nested-error");
+        const other = await pendingUser("nested-error-taken");
+        await ports.tx(async () => {
+          await ports.credentials.mustChangePassword(user.id, true);
+          await expect(
+            ports.tx(async () => {
+              // Duplicate email: a unique-index violation on PostgreSQL.
+              await ports.users.createPending({ email: other.email, name: "Dup", role: "member" });
+            }),
+          ).rejects.toMatchObject({ code: "conflict" });
+          await ports.credentials.mustChangePassword(other.id, true); // the outer transaction carries on
+        });
+        expect(await identity.passwordMustChange(h.workspaceId, user.id)).toBe(true);
+        expect(await identity.passwordMustChange(h.workspaceId, other.id)).toBe(true);
       });
 
       it("keeps requests apart: another request neither joins an open transaction nor lands in it", async () => {

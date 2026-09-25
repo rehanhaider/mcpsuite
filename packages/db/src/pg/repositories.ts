@@ -100,7 +100,7 @@ import {
   type WorkspaceSettings,
 } from "@mcpsuite/core";
 import * as t from "./schema.ts";
-import { inPgTransaction } from "./tx.ts";
+import { inPgNestedTransaction, inPgTransaction } from "./tx.ts";
 import { createPgIdentity } from "./identity.ts";
 
 // ---------------------------------------------------------------------------
@@ -3026,7 +3026,9 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
 
   // TS cannot relate T to Awaited<T> for an unconstrained generic across the
   // run() boundary; the runtime shape is exactly the declared surface.
-  const tx = ((fn: () => unknown) => run(async () => await fn())) as PgPorts["tx"];
+  // Explicit ports.tx: nested inside an open transaction it runs in a
+  // savepoint, so an error the caller catches does not abort the rest (./tx.ts).
+  const tx = ((fn: () => unknown) => inPgNestedTransaction(db, ws, async () => await fn())) as PgPorts["tx"];
 
   return {
     workspace: workspacePort,
