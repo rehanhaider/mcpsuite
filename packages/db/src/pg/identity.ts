@@ -316,6 +316,11 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
     resolveAuthSuccess: (email, opts = {}) =>
       inTx(null, async (x): Promise<AuthLinkResult> => {
         const normalized = normalizeEmail(email);
+        // One sign-in success per email at a time, as SQLite's connection lock
+        // gives: without it two simultaneous first sign-ins each mint a
+        // subject (open registration) and the later write wins. The lock is
+        // transaction-scoped, so it releases at commit or rollback.
+        await rows(x, sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mcpsuite:auth-success:${normalized}`}, 0))`);
         const [user] = await rows<{ user_id: string; workspace_id: string; status: string; subject_linked: boolean }>(
           x,
           sql`SELECT user_id, workspace_id, status, subject_linked FROM crm.resolve_auth_email(${normalized})`,
@@ -356,7 +361,7 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
             bound = await rows<{ id: string }>(
               x,
               sql`UPDATE crm.users SET auth_subject = ${minted}, status = 'active', updated_at = now()
-                  WHERE id = ${user.user_id}::uuid AND auth_subject IS NULL RETURNING id`,
+                  WHERE id = ${user.user_id}::uuid AND auth_subject IS NULL AND status <> 'disabled' RETURNING id`,
             );
           } catch (e) {
             if (pgErrorCode(e) === "23505") throw new OpError("conflict", "That login identity is already linked to another user");
@@ -365,9 +370,15 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
           if (bound.length === 1) {
             subject = minted;
           } else {
-            const existing = await subjectOf(x, user.user_id);
-            if (!existing) throw new OpError("conflict", "The account changed during sign-in — try again");
-            subject = existing;
+            // Changed since resolve_auth_email: bound by another sign-in, or
+            // disabled by an admin in between.
+            const [current] = await rows<{ status: string; auth_subject: string | null }>(
+              x,
+              sql`SELECT status, auth_subject FROM crm.users WHERE id = ${user.user_id}::uuid`,
+            );
+            if (current?.status === "disabled") return { status: "disabled" };
+            if (!current?.auth_subject) throw new OpError("conflict", "The account changed during sign-in — try again");
+            subject = current.auth_subject;
           }
         }
         await hooks.afterSubjectBound?.();

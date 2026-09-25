@@ -382,6 +382,21 @@ for (const adapter of ADAPTERS) {
         expect(await identity.emailForAuthSubject(subject)).toBe(user.email);
       });
 
+      it("mints one open-registration subject when two first sign-ins race", async () => {
+        // Ten races, each on a fresh email: one pair may happen not to overlap,
+        // ten in a row do not (unguarded, ~9 of 10 pairs minted two subjects).
+        for (let i = 0; i < 10; i += 1) {
+          const stranger = email("open-race");
+          const [a, b] = await Promise.all([
+            identity.resolveAuthSuccess(stranger, { openRegistration: true }),
+            identity.resolveAuthSuccess(stranger, { openRegistration: true }),
+          ]);
+          expect(a).toMatchObject({ status: "unprovisioned" });
+          expect(b).toEqual(a);
+          expect(await identity.emailForAuthSubject((a as { subject: string }).subject)).toBe(stranger);
+        }
+      });
+
       it("rejects unknown and disabled identities; open registration mints a stable subject", async () => {
         const stranger = email("stranger");
         expect(await identity.resolveAuthSuccess(stranger)).toEqual({ status: "not_invited" });
