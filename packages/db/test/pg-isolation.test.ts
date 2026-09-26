@@ -852,6 +852,21 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
       await tiny.close();
     }
   });
+
+  // Import matching lookups (issue #12). Last in the suite: it tags A's engagement.
+  it("import lookups: email match is case-insensitive and never crosses workspaces", async () => {
+    expect((await portsA.people.getByEmail(" ALPHA@People.Test "))?.id).toBe(A.personId);
+    expect(await portsB.people.getByEmail("alpha@people.test")).toBeNull();
+    expect(await portsA.people.getByEmail("nobody@people.test")).toBeNull();
+
+    await portsA.tags.apply(A.tagId, "engagement", A.engagementId);
+    const exact = { tagId: A.tagId, companyId: A.companyId, personId: A.personId };
+    expect((await portsA.engagements.findTagged(exact))?.id).toBe(A.engagementId);
+    // null matches only null: the same tag and company without the person is a different lead.
+    expect(await portsA.engagements.findTagged({ ...exact, personId: null })).toBeNull();
+    expect(await portsA.engagements.findTagged({ ...exact, tagId: B.tagId })).toBeNull();
+    expect(await portsB.engagements.findTagged(exact)).toBeNull();
+  });
 });
 
 describe.runIf(!enabled)("postgres workspace isolation (skipped)", () => {

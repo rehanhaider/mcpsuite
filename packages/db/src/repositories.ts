@@ -787,6 +787,15 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapPerson(row) : null;
     },
+    async getByEmail(email) {
+      const row = db
+        .select()
+        .from(t.people)
+        .where(and(eq(t.people.workspaceId, ws), sql`lower(${t.people.email}) = ${email.trim().toLowerCase()}`))
+        .orderBy(asc(t.people.createdAt), asc(t.people.id))
+        .get();
+      return row ? mapPerson(row) : null;
+    },
     async create(input) {
       const id = input.id ?? newId();
       const now = nowIso();
@@ -1135,6 +1144,22 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .select()
         .from(t.engagements)
         .where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.id, id)))
+        .get();
+      return row ? mapEngagement(row) : null;
+    },
+    async findTagged({ tagId, companyId, personId }) {
+      const row = db
+        .select()
+        .from(t.engagements)
+        .where(
+          and(
+            eq(t.engagements.workspaceId, ws),
+            companyId ? eq(t.engagements.companyId, companyId) : isNull(t.engagements.companyId),
+            personId ? eq(t.engagements.personId, personId) : isNull(t.engagements.personId),
+            tagCondition("engagement", sql`${t.engagements.id}`, [tagId]),
+          ),
+        )
+        .orderBy(asc(t.engagements.createdAt), asc(t.engagements.id))
         .get();
       return row ? mapEngagement(row) : null;
     },
