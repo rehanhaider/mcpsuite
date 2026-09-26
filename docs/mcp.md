@@ -172,6 +172,12 @@ A standalone MCP-only server still exists for split deployments and dev
   `mcpsuite://approvals/pending`, `mcpsuite://context/{type}/{id}`.
 - Rejected approvals carry the human's note back to the agent; pending ones
   execute with the stored input when approved.
+- HTTP clients that include `io.modelcontextprotocol/tasks` in the per-call
+  client capabilities receive a task handle for approval-gated tool calls.
+  Poll `tasks/get` for a link to the specific action in the web Approvals page
+  and later for the tool result. `tasks/update` only acknowledges the link;
+  approval or rejection still happens in the web UI. Clients without the
+  extension keep the existing `pendingApproval` tool result.
 
 ## Advanced: env-var setups (developing in this repo)
 

@@ -16,8 +16,133 @@
  */
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { mcpContext, type AnyRuntime } from "@mcpsuite/db";
-import type { RequestContext } from "@mcpsuite/core";
-import { createMcpServer, lockedRpcRejection } from "./server.ts";
+import type { ErrorPayload, OpResult, RequestContext } from "@mcpsuite/core";
+import type { PendingAction } from "@mcpsuite/core/domain";
+import { createMcpServer, lockedRpcRejection, toText } from "./server.ts";
+
+const TASKS_EXTENSION = "io.modelcontextprotocol/tasks";
+const POLL_INTERVAL_MS = 5000;
+// This 2025-11-25 SDK has no server/discover for the 2026-07-28 extension.
+// Stateless JSON-response HTTP has no stream for subscriptions/listen or
+// notifications/tasks; this adapter implements polling and cancellation.
+type RpcId = string | number;
+type PendingResult = Extract<OpResult, { status: "pending_approval" }>;
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function rpcId(value: unknown): value is RpcId {
+  return typeof value === "string" || typeof value === "number";
+}
+
+function taskOptIn(message: unknown): boolean {
+  const request = record(message);
+  if (request?.method !== "tools/call" || !rpcId(request.id)) return false;
+  const meta = record(record(request.params)?._meta);
+  const capabilities = record(meta?.["io.modelcontextprotocol/clientCapabilities"]);
+  const extensions = record(capabilities?.extensions);
+  return record(extensions?.[TASKS_EXTENSION]) !== null;
+}
+
+function rpcError(id: RpcId, message: string): object {
+  return { jsonrpc: "2.0", id, error: { code: -32602, message } };
+}
+
+function approvalUrl(taskId: string): string {
+  const base = process.env.MCPSUITE_BASE_URL?.trim() || "http://localhost:2222";
+  const url = new URL("/app/approvals", base);
+  url.searchParams.set("status", "pending");
+  url.searchParams.set("action", taskId);
+  return url.href;
+}
+
+function taskFields(pa: PendingAction, status: string, statusMessage?: string) {
+  return {
+    taskId: pa.id,
+    status,
+    ...(statusMessage ? { statusMessage } : {}),
+    createdAt: pa.requestedAt,
+    lastUpdatedAt: pa.reviewedAt ?? pa.requestedAt,
+    ttlMs: new Date(pa.expiresAt).getTime() - new Date(pa.requestedAt).getTime(),
+    pollIntervalMs: POLL_INTERVAL_MS,
+  };
+}
+
+function taskState(pa: PendingAction): object {
+  if (pa.status === "pending" && pa.expiresAt < new Date().toISOString()) {
+    return { ...taskFields(pa, "cancelled", "expired"), resultType: "complete" };
+  }
+  if (pa.status === "pending") {
+    const preview = pa.preview ? JSON.stringify(pa.preview) : "No preview available";
+    return {
+      ...taskFields(pa, "input_required", `This ${pa.riskCategory} operation needs human approval.`),
+      resultType: "complete",
+      inputRequests: {
+        approval: {
+          method: "elicitation/create",
+          params: {
+            mode: "url",
+            elicitationId: pa.id,
+            url: approvalUrl(pa.id),
+            message: `Approve ${pa.operation} (${pa.riskCategory}). Preview: ${preview}`,
+          },
+        },
+      },
+    };
+  }
+  if (pa.status === "approved") {
+    return { ...taskFields(pa, "completed"), resultType: "complete", result: toText({ status: "ok", data: pa.result?.data }) };
+  }
+  if (pa.status === "failed") {
+    const error = pa.result?.error as ErrorPayload | undefined;
+    return {
+      ...taskFields(pa, "completed"), resultType: "complete",
+      result: toText({ status: "error", error: error ?? { code: "internal", message: "Approved operation failed" } }),
+    };
+  }
+  if (pa.status === "rejected") {
+    const note = pa.reviewNote ? `: ${pa.reviewNote}` : "";
+    return {
+      ...taskFields(pa, "completed"), resultType: "complete",
+      result: toText({ status: "error", error: { code: "forbidden", message: `Rejected by reviewer${note}` } }),
+    };
+  }
+  return { ...taskFields(pa, "cancelled"), resultType: "complete" };
+}
+
+async function handleTaskRequest(
+  request: Record<string, unknown>, runtime: AnyRuntime, ctx: RequestContext,
+): Promise<Response> {
+  const id = request.id;
+  if (!rpcId(id)) return json(200, rpcError(0, "Invalid request id"));
+  const params = record(request.params);
+  const taskId = params?.taskId;
+  if (typeof taskId !== "string") return json(200, rpcError(id, "Invalid taskId"));
+  if (request.method === "tasks/update" && !record(params?.inputResponses)) {
+    return json(200, rpcError(id, "Invalid inputResponses"));
+  }
+
+  // The workspace-scoped port is a narrow owner read. Catalog pendingAction.get
+  // requires the approvals scope, which a task creator need not have.
+  const pa = await runtime.portsFor(ctx.workspaceId).pendingActions.get(taskId);
+  if (!pa || !ctx.clientId || pa.requestedByClientId !== ctx.clientId) {
+    return json(200, rpcError(id, "Unknown task"));
+  }
+
+  if (request.method === "tasks/get") return json(200, { jsonrpc: "2.0", id, result: taskState(pa) });
+  if (request.method === "tasks/cancel" && pa.status === "pending") {
+    const result = await runtime.run(ctx, "pendingAction.cancel", { id: taskId });
+    if (result.status === "error") {
+      // A review may have won the race after our read. Terminal tasks still ack.
+      const latest = await runtime.portsFor(ctx.workspaceId).pendingActions.get(taskId);
+      if (latest?.status === "pending") return json(200, rpcError(id, result.error.message));
+    }
+  }
+  // URL-mode approval happens in the web UI. inputResponses only acknowledges
+  // what the client saw; it never approves or rejects the stored action.
+  return json(200, { jsonrpc: "2.0", id, result: { resultType: "complete" } });
+}
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -75,7 +200,20 @@ export async function handleMcpRequest(request: Request, runtime: AnyRuntime): P
       if (rejection) return json(200, rejection);
     }
 
-    const server = createMcpServer(runtime, ctx);
+    const message = record(body);
+    if (message && (message.method === "tasks/get" || message.method === "tasks/update" || message.method === "tasks/cancel")) {
+      return await handleTaskRequest(message, runtime, ctx);
+    }
+
+    const optedIds = new Set<RpcId>();
+    for (const item of Array.isArray(body) ? body : [body]) {
+      if (taskOptIn(item)) optedIds.add(record(item)!.id as RpcId);
+    }
+    const pending = new Map<RpcId, PendingResult>();
+
+    const server = createMcpServer(runtime, ctx, (id, result) => {
+      if (optedIds.has(id)) pending.set(id, result);
+    });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless
       enableJsonResponse: true,
@@ -86,7 +224,31 @@ export async function handleMcpRequest(request: Request, runtime: AnyRuntime): P
       // result. An unparsable body stays undefined — the transport then fails
       // its own req.json() and answers the JSON-RPC parse error, matching the
       // historical node-transport behavior.
-      return await transport.handleRequest(request, body === undefined ? undefined : { parsedBody: body });
+      const response = await transport.handleRequest(request, body === undefined ? undefined : { parsedBody: body });
+      if (pending.size === 0) return response;
+
+      // The SDK validates CallToolResult and cannot be trusted to preserve an
+      // unknown extension result. Rewrite only the matching JSON-RPC result
+      // after its normal tool callback has executed runtime.run exactly once.
+      const payload = await response.json() as unknown;
+      const rewrite = async (value: unknown): Promise<unknown> => {
+        const rpc = record(value);
+        if (!rpc || !rpcId(rpc.id) || !record(rpc.result)) return value;
+        const approval = pending.get(rpc.id);
+        if (!approval) return value;
+        const pa = await runtime.portsFor(ctx.workspaceId).pendingActions.get(approval.pendingActionId);
+        if (!pa || pa.requestedByClientId !== ctx.clientId) return rpcError(rpc.id, "Unknown task");
+        return {
+          jsonrpc: "2.0", id: rpc.id,
+          result: { ...taskFields(pa, "input_required", approval.message), resultType: "task" },
+        };
+      };
+      const rewritten = Array.isArray(payload)
+        ? await Promise.all(payload.map(rewrite))
+        : await rewrite(payload);
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return json(response.status, rewritten, Object.fromEntries(headers.entries()));
     } finally {
       // JSON-response mode: the Response body is a complete string by the
       // time handleRequest resolves, so closing here leaks nothing.

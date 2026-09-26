@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Check, ChevronDown, ShieldCheck, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { z } from "zod";
 import { PENDING_STATUSES, type McpClient, type PendingAction, type User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
@@ -14,6 +14,7 @@ import { whoamiQuery } from "~/routes/__root.tsx";
 
 const searchSchema = z.object({
   status: z.enum(PENDING_STATUSES).catch("pending"),
+  action: z.string().optional(),
 });
 
 export const Route = createFileRoute("/app/approvals")({
@@ -81,7 +82,7 @@ function ApprovalsPage() {
       ) : (
         <div className="space-y-3">
           {actions.data!.map((pa) => (
-            <PendingCard key={pa.id} action={pa} requester={requesterName(pa)} isAdmin={isAdmin} reviewer={users.data ?? []} />
+            <PendingCard key={pa.id} action={pa} requester={requesterName(pa)} isAdmin={isAdmin} reviewer={users.data ?? []} linked={search.action === pa.id} />
           ))}
         </div>
       )}
@@ -94,21 +95,29 @@ function PendingCard({
   requester,
   isAdmin,
   reviewer,
+  linked,
 }: {
   action: PendingAction;
   requester: string;
   isAdmin: boolean;
   reviewer: User[];
+  linked: boolean;
 }) {
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(linked);
   const [rejectOpen, setRejectOpen] = useState(false);
   const approve = useOp("pendingAction.approve", { successToast: "Approved & executed" });
   const cancel = useOp("pendingAction.cancel", { successToast: "Cancelled" });
   const isPending = pa.status === "pending";
   const reviewedBy = pa.reviewedByUserId ? reviewer.find((u) => u.id === pa.reviewedByUserId)?.name : null;
 
+  useEffect(() => {
+    if (!linked) return;
+    setDetailsOpen(true);
+    document.getElementById(pa.id)?.scrollIntoView({ block: "center" });
+  }, [linked, pa.id]);
+
   return (
-    <div className="rounded-xl border border-border bg-card">
+    <div id={pa.id} className={`rounded-xl border bg-card ${linked ? "border-primary" : "border-border"}`}>
       <div className="flex flex-wrap items-center gap-2 px-4 py-3">
         <span className="flex size-8 items-center justify-center rounded-full bg-violet/15 text-violet">
           <Bot className="size-4" />

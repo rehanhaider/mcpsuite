@@ -6,7 +6,7 @@
  * validation → role/scope authorization → approval gating → execution.
  */
 import { z } from "zod";
-import { OpError, toErrorPayload } from "./errors.ts";
+import { OpError, toErrorPayload, type ErrorPayload } from "./errors.ts";
 import { nowIso } from "./ids.ts";
 import { actorStamp, type RequestContext } from "./context.ts";
 import type { Ports } from "./ports.ts";
@@ -89,20 +89,24 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
         const parsed = target.input.parse(pa.input);
         result = await op.ports.tx(() => target.handler(op, parsed));
       } catch (e) {
+        const executionError = toErrorPayload(e);
         await op.ports.pendingActions.setStatus(id, {
           status: "failed",
           reviewedByUserId: op.ctx.userId,
           reviewNote: note ?? null,
-          result: { error: toErrorPayload(e) as unknown as Record<string, unknown> },
+          result: { error: executionError as unknown as Record<string, unknown> },
         });
         await audit(op, {
           operation: "pendingAction.approve",
           entityType: "pending_action",
           entityId: id,
           summary: `Approved ${pa.operation} but execution FAILED`,
-          meta: { error: toErrorPayload(e) },
+          meta: { error: executionError },
         });
-        throw e;
+        // Returning lets the outer operation transaction commit the failed
+        // status and audit event. runOperation converts this back to an error
+        // for the reviewer after that transaction has committed.
+        return { executionError };
       }
       const updated = await op.ports.pendingActions.setStatus(id, {
         status: "approved",
@@ -231,6 +235,9 @@ export async function runOperation(
     }
 
     const data = await ports.tx(() => op.handler(opCtx, input));
+    if (name === "pendingAction.approve" && typeof data === "object" && data !== null && "executionError" in data) {
+      return { status: "error", error: data.executionError as ErrorPayload };
+    }
     return { status: "ok", data };
   } catch (e) {
     return { status: "error", error: toErrorPayload(e) };
