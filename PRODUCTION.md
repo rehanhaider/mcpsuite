@@ -88,6 +88,7 @@ cleared. To inspect and recover (same for `mcpsuite-mcp-http`):
 ```sh
 systemctl --user status mcpsuite-web
 journalctl --user -u mcpsuite-web -n 50
+systemctl --user stop mcpsuite-web
 mise exec -- make setup && mise exec -- make deploy
 ```
 
