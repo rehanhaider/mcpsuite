@@ -200,9 +200,12 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
    * is redeemed at most once under any concurrency. An expired code or one at
    * its attempt cap is refused; a wrong code counts an attempt (and burns the
    * code at the cap) — the caller returns rather than throws, so the attempt
-   * commits. A waiter whose code was burned meanwhile finds no row: under
-   * READ COMMITTED the locked row fails its re-check and LIMIT does not
-   * substitute an older one (same as SQLite answering invalid_code).
+   * commits. A concurrent redemption waits on the lock; when the holder has
+   * used or burned the code, the row fails its re-check and PostgreSQL moves
+   * on to the next unused row. There is none: issuing a code supersedes every
+   * earlier unused code of the same purpose (issueCode, under the per-email
+   * lock), so the waiter answers invalid_code, as SQLite does. Keep that
+   * invariant — without it a waiter would fall through to an older live code.
    */
   const redeem = async (
     x: PgDb,
