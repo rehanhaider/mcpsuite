@@ -81,6 +81,15 @@ mise exec -- make deploy
 
 Do not run `make dev` while the `mcpsuite-web` service owns port 2222.
 
+A service that fails 5 starts within 60 seconds stops retrying and shows as
+`failed`. To inspect and recover (same for `mcpsuite-mcp-http`):
+
+```sh
+systemctl --user status mcpsuite-web
+journalctl --user -u mcpsuite-web -n 50
+mise exec -- make setup && systemctl --user restart mcpsuite-web
+```
+
 ## Put it behind HTTPS
 
 Keep port 2222 private. A reverse proxy should terminate TLS and forward all

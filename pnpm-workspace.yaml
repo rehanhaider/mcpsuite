@@ -6,3 +6,8 @@ packages:
 onlyBuiltDependencies:
   - better-sqlite3
   - esbuild
+
+# Refuse to install under a Node other than package.json `engines` (22):
+# better-sqlite3's binding is built for the installing Node, and the
+# services run Node 22, so another Node would leave them unable to start.
+engineStrict: true
