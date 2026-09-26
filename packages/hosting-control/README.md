@@ -115,9 +115,13 @@ checks they exist.
 
 Hosting control connects as `crm_operator` (no superuser, no `BYPASSRLS`).
 Each operation binds its target workspace as the transaction's row-level
-security context, so it reaches that workspace's CRM rows and access state
-only — it cannot list workspaces. Receipts, the service audit and the outbox
-are its own records, readable on every row by `crm_operator` alone. It may
+security context, so it reaches that workspace's CRM rows, access state and
+delivery outbox only — it cannot list workspaces. Receipts and the service
+audit are its own records, readable on every row by `crm_operator` alone. The
+boot sweep lists pending deliveries through one fixed function,
+`hosting.pending_auth_deliveries()` (outbox ids, workspace, user and purpose
+only). Access set, owner transfer, recovery and delete lock the workspace row
+first, so concurrent changes to one workspace run one at a time. It may
 call exactly six credential functions (subject → email, "has a password",
 code-issue rate record, code issue, end sessions, purge credentials) and never
 the generic issuer storage. `crm_app` has no access to the `hosting` schema.
