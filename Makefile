@@ -19,11 +19,10 @@ _render_unit = sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_
 # The selected units that `make autostart` has installed; deploy acts on these.
 _installed = $(strip $(foreach u,$(_units),$(if $(wildcard $(SYSTEMD_USER_DIR)/$(u)),$(u))))
 # Clear the start-limit counter of units ($(1)) before a deliberate start, so
-# earlier starts don't make systemd refuse it. Only running or failed units:
-# reset-failed errors on a unit that isn't loaded, and a unit mid-crash-loop
-# (activating) keeps its counter.
+# earlier starts don't make systemd refuse it. Only loaded units have a counter,
+# and reset-failed errors on a unit that isn't loaded, so skip those.
 _reset_failed = for u in $(1); do \
-	if systemctl --user is-active --quiet "$$u" || systemctl --user is-failed --quiet "$$u"; then \
+	if [ -n "$$(systemctl --user list-units --all --plain --no-legend "$$u")" ]; then \
 		systemctl --user reset-failed "$$u"; \
 	fi; \
 	done
