@@ -789,19 +789,109 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
     }
   });
 
-  it("crm_operator has no generic issuer storage, sessions or schema changes", async () => {
-    await asOperatorIn(null, async (q) => {
-      await expect(q("SELECT crm.openauth_kv_get('x')")).rejects.toThrow(/permission denied/i);
-    });
-    await asOperatorIn(null, async (q) => {
-      await expect(q("SELECT * FROM crm.openauth_kv")).rejects.toThrow(/permission denied/i);
-    });
-    await asOperatorIn(null, async (q) => {
-      await expect(q("SELECT * FROM crm.sessions")).rejects.toThrow(/permission denied/i);
-    });
-    await asOperatorIn(null, async (q) => {
-      await expect(q("CREATE TABLE hosting.evil (id int)")).rejects.toThrow(/permission denied/i);
-    });
+  it("crm_operator reads no credential — issuer values, session tokens, code hashes — and only its bound workspace's sessions and codes", async () => {
+    const userOf = async (ws: string): Promise<string> =>
+      String((await h.admin.pool.query("SELECT id FROM crm.users WHERE workspace_id = $1", [ws])).rows[0]?.id);
+    const [userA, userB] = [await userOf(wsA), await userOf(wsB)];
+    const key = "email\u001fa@roles.test\u001fpassword";
+    const keyB = "email\u001fb@roles.test\u001fpassword";
+    for (const k of [key, keyB]) {
+      await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{\"hash\":\"secret\"}')", [k]);
+    }
+    for (const u of [userA, userB]) {
+      await h.admin.pool.query(
+        `INSERT INTO crm.sessions (id, token_hash, user_id, expires_at, created_at)
+         VALUES (gen_random_uuid(), $1, $2, now() + interval '1 day', now())`,
+        [`roles-${u}`, u],
+      );
+    }
+    try {
+      // Issuer storage: the key column only, and only its bound workspace's
+      // users' keys — never a listing of the deployment's identities.
+      await asOperatorIn(null, async (q) => {
+        expect((await q("SELECT count(*)::int AS n FROM crm.openauth_kv"))[0].n).toBe(0);
+      });
+      await asOperatorIn(wsA, async (q) => {
+        expect((await q("SELECT key FROM crm.openauth_kv")).map((r) => r.key)).toEqual([key]);
+        expect(await q("DELETE FROM crm.openauth_kv WHERE key = $1 RETURNING 1", [keyB])).toHaveLength(0);
+      });
+      // "Has a password" is a yes/no lookup that works before binding.
+      await asOperatorIn(null, async (q) => {
+        expect((await q("SELECT crm.has_password_credential($1) AS ok", ["b@roles.test"]))[0].ok).toBe(true);
+      });
+      for (const denied of [
+        "SELECT value FROM crm.openauth_kv",
+        "SELECT * FROM crm.openauth_kv",
+        "SELECT auth_refresh FROM crm.sessions",
+        "SELECT token_hash FROM crm.sessions",
+        "SELECT * FROM crm.sessions",
+        "SELECT code_hash FROM crm.auth_codes",
+        "SELECT * FROM crm.auth_codes",
+        "UPDATE crm.auth_codes SET attempts = 0",
+        "INSERT INTO crm.openauth_kv (key, value) VALUES ('k', '{}')",
+        "UPDATE crm.openauth_kv SET expires_at = now()",
+        "INSERT INTO crm.sessions (id, token_hash, expires_at, created_at) VALUES (gen_random_uuid(), 'h', now(), now())",
+        "CREATE TABLE hosting.evil (id int)",
+      ]) {
+        await asOperatorIn(null, async (q) => {
+          await expect(q(denied), denied).rejects.toThrow(/permission denied/i);
+        });
+      }
+      // Sessions and codes: nothing unbound; bound, its own workspace's users only.
+      await asOperatorIn(null, async (q) => {
+        expect((await q("SELECT count(*)::int AS n FROM crm.sessions"))[0].n).toBe(0);
+        expect((await q("SELECT count(*)::int AS n FROM crm.auth_codes"))[0].n).toBe(0);
+      });
+      await asOperatorIn(wsA, async (q) => {
+        expect((await q("SELECT user_id::text AS u FROM crm.sessions")).map((r) => r.u)).toEqual([userA]);
+        expect(await q("DELETE FROM crm.sessions WHERE user_id = $1 RETURNING 1", [userB])).toHaveLength(0);
+        await expect(
+          q("INSERT INTO crm.auth_codes (user_id, email, purpose, code_hash, expires_at) VALUES ($1, 'x', 'setup', 'h-op', now())", [userB]),
+        ).rejects.toThrow(/row-level security/i);
+      });
+    } finally {
+      await h.admin.pool.query("DELETE FROM crm.openauth_kv WHERE key = ANY($1)", [[key, keyB]]);
+      await h.admin.pool.query("DELETE FROM crm.sessions WHERE token_hash LIKE 'roles-%'");
+    }
+  });
+
+  it("as crm_operator, owner recovery revokes refresh tokens and deletion purges the members' issuer keys", async () => {
+    const hc = createHostingControlServer({ store: h.store, serviceKeys: [KEY], host: "127.0.0.1", port: 0 });
+    const { port } = await hc.listen();
+    const call = (method: string, path: string, idem: string, body: unknown) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${KEY}`, "idempotency-key": idem, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      const made = await call("POST", "/api/v1/workspaces", "purge-provision", { organizationName: "Purge", ownerEmail: "purge@roles.test" });
+      const ws = ((await made.json()) as { data: { workspaceId: string } }).data.workspaceId;
+      await h.admin.pool.query("UPDATE crm.users SET status = 'active', auth_subject = 'acct_purge' WHERE email = 'purge@roles.test'");
+      const keys = [
+        "email\u001fpurge@roles.test\u001fpassword",
+        "email\u001fpurge@roles.test\u001fsubject",
+        "oauth:refresh\u001facct_purge\u001ft1",
+      ];
+      const survivor = "email\u001fnot-purge@roles.test\u001fpassword";
+      for (const k of [...keys, survivor]) {
+        await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{}') ON CONFLICT DO NOTHING", [k]);
+      }
+      const present = async (k: string) =>
+        Number((await h.admin.pool.query("SELECT count(*)::int AS n FROM crm.openauth_kv WHERE key = $1", [k])).rows[0]?.n);
+
+      // Recovery for an active owner issues a reset code, which ends sign-ins.
+      expect((await call("POST", `/api/v1/workspaces/${ws}/owner/recovery`, "purge-recover", { reason: "roles" })).status).toBe(202);
+      expect(await present(keys[2]!)).toBe(0);
+      await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{}')", [keys[2]]);
+
+      expect((await call("DELETE", `/api/v1/workspaces/${ws}`, "purge-delete", { reason: "roles" })).status).toBe(204);
+      for (const k of keys) expect(await present(k), k).toBe(0);
+      expect(await present(survivor)).toBe(1);
+      await h.admin.pool.query("DELETE FROM crm.openauth_kv WHERE key = $1", [survivor]);
+    } finally {
+      await hc.close();
+    }
   });
 
   it("crm_app cannot reach the hosting schema; the access reader answers only for its own workspace", async () => {

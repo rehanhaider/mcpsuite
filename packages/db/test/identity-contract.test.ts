@@ -42,8 +42,8 @@ interface Harness {
   hooked(hooks: IdentityTestHooks): IdentityStore;
   portsFor(workspaceId: string): Ports;
   workspaceId: string;
-  /** Lock the workspace the way hosting control does, or null where unsupported. */
-  lockWorkspace: (() => void) | null;
+  /** Lock the workspace the way hosting control does. */
+  lockWorkspace: () => void | Promise<void>;
   /** Run a catalog query as the runtime role (PostgreSQL only). */
   catalogQuery: ((text: string) => Promise<Array<Record<string, unknown>>>) | null;
   /** SQLite only: the database file, for a second (other-process) connection. */
@@ -127,8 +127,16 @@ async function pgHarness(): Promise<Harness> {
     hooked: (hooks) => createPgIdentity(app.db, { hooks }),
     portsFor: (ws) => createPgPorts(app.db, ws) as unknown as Ports,
     workspaceId,
-    // The access table arrives on PostgreSQL with #5.
-    lockWorkspace: null,
+    // Hosting control's access row, written as the superuser (crm_app has no
+    // access to the hosting schema).
+    lockWorkspace: async () => {
+      await admin.pool.query(
+        `INSERT INTO hosting.workspace_access (workspace_id, access_mode, created_at, updated_at)
+         VALUES ($1, 'locked', now(), now())
+         ON CONFLICT (workspace_id) DO UPDATE SET access_mode = 'locked'`,
+        [workspaceId],
+      );
+    },
     catalogQuery: async (text) => (await app.pool.query(text)).rows,
     sqliteFile: null,
     runtime: async () => {
@@ -264,20 +272,38 @@ for (const adapter of ADAPTERS) {
         expect(await identity.findUserByAuthSubject("acct_someone_else")).toBeNull();
       });
 
-      it("session resolution returns fixed identity fields only, never profile data", async () => {
-        // PostgreSQL: the SECURITY DEFINER resolver must not hand the runtime
-        // role names or password state (those are read afterwards under RLS).
+      it("the cross-workspace lookups return fixed identity fields only, never profile data", async () => {
+        // PostgreSQL: the SECURITY DEFINER lookups must not hand the runtime
+        // role names or password material (a profile is read afterwards,
+        // under row-level security, inside the resolved workspace).
         if (!h.catalogQuery) return;
-        const [row] = await h.catalogQuery(
-          "SELECT pg_get_function_result('crm.resolve_session(text)'::regprocedure) AS result",
-        );
-        const columns = String(row?.result)
-          .replace(/^TABLE\(|\)$/g, "")
-          .split(",")
-          .map((c) => c.trim().split(" ")[0]);
-        expect(columns.sort()).toEqual(
-          ["auth_subject", "email", "kind", "password_must_change", "role", "user_id", "workspace_id"].sort(),
-        );
+        for (const fn of ["identity_by_email(text)", "identity_by_subject(text)", "identity_by_user_id(uuid)"]) {
+          const [row] = await h.catalogQuery(`SELECT pg_get_function_result('crm.${fn}'::regprocedure) AS result`);
+          const columns = String(row?.result)
+            .replace(/^TABLE\(|\)$/g, "")
+            .split(",")
+            .map((c) => c.trim().split(" ")[0]);
+          expect(columns.sort(), fn).toEqual(
+            ["auth_subject", "disabled_at", "email", "password_must_change", "role", "status", "user_id", "workspace_id"].sort(),
+          );
+        }
+      });
+
+      it("two sessions racing to adopt one user bind exactly one subject", async () => {
+        for (let i = 0; i < 5; i += 1) {
+          const address = email("adopt-race");
+          const first = await identity.createSession(null, { email: address, authSubject: `acct_race_a_${seq}` });
+          const second = await identity.createSession(null, { email: address, authSubject: `acct_race_b_${seq}` });
+          const created = await ports.users.create({ name: "Raced", email: address, role: "member", passwordHash: null });
+          const [a, b] = await Promise.all([identity.resolveSessionAny(first.token), identity.resolveSessionAny(second.token)]);
+          const winners = [a, b].filter((r) => r !== null);
+          expect(winners).toHaveLength(1);
+          const winner = winners[0] as { user: { id: string }; authSubject: string };
+          expect(winner.user.id).toBe(created.id);
+          expect(await identity.findUserByAuthSubject(winner.authSubject)).toMatchObject({ id: created.id });
+          const loserSubject = a === null ? `acct_race_a_${seq}` : `acct_race_b_${seq}`;
+          expect(await identity.findUserByAuthSubject(loserSubject)).toBeNull();
+        }
       });
 
       it("endUserSessions ends every session of the user", async () => {
@@ -334,6 +360,32 @@ for (const adapter of ADAPTERS) {
         for (let i = 0; i < AUTH_CODE_ISSUE_MAX; i += 1) await identity.issueCode(h.workspaceId, user.id, "setup");
         await expect(identity.issueCode(h.workspaceId, user.id, "setup")).rejects.toMatchObject({ code: "conflict" });
         await expect(identity.issueCode(h.workspaceId, RANDOM_ID, "setup")).rejects.toMatchObject({ code: "not_found" });
+      });
+
+      it("concurrent issues for one email: exactly the per-email cap succeeds", async () => {
+        const user = await pendingUser("issue-race");
+        const attempts = await Promise.allSettled(
+          Array.from({ length: AUTH_CODE_ISSUE_MAX + 2 }, () => identity.issueCode(h.workspaceId, user.id, "setup")),
+        );
+        const issued = attempts.filter((r) => r.status === "fulfilled");
+        const refused = attempts.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+        expect(issued).toHaveLength(AUTH_CODE_ISSUE_MAX);
+        expect(refused).toHaveLength(2);
+        for (const r of refused) expect(r.reason).toMatchObject({ code: "conflict" });
+      });
+
+      it("two concurrent redemptions of one code: exactly one succeeds", async () => {
+        for (let i = 0; i < 5; i += 1) {
+          const user = await pendingUser("redeem-race");
+          const { code } = await identity.issueCode(h.workspaceId, user.id, "setup");
+          const redeem = (password: string) =>
+            identity.redeemCodeAndSetPassword({ email: user.email, purpose: "setup", code, password });
+          const results = await Promise.all([redeem("race-password-1"), redeem("race-password-2")]);
+          expect(results.filter((r) => r.ok)).toHaveLength(1);
+          expect(results.filter((r) => !r.ok)).toEqual([{ ok: false, reason: "invalid_code" }]);
+          const winner = results[0]!.ok ? "race-password-1" : "race-password-2";
+          expect(await identity.verifyPassword(user.email, winner)).toBe(true);
+        }
       });
 
       it("a reset code ends the user's sessions when issued", async () => {
@@ -516,11 +568,8 @@ for (const adapter of ADAPTERS) {
 
       it("reports hosted workspace access", async () => {
         expect(await identity.workspaceAccess(h.workspaceId)).toEqual({ mode: "active", expiresAt: null });
-        if (h.lockWorkspace) {
-          h.lockWorkspace();
-          expect((await identity.workspaceAccess(h.workspaceId)).mode).toBe("locked");
-        }
-        // PostgreSQL: always active until #5 brings the access table (documented stub).
+        await h.lockWorkspace();
+        expect((await identity.workspaceAccess(h.workspaceId)).mode).toBe("locked");
       });
     });
 

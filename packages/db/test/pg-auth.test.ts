@@ -30,10 +30,22 @@ import {
   type PgPorts,
 } from "../src/pg/repositories.ts";
 import { initPgSchema } from "../src/pg/init.ts";
+import { createPgIdentity } from "../src/pg/identity.ts";
 import { dropTestDatabase, setTestRolePassword } from "./pg-test-support.ts";
 import { joinAuthKey, normalizeAuthCode } from "../src/openauth.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
+/** The fixed fields every identity lookup returns (schema.sql). */
+const IDENTITY_FIELDS = [
+  "auth_subject",
+  "disabled_at",
+  "email",
+  "password_must_change",
+  "role",
+  "status",
+  "user_id",
+  "workspace_id",
+];
 
 const APP_ROLE_TEST_PASSWORD = "crm_app_test_pw"; // same constant as pg-isolation.test.ts
 const AUTH_DB = "mcpsuite_pg_auth";
@@ -195,37 +207,38 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     expect(pending.status).toBe("pending");
     expect(pending.hasPassword).toBe(false);
 
-    // Pending users never authenticate by subject (they have none)…
-    const bySubject = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-invitee"]);
+    // Pending users have no subject, so no subject lookup finds them…
+    const bySubject = await app.pool.query("SELECT * FROM crm.identity_by_subject($1)", ["sub-invitee"]);
     expect(bySubject.rows).toHaveLength(0);
-    // …but the success-callback triage resolver finds the invite by verified
-    // email, flagged pending + unlinked (docs/auth-api.md linking rules).
-    const link = await app.pool.query("SELECT * FROM crm.resolve_auth_email($1)", ["invitee@auth-a.test"]);
+    // …but the email lookup the success callback uses finds the invite,
+    // pending and unlinked (docs/auth-api.md linking rules), with the fixed
+    // identity fields only — never names or password material.
+    const link = await app.pool.query("SELECT * FROM crm.identity_by_email($1)", ["invitee@auth-a.test"]);
     expect(link.rows).toHaveLength(1);
-    expect(link.rows[0]).toMatchObject({ user_id: userId, workspace_id: wsA, role: "member", status: "pending", subject_linked: false });
-    expect(Object.keys(link.rows[0]!).sort()).toEqual(["role", "status", "subject_linked", "user_id", "workspace_id"]);
+    expect(link.rows[0]).toMatchObject({ user_id: userId, workspace_id: wsA, role: "member", status: "pending", auth_subject: null });
+    expect(Object.keys(link.rows[0]!).sort()).toEqual(IDENTITY_FIELDS);
     // Unknown emails resolve to nothing (→ not_invited).
-    expect((await app.pool.query("SELECT * FROM crm.resolve_auth_email($1)", ["nobody@auth-a.test"])).rows).toHaveLength(0);
+    expect((await app.pool.query("SELECT * FROM crm.identity_by_email($1)", ["nobody@auth-a.test"])).rows).toHaveLength(0);
 
     const linked = await portsA.users.activate(userId, "sub-invitee");
     expect(linked.status).toBe("active");
-    const resolved = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-invitee"]);
+    const resolved = await app.pool.query("SELECT * FROM crm.identity_by_subject($1)", ["sub-invitee"]);
     expect(resolved.rows[0]).toMatchObject({ user_id: userId, workspace_id: wsA, role: "member", password_must_change: false });
-    // Once linked, email triage marks the identity as subject-owned…
-    const relink = await app.pool.query("SELECT * FROM crm.resolve_auth_email($1)", ["invitee@auth-a.test"]);
-    expect(relink.rows[0]).toMatchObject({ status: "active", subject_linked: true });
+    // Once linked, the email lookup shows the identity as subject-owned…
+    const relink = await app.pool.query("SELECT * FROM crm.identity_by_email($1)", ["invitee@auth-a.test"]);
+    expect(relink.rows[0]).toMatchObject({ status: "active", auth_subject: "sub-invitee" });
     // …and subject binding is single-shot.
     await expect(portsA.users.activate(userId, "sub-again")).rejects.toThrow(OpError);
 
     // An ACTIVE user without a subject (pre-OpenAuth account / owner
     // recovery) binds on first login — the second landed linking rule.
-    expect((await app.pool.query("SELECT * FROM crm.resolve_auth_email($1)", [ownerA.email])).rows[0]).toMatchObject({
+    expect((await app.pool.query("SELECT * FROM crm.identity_by_email($1)", [ownerA.email])).rows[0]).toMatchObject({
       status: "active",
-      subject_linked: false,
+      auth_subject: null,
     });
     const boundOwner = await portsA.users.activate(ownerA.id, "sub-owner-a");
     expect(boundOwner.status).toBe("active");
-    expect((await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-owner-a"])).rows[0]).toMatchObject({
+    expect((await app.pool.query("SELECT * FROM crm.identity_by_subject($1)", ["sub-owner-a"])).rows[0]).toMatchObject({
       user_id: ownerA.id,
       workspace_id: wsA,
       role: "owner",
@@ -244,8 +257,9 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
 
   // ── 3. Disabled/pending users cannot authenticate anywhere ────────────────
 
-  it("resolvers return nothing for disabled users and de-authorize their MCP clients", async () => {
+  it("a disabled user's sessions do not resolve and their MCP clients are de-authorized", async () => {
     const u = await activeUser(portsA, "revocable@auth-a.test", "sub-revocable");
+    const identity = createPgIdentity(app.db);
     const tokenHash = `mcp-hash-${Math.random().toString(36).slice(2)}`;
     await portsA.mcpClients.create({
       name: "Revocable agent",
@@ -258,14 +272,16 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     expect((await app.pool.query("SELECT enabled FROM crm.resolve_mcp_key($1)", [tokenHash])).rows[0]?.enabled).toBe(true);
 
     await portsA.users.update(u.id, { disabledAt: new Date().toISOString() });
-    expect((await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-revocable"])).rows).toHaveLength(0);
+    // Disabling ended the sessions; a session minted afterwards still does not resolve.
+    const { token } = await identity.createSession(u.id, { authSubject: "sub-revocable" });
+    expect(await identity.resolveSession(token)).toBeNull();
     expect((await app.pool.query("SELECT enabled FROM crm.resolve_mcp_key($1)", [tokenHash])).rows[0]?.enabled).toBe(false);
-    // Email triage still identifies the account as disabled — the success
+    // The email lookup still identifies the account as disabled — the success
     // callback shows account_disabled, never not_invited, for a real user.
-    expect((await app.pool.query("SELECT status FROM crm.resolve_auth_email($1)", ["revocable@auth-a.test"])).rows[0]?.status).toBe("disabled");
+    expect((await app.pool.query("SELECT status FROM crm.identity_by_email($1)", ["revocable@auth-a.test"])).rows[0]?.status).toBe("disabled");
 
     await portsA.users.update(u.id, { disabledAt: null });
-    expect((await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-revocable"])).rows).toHaveLength(1);
+    expect((await identity.resolveSession(token))?.user.id).toBe(u.id);
     expect((await app.pool.query("SELECT enabled FROM crm.resolve_mcp_key($1)", [tokenHash])).rows[0]?.enabled).toBe(true);
 
     // A pending creator lends no authority either.
@@ -334,7 +350,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
 
   // ── 5. Setup/reset codes: issuance ────────────────────────────────────────
 
-  it("issueCode stores only hashes, replaces per purpose, and reset ends sessions", async () => {
+  it("issueCode stores only hashes, supersedes per purpose, and reset ends sessions", async () => {
     const { userId: invitee } = await portsA.users.createPending({ name: "Codes", email: "codes@auth-a.test", role: "member" });
     const first = await portsA.credentials.issueCode(invitee, "setup");
     expect(first.code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
@@ -348,8 +364,11 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
 
     const second = await portsA.credentials.issueCode(invitee, "setup");
     rows = await codeRows(invitee);
-    expect(rows).toHaveLength(1); // previous setup code replaced
-    expect(rows[0]!.code_hash).toBe(sha256Hex(normalizeAuthCode(second.code)));
+    // The previous setup code is superseded (marked used, kept for the issue
+    // rate limit); exactly one live code remains — the new one.
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.used_at).not.toBeNull();
+    expect(rows.filter((r) => r.used_at === null).map((r) => r.code_hash)).toEqual([sha256Hex(normalizeAuthCode(second.code))]);
 
     // reset: issuing ends every session in the same transaction.
     const u = await activeUser(portsA, "resettable@auth-a.test", "sub-resettable");
@@ -371,129 +390,162 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     await portsA.users.deletePermanently(invitee);
   });
 
-  // ── 6. Setup/reset codes: SQL-level single-use + expiry ───────────────────
+  // ── 6. Setup/reset codes: single-use + expiry ─────────────────────────────
 
-  it("consume_auth_code burns a code exactly once and honors expiry/purpose", async () => {
-    const { userId } = await portsA.users.createPending({ name: "Burn", email: "burn@auth-a.test", role: "member" });
+  it("a code redeems exactly once and honors purpose, supersession and expiry", async () => {
+    const identity = createPgIdentity(app.db);
+    const email = "burn@auth-a.test";
+    const { userId } = await portsA.users.createPending({ name: "Burn", email, role: "member" });
     const { code } = await portsA.credentials.issueCode(userId, "setup");
 
     // Wrong purpose neither redeems nor burns.
-    const wrongPurpose = await app.pool.query("SELECT * FROM crm.consume_auth_code($1, $2)", [sha256Hex(normalizeAuthCode(code)), "reset"]);
-    expect(wrongPurpose.rows).toHaveLength(0);
-
-    const first = await app.pool.query("SELECT * FROM crm.consume_auth_code($1, $2)", [sha256Hex(normalizeAuthCode(code)), "setup"]);
-    expect(first.rows).toHaveLength(1);
-    expect(first.rows[0]).toMatchObject({ user_id: userId, workspace_id: wsA });
-    expect(Object.keys(first.rows[0]!).sort()).toEqual(["user_id", "workspace_id"]);
-    const second = await app.pool.query("SELECT * FROM crm.consume_auth_code($1, $2)", [sha256Hex(normalizeAuthCode(code)), "setup"]);
-    expect(second.rows).toHaveLength(0); // single-use
+    expect(await identity.verifyAndConsumeCode({ email, purpose: "reset", code })).toEqual({ ok: false, reason: "invalid_code" });
+    expect(await identity.verifyAndConsumeCode({ email, purpose: "setup", code })).toEqual({ ok: true, userId });
+    // Single-use.
+    expect(await identity.verifyAndConsumeCode({ email, purpose: "setup", code })).toEqual({ ok: false, reason: "invalid_code" });
 
     // Reissue invalidates the outstanding code even before expiry.
     const a = await portsA.credentials.issueCode(userId, "setup");
     const b = await portsA.credentials.issueCode(userId, "setup");
-    expect((await app.pool.query("SELECT * FROM crm.consume_auth_code($1, $2)", [sha256Hex(normalizeAuthCode(a.code)), "setup"])).rows).toHaveLength(0);
-    expect((await app.pool.query("SELECT * FROM crm.consume_auth_code($1, $2)", [sha256Hex(normalizeAuthCode(b.code)), "setup"])).rows).toHaveLength(1);
+    expect(await identity.verifyAndConsumeCode({ email, purpose: "setup", code: a.code })).toMatchObject({ ok: false });
+    expect(await identity.verifyAndConsumeCode({ email, purpose: "setup", code: b.code })).toEqual({ ok: true, userId });
 
     // Expired codes are dead even when unconsumed.
     await admin.pool.query(
       `INSERT INTO crm.auth_codes (user_id, email, purpose, code_hash, expires_at)
-       VALUES ($1, 'burn@auth-a.test', 'setup', $2, now() - interval '1 minute')`,
-      [userId, sha256Hex("expired-code")],
+       VALUES ($1, $2, 'setup', $3, now() - interval '1 minute')`,
+      [userId, email, sha256Hex(normalizeAuthCode("AAAA-BBBB-CCCC"))],
     );
-    expect((await app.pool.query("SELECT * FROM crm.consume_auth_code($1, $2)", [sha256Hex("expired-code"), "setup"])).rows).toHaveLength(0);
-    // Unknown hashes: same empty answer.
-    expect((await app.pool.query("SELECT * FROM crm.consume_auth_code($1, $2)", [sha256Hex("never-issued"), "setup"])).rows).toHaveLength(0);
+    expect(await identity.verifyAndConsumeCode({ email, purpose: "setup", code: "AAAA-BBBB-CCCC" })).toEqual({
+      ok: false,
+      reason: "expired_code",
+    });
+    // Unknown emails: the same answer as a wrong code.
+    expect(await identity.verifyAndConsumeCode({ email: "never@auth-a.test", purpose: "setup", code })).toEqual({
+      ok: false,
+      reason: "invalid_code",
+    });
     await portsA.users.deletePermanently(userId);
   });
 
-  // ── 7. openauth_kv: denied directly, usable through the sanctioned path ───
+  // ── 7. Identity-level tables: reachable by key, bound to one workspace ────
 
-  it("openauth_kv and auth_codes are unreachable as crm_app except via the definer functions", async () => {
-    // Direct table access: denied in every command, in and out of context.
-    await expect(app.pool.query("SELECT * FROM crm.openauth_kv")).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ('k', '{}')")).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("UPDATE crm.openauth_kv SET value = '{}'")).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("DELETE FROM crm.openauth_kv")).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("SELECT * FROM crm.auth_codes")).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("INSERT INTO crm.auth_codes (user_id, purpose, code_hash, expires_at) VALUES ($1, 'setup', 'h', now())", [ownerA.id])).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("SELECT * FROM crm.sessions")).rejects.toThrow(/permission denied/i);
-
-    // The sanctioned path works without any workspace context (identity-level).
-    await app.pool.query("SELECT crm.openauth_kv_set($1, $2::jsonb, NULL)", ["oauth:refresh:sub-kv:t1", JSON.stringify({ n: 1 })]);
-    await app.pool.query("SELECT crm.openauth_kv_set($1, $2::jsonb, now() + interval '1 hour')", ["oauth:refresh:sub-kv:t2", JSON.stringify({ n: 2 })]);
-    await app.pool.query("SELECT crm.openauth_kv_set($1, $2::jsonb, now() - interval '1 second')", ["oauth:refresh:sub-kv:t3", JSON.stringify({ n: 3 })]);
-    const got = await app.pool.query("SELECT crm.openauth_kv_get($1) AS v", ["oauth:refresh:sub-kv:t1"]);
-    expect(got.rows[0]?.v).toEqual({ n: 1 });
-    // Overwrite via upsert.
-    await app.pool.query("SELECT crm.openauth_kv_set($1, $2::jsonb, NULL)", ["oauth:refresh:sub-kv:t1", JSON.stringify({ n: 10 })]);
-    expect((await app.pool.query("SELECT crm.openauth_kv_get($1) AS v", ["oauth:refresh:sub-kv:t1"])).rows[0]?.v).toEqual({ n: 10 });
-    // Expired entries are invisible to get and scan.
-    expect((await app.pool.query("SELECT crm.openauth_kv_get($1) AS v", ["oauth:refresh:sub-kv:t3"])).rows[0]?.v).toBeNull();
-    const scan = await app.pool.query("SELECT * FROM crm.openauth_kv_scan($1)", ["oauth:refresh:sub-kv:"]);
-    expect(scan.rows.map((r) => r.key)).toEqual(["oauth:refresh:sub-kv:t1", "oauth:refresh:sub-kv:t2"]);
-    await app.pool.query("SELECT crm.openauth_kv_remove($1)", ["oauth:refresh:sub-kv:t2"]);
-    expect((await app.pool.query("SELECT * FROM crm.openauth_kv_scan($1)", ["oauth:refresh:sub-kv:"])).rows.map((r) => r.key)).toEqual([
-      "oauth:refresh:sub-kv:t1",
+  it("crm_app reaches identity rows by key before binding, and only its workspace's once bound", async () => {
+    const identity = createPgIdentity(app.db);
+    // The issuer storage: keyed reads and writes, expired rows invisible.
+    await identity.authKv.set(joinAuthKey(["oauth:refresh", "sub-kv", "t1"]), JSON.stringify({ n: 1 }), null);
+    const later = Date.now() + 3_600_000;
+    await identity.authKv.set(joinAuthKey(["oauth:refresh", "sub-kv", "t2"]), JSON.stringify({ n: 2 }), later);
+    await identity.authKv.set(joinAuthKey(["oauth:refresh", "sub-kv", "t3"]), JSON.stringify({ n: 3 }), Date.now() - 1_000);
+    expect(await identity.authKv.get(joinAuthKey(["oauth:refresh", "sub-kv", "t1"]))).toEqual({ value: '{"n":1}', expiry: null });
+    await identity.authKv.set(joinAuthKey(["oauth:refresh", "sub-kv", "t1"]), JSON.stringify({ n: 10 }), null);
+    expect((await identity.authKv.get(joinAuthKey(["oauth:refresh", "sub-kv", "t1"])))?.value).toBe('{"n":10}');
+    expect(await identity.authKv.get(joinAuthKey(["oauth:refresh", "sub-kv", "t3"]))).toBeNull();
+    const scan = await identity.authKv.scanPrefix(joinAuthKey(["oauth:refresh", "sub-kv"]));
+    expect(scan.map((r) => [r.key, r.expiry])).toEqual([
+      [joinAuthKey(["oauth:refresh", "sub-kv", "t1"]), null],
+      [joinAuthKey(["oauth:refresh", "sub-kv", "t2"]), later],
     ]);
-    await app.pool.query("SELECT crm.openauth_kv_remove($1)", ["oauth:refresh:sub-kv:t1"]);
+    await identity.authKv.remove(joinAuthKey(["oauth:refresh", "sub-kv", "t1"]));
+    await identity.authKv.remove(joinAuthKey(["oauth:refresh", "sub-kv", "t2"]));
 
-    // Privilege hygiene for every credential function: resolver-owned, no PUBLIC
-    // execute. crm_app may call them all; hosting control (crm_operator) only
-    // the narrow set provisioning, recovery and deletion need — never the
-    // generic issuer storage, sessions or resolvers.
-    const fns = [
-      "resolve_user_identity",
-      "resolve_auth_email",
-      "openauth_kv_get",
-      "openauth_kv_set",
-      "openauth_kv_remove",
-      "openauth_kv_scan",
-      "issue_auth_code",
-      "consume_auth_code",
-      "delete_user_sessions",
-      "purge_openauth_identity",
-      "create_session",
-      "resolve_session",
-      "destroy_session",
-      "find_user_by_auth_subject",
-      "email_for_auth_subject",
-      "redeem_auth_code",
-      "has_password_credential",
-      "record_code_issue",
-      "end_user_sessions",
-      "workspace_access_state",
-    ];
-    const acl = await admin.pool.query(
-      `SELECT proname, coalesce(proacl::text, '') AS acl, pg_get_userbyid(proowner) AS owner
-       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname = 'crm' AND proname = ANY($1)`,
-      [fns],
-    );
-    expect(acl.rows).toHaveLength(fns.length);
-    for (const row of acl.rows) {
-      expect(row.owner, `${row.proname} owner`).toBe("crm_identity_resolver");
-      const entries = String(row.acl).replace(/[{}]/g, "").split(",").filter(Boolean);
-      expect(entries.length, `${row.proname} has explicit acl`).toBeGreaterThan(0);
-      for (const entry of entries) expect(entry.startsWith("="), `${row.proname} grants nothing to PUBLIC`).toBe(false);
+    // Sessions and codes: B's rows are reachable by key while unbound (sign-in
+    // has not found a workspace yet), and invisible once bound to A.
+    await insertSession(ownerB.id);
+    const bCode = await portsB.credentials.issueCode(ownerB.id, "reset"); // ends B's sessions…
+    await insertSession(ownerB.id); // …so mint one after it
+    const client = await app.pool.connect();
+    try {
+      const n = async (q: string, v: unknown[]) => Number((await client.query(q, v)).rows[0]?.n ?? 0);
+      expect(await n("SELECT count(*)::int AS n FROM crm.sessions WHERE user_id = $1", [ownerB.id])).toBe(1);
+      expect(await n("SELECT count(*)::int AS n FROM crm.auth_codes WHERE user_id = $1", [ownerB.id])).toBeGreaterThan(0);
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('app.workspace_id', $1, true)", [wsA]);
+      expect(await n("SELECT count(*)::int AS n FROM crm.sessions WHERE user_id = $1", [ownerB.id])).toBe(0);
+      expect(await n("SELECT count(*)::int AS n FROM crm.auth_codes WHERE user_id = $1", [ownerB.id])).toBe(0);
+      expect((await client.query("DELETE FROM crm.sessions WHERE user_id = $1", [ownerB.id])).rowCount).toBe(0);
+      expect((await client.query("UPDATE crm.auth_codes SET used_at = now() WHERE user_id = $1", [ownerB.id])).rowCount).toBe(0);
+      await expect(
+        client.query(
+          "INSERT INTO crm.auth_codes (user_id, email, purpose, code_hash, expires_at) VALUES ($1, 'x', 'setup', 'h-cross', now())",
+          [ownerB.id],
+        ),
+      ).rejects.toThrow(/row-level security/i);
+      await client.query("ROLLBACK");
+    } finally {
+      client.release();
     }
-    const operatorFns = new Set([
-      "email_for_auth_subject",
-      "has_password_credential",
-      "record_code_issue",
-      "issue_auth_code",
-      "end_user_sessions",
-      "purge_openauth_identity",
-    ]);
-    const privileges = await admin.pool.query(
-      `SELECT proname, has_function_privilege('crm_operator', p.oid, 'EXECUTE') AS operator,
-              has_function_privilege('crm_app', p.oid, 'EXECUTE') AS app
-       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname = 'crm' AND proname = ANY($1)`,
-      [fns],
+    expect(await sessionCount(ownerB.id)).toBe(1);
+    expect((await codeRows(ownerB.id)).some((r) => r.code_hash === sha256Hex(normalizeAuthCode(bCode.code)) && r.used_at === null)).toBe(true);
+    await portsB.users.deleteSessions(ownerB.id);
+
+    // A set but malformed workspace is not "unbound": it reaches nothing,
+    // not even sessions that have no user yet.
+    await identity.createSession(null, { email: "stranger@auth-a.test", authSubject: "acct_stranger" });
+    await insertSession(ownerB.id);
+    const probe = await app.pool.connect();
+    try {
+      await probe.query("BEGIN");
+      await probe.query("SELECT set_config('app.workspace_id', 'not-a-uuid', true)");
+      expect((await probe.query("SELECT count(*)::int AS n FROM crm.sessions")).rows[0]?.n).toBe(0);
+      expect((await probe.query("SELECT count(*)::int AS n FROM crm.auth_codes")).rows[0]?.n).toBe(0);
+      await probe.query("ROLLBACK");
+    } finally {
+      probe.release();
+    }
+    await portsB.users.deleteSessions(ownerB.id);
+    await admin.pool.query("DELETE FROM crm.sessions WHERE email = 'stranger@auth-a.test'");
+
+    // Workspace tables stay invisible without a workspace: identity work
+    // reads users only through the keyed lookup functions.
+    expect((await app.pool.query("SELECT count(*)::int AS n FROM crm.users")).rows[0]?.n).toBe(0);
+  });
+
+  it("SQL holds only the nine read-only lookups, none callable by PUBLIC", async () => {
+    const fns = await admin.pool.query(
+      `SELECT n.nspname || '.' || p.proname AS name, p.provolatile AS volatility, l.lanname AS language,
+              pg_get_userbyid(p.proowner) AS owner, coalesce(p.proacl::text, '') AS acl,
+              has_function_privilege('crm_app', p.oid, 'EXECUTE') AS app,
+              has_function_privilege('crm_operator', p.oid, 'EXECUTE') AS operator
+       FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+       JOIN pg_language l ON l.oid = p.prolang
+       WHERE n.nspname IN ('crm', 'hosting')
+       ORDER BY 1`,
     );
-    for (const row of privileges.rows) {
-      expect(row.app, `crm_app may execute ${row.proname}`).toBe(true);
-      expect(row.operator, `crm_operator on ${row.proname}`).toBe(operatorFns.has(String(row.proname)));
+    const byName = new Map(fns.rows.map((r) => [String(r.name), r]));
+    expect([...byName.keys()]).toEqual([
+      "crm.current_workspace_id",
+      "crm.email_for_auth_subject",
+      "crm.has_password_credential",
+      "crm.identity_by_email",
+      "crm.identity_by_subject",
+      "crm.identity_by_user_id",
+      "crm.resolve_mcp_key",
+      "crm.workspace_access_state",
+      "hosting.pending_auth_deliveries",
+    ]);
+    for (const row of fns.rows) {
+      // STABLE: a function cannot write. current_workspace_id reads the GUC in plpgsql.
+      expect(row.volatility, `${row.name} volatility`).toBe("s");
+      expect(row.language, `${row.name} language`).toBe(row.name === "crm.current_workspace_id" ? "plpgsql" : "sql");
+      if (row.name !== "crm.current_workspace_id") expect(row.owner, `${row.name} owner`).toBe("crm_identity_resolver");
+      const entries = String(row.acl).replace(/[{}]/g, "").split(",").filter(Boolean);
+      expect(entries.length, `${row.name} has explicit acl`).toBeGreaterThan(0);
+      for (const entry of entries) expect(entry.startsWith("="), `${row.name} grants nothing to PUBLIC`).toBe(false);
+    }
+    // crm_app: every crm lookup, not hosting's sweep. crm_operator: the RLS
+    // predicate, subject → email, "has a password", and its sweep — nothing else.
+    const expectApp = (name: string) => name.startsWith("crm.");
+    const operatorMay = new Set([
+      "crm.current_workspace_id",
+      "crm.email_for_auth_subject",
+      "crm.has_password_credential",
+      "hosting.pending_auth_deliveries",
+    ]);
+    for (const row of fns.rows) {
+      expect(row.app, `crm_app on ${row.name}`).toBe(expectApp(String(row.name)));
+      expect(row.operator, `crm_operator on ${row.name}`).toBe(operatorMay.has(String(row.name)));
     }
   });
 
@@ -525,7 +577,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     // hash / email→subject binding) must both die — real OpenAuth keys, joined
     // with chr(31). Unrelated identities stay, including an email that CONTAINS
     // the victim's (whole-segment match, never a substring).
-    const setKv = (key: string) => app.pool.query("SELECT crm.openauth_kv_set($1, '{}'::jsonb, NULL)", [key]);
+    const setKv = (key: string) => app.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{}'::jsonb)", [key]);
     await setKv(joinAuthKey(["oauth:refresh", "sub-victim", "t1"]));
     await setKv(joinAuthKey(["email", "victim@auth-a.test", "password"]));
     await setKv(joinAuthKey(["email", "victim@auth-a.test", "subject"]));
@@ -579,15 +631,11 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     expect(await codeRows(victim.id)).toHaveLength(0);
     expect(await portsA.mcpClients.get(client.id)).toBeNull();
     expect(await portsA.mcpClients.get(revoked.id)).toBeNull();
-    // Issuer state: every record of the victim is gone, including its code
-    // issue-rate record. Rate records of live users (15-minute TTL, created
-    // by the codes issued earlier in this file) are not the victim's state.
-    const keys = await kvKeys();
-    expect(keys.filter((k) => !k.startsWith("mcpsuite:code-issue"))).toEqual(
+    // Issuer state: every record of the victim is gone; the others stay.
+    expect(await kvKeys()).toEqual(
       [joinAuthKey(["email", "my-victim@auth-a.test", "password"]), joinAuthKey(["oauth:refresh", "sub-survivor", "t1"])].sort(),
     );
-    expect(keys).not.toContain(joinAuthKey(["mcpsuite:code-issue", "victim@auth-a.test"]));
-    expect((await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-victim"])).rows).toHaveLength(0);
+    expect((await app.pool.query("SELECT * FROM crm.identity_by_subject($1)", ["sub-victim"])).rows).toHaveLength(0);
 
     // …while business records survive, unassigned and nameless.
     const companyAfter = (await portsA.companies.get(company.id))!;
