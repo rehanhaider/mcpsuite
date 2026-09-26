@@ -789,19 +789,52 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
     }
   });
 
-  it("crm_operator has no generic issuer storage, sessions or schema changes", async () => {
-    await asOperatorIn(null, async (q) => {
-      await expect(q("SELECT crm.openauth_kv_get('x')")).rejects.toThrow(/permission denied/i);
-    });
-    await asOperatorIn(null, async (q) => {
-      await expect(q("SELECT * FROM crm.openauth_kv")).rejects.toThrow(/permission denied/i);
-    });
-    await asOperatorIn(null, async (q) => {
-      await expect(q("SELECT * FROM crm.sessions")).rejects.toThrow(/permission denied/i);
-    });
-    await asOperatorIn(null, async (q) => {
-      await expect(q("CREATE TABLE hosting.evil (id int)")).rejects.toThrow(/permission denied/i);
-    });
+  it("crm_operator reads issuer keys but never values, and only its bound workspace's sessions and codes", async () => {
+    const userOf = async (ws: string): Promise<string> =>
+      String((await h.admin.pool.query("SELECT id FROM crm.users WHERE workspace_id = $1", [ws])).rows[0]?.id);
+    const [userA, userB] = [await userOf(wsA), await userOf(wsB)];
+    const key = "email\u001fa@roles.test\u001fpassword";
+    await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{\"hash\":\"secret\"}')", [key]);
+    for (const u of [userA, userB]) {
+      await h.admin.pool.query(
+        `INSERT INTO crm.sessions (id, token_hash, user_id, expires_at, created_at)
+         VALUES (gen_random_uuid(), $1, $2, now() + interval '1 day', now())`,
+        [`roles-${u}`, u],
+      );
+    }
+    try {
+      // Issuer storage: the key column only — credential values stay unreadable.
+      await asOperatorIn(null, async (q) => {
+        expect(await q("SELECT key FROM crm.openauth_kv WHERE key = $1", [key])).toHaveLength(1);
+      });
+      for (const denied of [
+        "SELECT value FROM crm.openauth_kv",
+        "SELECT * FROM crm.openauth_kv",
+        "INSERT INTO crm.openauth_kv (key, value) VALUES ('k', '{}')",
+        "UPDATE crm.openauth_kv SET expires_at = now()",
+        "INSERT INTO crm.sessions (id, token_hash, expires_at, created_at) VALUES (gen_random_uuid(), 'h', now(), now())",
+        "CREATE TABLE hosting.evil (id int)",
+      ]) {
+        await asOperatorIn(null, async (q) => {
+          await expect(q(denied), denied).rejects.toThrow(/permission denied/i);
+        });
+      }
+      // Sessions and codes: nothing unbound; bound, its own workspace's users only.
+      await asOperatorIn(null, async (q) => {
+        expect((await q("SELECT count(*)::int AS n FROM crm.sessions"))[0].n).toBe(0);
+        expect((await q("SELECT count(*)::int AS n FROM crm.auth_codes"))[0].n).toBe(0);
+      });
+      await asOperatorIn(wsA, async (q) => {
+        expect((await q("SELECT user_id::text AS u FROM crm.sessions")).map((r) => r.u)).toEqual([userA]);
+        expect(await q("DELETE FROM crm.sessions WHERE user_id = $1 RETURNING 1", [userB])).toHaveLength(0);
+        await expect(
+          q("INSERT INTO crm.auth_codes (user_id, email, purpose, code_hash, expires_at) VALUES ($1, 'x', 'setup', 'h-op', now())", [userB]),
+        ).rejects.toThrow(/row-level security/i);
+      });
+    } finally {
+      await h.admin.pool.query("DELETE FROM crm.openauth_kv WHERE key = $1", [key]);
+      await h.admin.pool.query("DELETE FROM crm.sessions WHERE token_hash LIKE 'roles-%'");
+    }
   });
 
   it("crm_app cannot reach the hosting schema; the access reader answers only for its own workspace", async () => {

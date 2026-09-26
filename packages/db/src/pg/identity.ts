@@ -1,11 +1,18 @@
 /**
  * PostgreSQL implementation of the identity adapter interface (../identity.ts).
  *
- * The runtime login role (crm_app) has no grants on the identity-level tables
- * (sessions, openauth_kv, auth_codes): every read and write there goes
- * through the fixed SECURITY DEFINER functions in schema.sql. Anything that
- * touches workspace-owned rows (users, mcp_clients) binds the transaction to
- * that workspace first, so forced row-level security still applies.
+ * Every rule lives here, in TypeScript: sessions and adoption, the issuer
+ * storage, code issue and redemption, ending sessions, and subject linking.
+ * The database contributes row-level security and four read-only lookups
+ * (schema.sql, "Cross-workspace lookups"): sign-in must find a user before a
+ * workspace is bound, and a transaction without a workspace sees no user rows.
+ *
+ * The identity-level tables (sessions, openauth_kv, auth_codes) follow the
+ * request's two phases. Unbound, rows are reachable and this module reads them
+ * only by key (token hash, email, issuer key). Bound, only the workspace's
+ * users' sessions and codes are reachable. Every statement that ends or
+ * issues something for a user runs bound, and also names the bound
+ * workspace's users explicitly.
  *
  * Every method runs in the request's ambient transaction (./tx.ts): it joins
  * one opened by `withTransaction`, `ports.tx` or another method, and
@@ -13,13 +20,12 @@
  * (a code or a key resolves it), so a transaction starts unbound and binds
  * once the workspace is known.
  *
- * The same store serves hosting control (crm_operator), which may call only
- * the narrow functions its methods here use: issueCode, hasPasswordCredential
- * and emailForAuthSubject (schema.sql, "Narrow credential functions").
+ * The same store serves hosting control (crm_operator), which may only issue
+ * codes, check that a password credential exists, and resolve a subject's
+ * email — it can read issuer keys but never their values.
  *
  * Difference from the SQLite adapter, deliberate:
- *   - A disabled user's setup/reset code does not redeem
- *     (crm.redeem_auth_code), as crm.consume_auth_code already behaves.
+ *   - A disabled user's setup/reset code does not redeem.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
@@ -30,6 +36,7 @@ import {
   AUTH_CODE_ISSUE_WINDOW_MS,
   AUTH_CODE_MAX_ATTEMPTS,
   AUTH_CODE_TTL_MS,
+  OPENAUTH_KEY_SEPARATOR,
   authPasswordKey,
   authSubjectKey,
   generateAuthCode,
@@ -67,6 +74,47 @@ const pgErrorCode = (e: unknown): string | undefined => {
   return undefined;
 };
 
+const rows = async <T = Record<string, unknown>>(x: PgDb, q: SQL): Promise<T[]> => {
+  const res = (await x.execute(q)) as unknown;
+  if (Array.isArray(res)) return res as T[];
+  return ((res as { rows?: unknown[] }).rows ?? []) as T[];
+};
+
+/** Issuer keys are path segments joined with the separator; prefixes match whole segments. */
+const segmentPrefix = (segments: string[]): string => joinAuthKey(segments) + OPENAUTH_KEY_SEPARATOR;
+
+/** The fixed identity fields the lookup functions return (schema.sql). */
+interface IdentityRow {
+  user_id: string;
+  workspace_id: string;
+  role: string;
+  status: string;
+  email: string;
+  auth_subject: string | null;
+  password_must_change: boolean;
+  disabled_at: unknown;
+}
+
+/**
+ * Remove the OpenAuth issuer's stored state for one identity: the password
+ * hash and email → subject binding ("email" ␟ <email> ␟ …) and the subject's
+ * refresh tokens ("oauth:refresh" ␟ <subject> ␟ …). Whole-segment prefixes
+ * only — one email can sit inside another (bob@acme.com in jimbob@acme.com).
+ * Used by permanent user and workspace deletion, before the user row goes.
+ */
+export async function purgeIssuerIdentity(x: PgDb, who: { email: string; subject: string | null }): Promise<void> {
+  const emailPrefix = segmentPrefix(["email", normalizeEmail(who.email)]);
+  if (who.subject) {
+    const refreshPrefix = segmentPrefix(["oauth:refresh", who.subject]);
+    await rows(
+      x,
+      sql`DELETE FROM crm.openauth_kv WHERE starts_with(key, ${emailPrefix}) OR starts_with(key, ${refreshPrefix})`,
+    );
+  } else {
+    await rows(x, sql`DELETE FROM crm.openauth_kv WHERE starts_with(key, ${emailPrefix})`);
+  }
+}
+
 export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks } = {}): IdentityStore {
   const hooks = options.hooks ?? {};
 
@@ -74,42 +122,48 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
   const inTx = <T>(workspaceId: string | null, fn: (x: PgDb) => Promise<T>): Promise<T> =>
     inPgTransaction(db, workspaceId === null ? null : uid(workspaceId), fn);
 
-  const rows = async <T = Record<string, unknown>>(x: PgDb, q: SQL): Promise<T[]> => {
-    const res = (await x.execute(q)) as unknown;
-    if (Array.isArray(res)) return res as T[];
-    return ((res as { rows?: unknown[] }).rows ?? []) as T[];
-  };
+  const lookup = async (x: PgDb, q: SQL): Promise<IdentityRow | null> => (await rows<IdentityRow>(x, q))[0] ?? null;
 
-  // --- issuer storage over the crm.openauth_kv_* functions ----------------
+  // --- issuer storage (crm.openauth_kv) ------------------------------------
+  // Expired rows are invisible to reads; writes sweep them first.
 
-  const kvGet = async (x: PgDb, key: string): Promise<string | null> => {
-    const [row] = await rows<{ value: unknown }>(x, sql`SELECT crm.openauth_kv_get(${key}) AS value`);
-    return row?.value == null ? null : JSON.stringify(row.value);
+  const expiryOf = (v: unknown): number | null => (v == null ? null : (v instanceof Date ? v : new Date(String(v))).getTime());
+
+  const kvGet = async (x: PgDb, key: string): Promise<{ value: string; expiry: number | null } | null> => {
+    const [row] = await rows<{ value: unknown; expires_at: unknown }>(
+      x,
+      sql`SELECT value, expires_at FROM crm.openauth_kv
+          WHERE key = ${key} AND (expires_at IS NULL OR expires_at > now())`,
+    );
+    return row ? { value: JSON.stringify(row.value), expiry: expiryOf(row.expires_at) } : null;
   };
   const kvSet = async (x: PgDb, key: string, value: string, expiry: number | null): Promise<void> => {
     const expiresAt = expiry == null ? null : new Date(expiry).toISOString();
-    await rows(x, sql`SELECT crm.openauth_kv_set(${key}, ${value}::jsonb, ${expiresAt}::timestamptz)`);
+    await rows(x, sql`DELETE FROM crm.openauth_kv WHERE expires_at IS NOT NULL AND expires_at <= now()`);
+    await rows(
+      x,
+      sql`INSERT INTO crm.openauth_kv (key, value, expires_at) VALUES (${key}, ${value}::jsonb, ${expiresAt}::timestamptz)
+          ON CONFLICT (key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at`,
+    );
   };
   const kvRemove = async (x: PgDb, key: string): Promise<void> => {
-    await rows(x, sql`SELECT crm.openauth_kv_remove(${key})`);
+    await rows(x, sql`DELETE FROM crm.openauth_kv WHERE key = ${key}`);
   };
-  const kvScan = async (x: PgDb, prefix: string): Promise<Array<{ key: string; value: string }>> => {
-    const found = await rows<{ key: string; value: unknown }>(x, sql`SELECT key, value FROM crm.openauth_kv_scan(${prefix})`);
-    return found.map((r) => ({ key: r.key, value: JSON.stringify(r.value) }));
+  const kvScan = async (x: PgDb, prefix: string): Promise<Array<{ key: string; value: string; expiry: number | null }>> => {
+    const found = await rows<{ key: string; value: unknown; expires_at: unknown }>(
+      x,
+      sql`SELECT key, value, expires_at FROM crm.openauth_kv
+          WHERE starts_with(key, ${prefix}) AND (expires_at IS NULL OR expires_at > now())
+          ORDER BY key`,
+    );
+    return found.map((r) => ({ key: r.key, value: JSON.stringify(r.value), expiry: expiryOf(r.expires_at) }));
   };
 
-  // The functions return values only; expiry is enforced inside them
-  // (expired rows are invisible), so it is reported as null here.
   const authKv: AuthKvStore = {
-    get: (key) =>
-      inTx(null, async (x) => {
-        const value = await kvGet(x, key);
-        return value == null ? null : { value, expiry: null };
-      }),
+    get: (key) => inTx(null, (x) => kvGet(x, key)),
     set: (key, value, expiry) => inTx(null, (x) => kvSet(x, key, value, expiry)),
     remove: (key) => inTx(null, (x) => kvRemove(x, key)),
-    scanPrefix: (prefix) =>
-      inTx(null, async (x) => (await kvScan(x, prefix)).map((r) => ({ key: r.key, value: r.value, expiry: null }))),
+    scanPrefix: (prefix) => inTx(null, (x) => kvScan(x, prefix)),
   };
 
   /** A user's subject, read under the bound workspace (RLS). */
@@ -121,27 +175,66 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
     return row?.auth_subject ?? null;
   };
 
-  /** Sessions + refresh tokens of a user in the bound workspace. */
+  /**
+   * End a user's sign-ins: every CRM session and the issuer refresh tokens of
+   * the user's subject. Runs bound; the statements also name the bound
+   * workspace's users, so an unbound call ends nothing.
+   */
   const endSessions = async (x: PgDb, userId: string): Promise<number> => {
-    const [row] = await rows<{ n: number }>(x, sql`SELECT crm.end_user_sessions(${uid(userId)}::uuid) AS n`);
-    return Number(row?.n ?? 0);
+    const subject = await subjectOf(x, userId);
+    const ended = await rows(
+      x,
+      sql`DELETE FROM crm.sessions
+          WHERE user_id = ${uid(userId)}::uuid AND user_id IN (SELECT id FROM crm.users)
+          RETURNING 1`,
+    );
+    if (subject) {
+      await rows(x, sql`DELETE FROM crm.openauth_kv WHERE starts_with(key, ${segmentPrefix(["oauth:refresh", subject])})`);
+    }
+    return ended.length;
   };
 
+  /**
+   * Redeem the way the redemption screens ask: email + purpose + code, against
+   * the latest unused code, locked for the rest of the transaction so a code
+   * is redeemed at most once under any concurrency. An expired code or one at
+   * its attempt cap is refused; a wrong code counts an attempt (and burns the
+   * code at the cap) — the caller returns rather than throws, so the attempt
+   * commits. A waiter whose code was burned meanwhile finds no row: under
+   * READ COMMITTED the locked row fails its re-check and LIMIT does not
+   * substitute an older one (same as SQLite answering invalid_code).
+   */
   const redeem = async (
     x: PgDb,
     input: { email: string; purpose: "setup" | "reset"; code: string },
   ): Promise<AuthCodeVerification & { workspaceId?: string }> => {
-    const [row] = await rows<{ outcome: string; user_id: string | null; workspace_id: string | null }>(
+    const [code] = await rows<{ id: string; user_id: string; code_hash: string; attempts: number; expired: boolean }>(
       x,
-      sql`SELECT * FROM crm.redeem_auth_code(${normalizeEmail(input.email)}, ${input.purpose}, ${sha256Hex(
-        normalizeAuthCode(input.code),
-      )}, ${AUTH_CODE_MAX_ATTEMPTS})`,
+      sql`SELECT id, user_id, code_hash, attempts, (expires_at <= now()) AS expired
+          FROM crm.auth_codes
+          WHERE email = ${normalizeEmail(input.email)} AND purpose = ${input.purpose} AND used_at IS NULL
+          ORDER BY created_at DESC
+          LIMIT 1
+          FOR UPDATE`,
     );
-    if (row?.outcome === "ok" && row.user_id && row.workspace_id) {
-      return { ok: true, userId: row.user_id, workspaceId: row.workspace_id };
+    if (!code) return { ok: false, reason: "invalid_code" };
+    if (code.expired) return { ok: false, reason: "expired_code" };
+    if (code.attempts >= AUTH_CODE_MAX_ATTEMPTS) return { ok: false, reason: "rate_limited" };
+    if (code.code_hash !== sha256Hex(normalizeAuthCode(input.code))) {
+      const attempts = code.attempts + 1;
+      const burned = attempts >= AUTH_CODE_MAX_ATTEMPTS;
+      await rows(
+        x,
+        burned
+          ? sql`UPDATE crm.auth_codes SET attempts = ${attempts}, used_at = now() WHERE id = ${code.id}::uuid`
+          : sql`UPDATE crm.auth_codes SET attempts = ${attempts} WHERE id = ${code.id}::uuid`,
+      );
+      return { ok: false, reason: burned ? "rate_limited" : "invalid_code" };
     }
-    const reason = row?.outcome === "expired_code" || row?.outcome === "rate_limited" ? row.outcome : "invalid_code";
-    return { ok: false, reason };
+    const user = await lookup(x, sql`SELECT * FROM crm.identity_by_user_id(${code.user_id}::uuid)`);
+    if (!user || user.status === "disabled") return { ok: false, reason: "invalid_code" };
+    await rows(x, sql`UPDATE crm.auth_codes SET used_at = now() WHERE id = ${code.id}::uuid`);
+    return { ok: true, userId: code.user_id, workspaceId: user.workspace_id };
   };
 
   const identity: IdentityStore = {
@@ -153,31 +246,82 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
       inTx(null, async (x) => {
         const token = `sess_${randomBytes(32).toString("hex")}`;
         const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+        await rows(x, sql`DELETE FROM crm.sessions WHERE expires_at <= now()`);
         await rows(
           x,
-          sql`SELECT crm.create_session(${sha256Hex(token)}, ${userId === null ? null : uid(userId)}::uuid, ${
-            link.email ? normalizeEmail(link.email) : null
-          }, ${link.authSubject ?? null}, ${link.authRefresh ?? null}, ${expiresAt}::timestamptz)`,
+          sql`INSERT INTO crm.sessions (id, token_hash, user_id, email, auth_subject, auth_refresh, expires_at, created_at)
+              VALUES (gen_random_uuid(), ${sha256Hex(token)}, ${userId === null ? null : uid(userId)}::uuid,
+                      ${link.email ? normalizeEmail(link.email) : null}, ${link.authSubject ?? null},
+                      ${link.authRefresh ?? null}, ${expiresAt}::timestamptz, now())`,
         );
         return { token, expiresAt };
       }),
 
+    // Resolve a session token to the CURRENT identity (token claims are never
+    // authority), as resolveSessionAny in ../auth.ts. A user-less session is
+    // adopted when an active user with its email now exists: the session's
+    // subject is bound to that user once and the session row upgraded in
+    // place. If that user already bound a different subject, the session can
+    // never own it and is deleted. Otherwise it surfaces as unprovisioned.
+    // Only active, enabled members resolve as a user.
     resolveSessionAny: async (token) => {
       if (!token) return null;
       return inTx(null, async (x) => {
-        const [row] = await rows<Record<string, unknown>>(x, sql`SELECT * FROM crm.resolve_session(${sha256Hex(token)})`);
-        if (!row) return null;
-        if (row.kind === "unprovisioned") {
-          return {
-            unprovisioned: true,
-            email: String(row.email),
-            authSubject: (row.auth_subject as string | null) ?? null,
-          } satisfies UnprovisionedSession;
+        const [session] = await rows<{
+          id: string;
+          user_id: string | null;
+          email: string | null;
+          auth_subject: string | null;
+          expired: boolean;
+        }>(
+          x,
+          sql`SELECT id, user_id, email, auth_subject, (expires_at <= now()) AS expired
+              FROM crm.sessions WHERE token_hash = ${sha256Hex(token)}`,
+        );
+        if (!session || session.expired) return null;
+
+        let userId = session.user_id;
+        if (userId === null) {
+          if (!session.email) return null;
+          const candidate = await lookup(x, sql`SELECT * FROM crm.identity_by_email(${session.email})`);
+          if (!candidate || candidate.disabled_at != null || candidate.status !== "active") {
+            return {
+              unprovisioned: true,
+              email: session.email,
+              authSubject: session.auth_subject,
+            } satisfies UnprovisionedSession;
+          }
+          if (candidate.auth_subject && session.auth_subject && candidate.auth_subject !== session.auth_subject) {
+            await rows(x, sql`DELETE FROM crm.sessions WHERE id = ${session.id}::uuid`);
+            return null;
+          }
+          await bindAmbientWorkspace(db, candidate.workspace_id);
+          if (!candidate.auth_subject && session.auth_subject) {
+            // Bind once: a sign-in binding a different subject at the same
+            // moment wins the row; this session then conflicts and is deleted.
+            const bound = await rows(
+              x,
+              sql`UPDATE crm.users SET auth_subject = ${session.auth_subject}, updated_at = now()
+                  WHERE id = ${candidate.user_id}::uuid AND auth_subject IS NULL
+                  RETURNING id`,
+            );
+            if (bound.length === 0 && (await subjectOf(x, candidate.user_id)) !== session.auth_subject) {
+              await rows(x, sql`DELETE FROM crm.sessions WHERE id = ${session.id}::uuid`);
+              return null;
+            }
+          }
+          await rows(
+            x,
+            sql`UPDATE crm.sessions SET user_id = ${candidate.user_id}::uuid, email = NULL WHERE id = ${session.id}::uuid`,
+          );
+          userId = candidate.user_id;
         }
-        // The resolver returns fixed identity fields only; the profile is read
+
+        const member = await lookup(x, sql`SELECT * FROM crm.identity_by_user_id(${userId}::uuid)`);
+        if (!member || member.status !== "active" || member.disabled_at != null) return null;
+        // The lookup returns fixed identity fields only; the profile is read
         // inside the resolved workspace, under row-level security.
-        const workspaceId = String(row.workspace_id);
-        await bindAmbientWorkspace(db, workspaceId);
+        await bindAmbientWorkspace(db, member.workspace_id);
         const [profile] = await rows<{
           email: string;
           name: string;
@@ -188,13 +332,13 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
         }>(
           x,
           sql`SELECT email, name, status, (password_hash IS NOT NULL) AS has_password, disabled_at, created_at
-              FROM crm.users WHERE id = ${String(row.user_id)}::uuid`,
+              FROM crm.users WHERE id = ${member.user_id}::uuid`,
         );
         if (!profile) return null;
-        const role = row.role as Role;
+        const role = member.role as Role;
         return {
           user: {
-            id: String(row.user_id),
+            id: member.user_id,
             email: profile.email,
             name: profile.name,
             role,
@@ -203,10 +347,10 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
             disabledAt: isoN(profile.disabled_at),
             createdAt: iso(profile.created_at),
           },
-          workspaceId,
+          workspaceId: member.workspace_id,
           role,
-          passwordMustChange: row.password_must_change === true,
-          authSubject: (row.auth_subject as string | null) ?? null,
+          passwordMustChange: member.password_must_change === true,
+          authSubject: session.auth_subject,
         } satisfies SessionUser;
       });
     },
@@ -218,8 +362,11 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
 
     destroySession: (token) =>
       inTx(null, async (x) => {
-        const [row] = await rows<{ refresh: string | null }>(x, sql`SELECT crm.destroy_session(${sha256Hex(token)}) AS refresh`);
-        const refresh = row?.refresh;
+        const [row] = await rows<{ auth_refresh: string | null }>(
+          x,
+          sql`DELETE FROM crm.sessions WHERE token_hash = ${sha256Hex(token)} RETURNING auth_refresh`,
+        );
+        const refresh = row?.auth_refresh;
         if (!refresh) return;
         // Refresh token format is "<subject>:<id>" (OpenAuth issuer.ts).
         const idx = refresh.lastIndexOf(":");
@@ -240,12 +387,17 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
     verifyPassword: (email, password) =>
       inTx(null, async (x) => {
         const stored = await kvGet(x, authPasswordKey(email));
-        return stored != null && openAuthVerifyPassword(password, JSON.parse(stored) as OpenAuthScryptHash);
+        return stored != null && openAuthVerifyPassword(password, JSON.parse(stored.value) as OpenAuthScryptHash);
       }),
+    // Key and expiry only — hosting control may not read credential values.
     hasPasswordCredential: (email) =>
       inTx(null, async (x) => {
-        const [row] = await rows<{ ok: boolean }>(x, sql`SELECT crm.has_password_credential(${normalizeEmail(email)}) AS ok`);
-        return row?.ok === true;
+        const found = await rows(
+          x,
+          sql`SELECT 1 FROM crm.openauth_kv
+              WHERE key = ${authPasswordKey(email)} AND (expires_at IS NULL OR expires_at > now())`,
+        );
+        return found.length === 1;
       }),
 
     // --- codes ------------------------------------------------------------
@@ -255,27 +407,39 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
         if (purpose !== "setup" && purpose !== "reset") {
           throw OpError.validation(`Unknown credential code purpose: ${String(purpose)}`);
         }
-        const [user] = await rows<{ email: string }>(x, sql`SELECT email FROM crm.users WHERE id = ${uid(userId)}::uuid`);
-        if (!user) throw OpError.notFound("user", userId);
+        const [user] = await rows<{ email: string; status: string }>(
+          x,
+          sql`SELECT email, status FROM crm.users WHERE id = ${uid(userId)}::uuid`,
+        );
+        if (!user || user.status === "disabled") throw OpError.notFound("user", userId);
 
         // Issue rate limit per email, same window and cap as the SQLite
-        // adapter (crm.record_code_issue keeps the history).
-        const [allowed] = await rows<{ ok: boolean }>(
+        // adapter, counted from the code rows themselves (superseded codes are
+        // marked used, not deleted). The per-email lock makes concurrent issues
+        // count one another.
+        await rows(x, sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mcpsuite:code-issue:${normalizeEmail(user.email)}`}, 0))`);
+        const [recent] = await rows<{ n: number }>(
           x,
-          sql`SELECT crm.record_code_issue(${user.email}, ${AUTH_CODE_ISSUE_WINDOW_MS}, ${AUTH_CODE_ISSUE_MAX}) AS ok`,
+          sql`SELECT count(*)::int AS n FROM crm.auth_codes
+              WHERE email = ${user.email} AND created_at > now() - ${AUTH_CODE_ISSUE_WINDOW_MS} * interval '1 millisecond'`,
         );
-        if (allowed?.ok !== true) {
+        if (Number(recent?.n ?? 0) >= AUTH_CODE_ISSUE_MAX) {
           throw new OpError("conflict", "Too many codes issued for this email — wait a few minutes and try again");
         }
 
-        const now = Date.now();
         const code = generateAuthCode();
-        const expiresAt = new Date(now + AUTH_CODE_TTL_MS[purpose]).toISOString();
-        const [issued] = await rows<{ id: string | null }>(
+        const expiresAt = new Date(Date.now() + AUTH_CODE_TTL_MS[purpose]).toISOString();
+        // Supersede: completing an old code and regenerating cannot both succeed.
+        await rows(
           x,
-          sql`SELECT crm.issue_auth_code(${uid(userId)}::uuid, ${purpose}, ${sha256Hex(normalizeAuthCode(code))}, ${expiresAt}::timestamptz) AS id`,
+          sql`UPDATE crm.auth_codes SET used_at = now()
+              WHERE user_id = ${uid(userId)}::uuid AND purpose = ${purpose} AND used_at IS NULL`,
         );
-        if (!issued?.id) throw OpError.notFound("user", userId);
+        await rows(
+          x,
+          sql`INSERT INTO crm.auth_codes (user_id, email, purpose, code_hash, expires_at)
+              VALUES (${uid(userId)}::uuid, ${user.email}, ${purpose}, ${sha256Hex(normalizeAuthCode(code))}, ${expiresAt}::timestamptz)`,
+        );
         if (purpose === "reset") await endSessions(x, userId);
         return { code, expiresAt };
       }),
@@ -295,10 +459,12 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
         await bindAmbientWorkspace(db, verdict.workspaceId!);
         await kvSet(x, authPasswordKey(input.email), JSON.stringify(openAuthHashPassword(input.password)), null);
         // A self-chosen password satisfies any forced-change requirement.
-        await rows(
+        const cleared = await rows(
           x,
-          sql`UPDATE crm.users SET password_must_change = false, updated_at = now() WHERE id = ${verdict.userId}::uuid`,
+          sql`UPDATE crm.users SET password_must_change = false, updated_at = now()
+              WHERE id = ${verdict.userId}::uuid RETURNING id`,
         );
+        if (cleared.length !== 1) throw new Error("Code redemption could not reach its user in the bound workspace");
         if (input.purpose === "reset") await endSessions(x, verdict.userId);
         return { ok: true as const, userId: verdict.userId };
       }),
@@ -313,17 +479,15 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
         // subject (open registration) and the later write wins. The lock is
         // transaction-scoped, so it releases at commit or rollback.
         await rows(x, sql`SELECT pg_advisory_xact_lock(hashtextextended(${`mcpsuite:auth-success:${normalized}`}, 0))`);
-        const [user] = await rows<{ user_id: string; workspace_id: string; status: string; subject_linked: boolean }>(
-          x,
-          sql`SELECT user_id, workspace_id, status, subject_linked FROM crm.resolve_auth_email(${normalized})`,
-        );
+        const found = await lookup(x, sql`SELECT * FROM crm.identity_by_email(${normalized})`);
+        const user = found && { ...found, subject_linked: found.auth_subject !== null };
         if (!user) {
           if (!opts.openRegistration) return { status: "not_invited" };
           // Hosted open registration: a verified email without a CRM user gets
           // a stable subject and an unprovisioned session. Reuse a subject
           // minted for this email earlier (login before provisioning).
           const prior = await kvGet(x, authSubjectKey(normalized));
-          const priorValue = prior == null ? null : (JSON.parse(prior) as unknown);
+          const priorValue = prior == null ? null : (JSON.parse(prior.value) as unknown);
           const subject =
             typeof priorValue === "string" && priorValue.startsWith("acct_") ? priorValue : `acct_${newId()}`;
           await hooks.afterSubjectBound?.();
@@ -362,7 +526,7 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
           if (bound.length === 1) {
             subject = minted;
           } else {
-            // Changed since resolve_auth_email: bound by another sign-in, or
+            // Changed since the lookup: bound by another sign-in, or
             // disabled by an admin in between.
             const [current] = await rows<{ status: string; auth_subject: string | null }>(
               x,
@@ -380,10 +544,7 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
 
     findUserByAuthSubject: (subject) =>
       inTx(null, async (x) => {
-        const [row] = await rows<{ user_id: string; workspace_id: string; status: string; email: string }>(
-          x,
-          sql`SELECT * FROM crm.find_user_by_auth_subject(${subject})`,
-        );
+        const row = await lookup(x, sql`SELECT * FROM crm.identity_by_subject(${subject})`);
         return row ? { id: row.user_id, workspaceId: row.workspace_id, status: row.status, email: row.email } : null;
       }),
 
