@@ -91,16 +91,15 @@ journalctl --user -u mcpsuite-web -n 50
 ```
 
 To recover, stop both services (a broken install fails them together), fix
-the cause, then deploy:
+the cause, then deploy. If the journal shows `better_sqlite3.node` with a
+`NODE_MODULE_VERSION` mismatch, the fix is the `pnpm rebuild` line:
 
 ```sh
 systemctl --user stop mcpsuite-web mcpsuite-mcp-http
-mise exec -- make setup && mise exec -- make deploy
+mise exec -- make setup
+mise exec -- pnpm rebuild better-sqlite3   # only for a NODE_MODULE_VERSION mismatch
+mise exec -- make deploy
 ```
-
-If the journal shows `better_sqlite3.node` with a `NODE_MODULE_VERSION`
-mismatch, rebuild it under the pinned Node before deploying:
-`mise exec -- pnpm rebuild better-sqlite3`.
 
 ## Put it behind HTTPS
 

@@ -14,7 +14,7 @@ SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 _units := $(SVC:web=mcpsuite-web.service)
 _units := $(_units:mcp=mcpsuite-mcp-http.service)
 # Render one unit template ($$u) into the user unit directory.
-_render_unit = sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
+_render_unit = sed "s|@REPO@|$(CURDIR)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
 	chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"
 # The selected units that `make autostart` has installed; deploy acts on these.
 _installed = $(strip $(foreach u,$(_units),$(if $(wildcard $(SYSTEMD_USER_DIR)/$(u)),$(u))))
