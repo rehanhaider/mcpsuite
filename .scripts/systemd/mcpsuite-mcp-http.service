@@ -1,6 +1,12 @@
 [Unit]
 Description=mcpsuite MCP HTTP server (agents connect via Bearer API key)
 After=network-online.target
+# Stop retrying after 5 failed starts within 60 s: the unit then shows as
+# "failed" instead of crash-looping unnoticed (a Node ABI mismatch once
+# looped 24k+ times). Recover with `mise exec -- make deploy`, which clears
+# the failed state (`systemctl --user reset-failed`) before restarting.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

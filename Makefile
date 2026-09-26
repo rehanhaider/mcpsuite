@@ -13,6 +13,19 @@ SVC ?= web mcp
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 _units := $(SVC:web=mcpsuite-web.service)
 _units := $(_units:mcp=mcpsuite-mcp-http.service)
+# Render one unit template ($$u) into the user unit directory.
+_render_unit = sed "s|@REPO@|$(CURDIR)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
+	chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"
+# The selected units that `make autostart` has installed; deploy acts on these.
+_installed = $(strip $(foreach u,$(_units),$(if $(wildcard $(SYSTEMD_USER_DIR)/$(u)),$(u))))
+# Clear the start-limit counter of units ($(1)) before a deliberate start, so
+# earlier starts don't make systemd refuse it. Only loaded units have a counter,
+# and reset-failed errors on a unit that isn't loaded, so skip those.
+_reset_failed = for u in $(1); do \
+	if [ -n "$$(systemctl --user list-units --all --plain --no-legend "$$u")" ]; then \
+		systemctl --user reset-failed "$$u"; \
+	fi; \
+	done
 
 .PHONY: help setup db-setup dev build start mcp mcp-http \
         test typecheck smoke clean deploy \
@@ -56,9 +69,13 @@ typecheck: ## Typecheck every package
 smoke: ## Exercise every catalog operation against the live DB (safe, self-cleaning)
 	pnpm --filter @mcpsuite/db smoke
 
-deploy: ## Build the web app and restart the systemd services
+deploy: ## Refresh the installed units, build the web app, restart the services
+	@test -n "$(_installed)" || { echo ">>> No services installed ($(SVC)); run make autostart first." >&2; exit 1; }
+	@for u in $(_installed); do $(_render_unit); done
+	systemctl --user daemon-reload
 	$(MAKE) build
-	systemctl --user restart $(_units)
+	@$(call _reset_failed,$(_installed))
+	systemctl --user restart $(_installed)
 	@echo ">>> Deployed.  web -> http://localhost:2222   mcp -> http://localhost:8765/mcp"
 
 clean: ## Remove build artifacts
@@ -70,10 +87,10 @@ autostart: ## Enable + start web UI & MCP on boot (SVC=web|mcp to limit)
 	@loginctl enable-linger "$$USER" >/dev/null 2>&1 || true
 	@for u in $(_units); do \
 		echo ">>> installing $$u"; \
-		sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
-		chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"; \
+		$(_render_unit); \
 	done
 	systemctl --user daemon-reload
+	@$(call _reset_failed,$(_units))
 	systemctl --user enable --now $(_units)
 	@echo ">>> Autostart ON ($(SVC)).  web -> http://localhost:2222   mcp -> http://localhost:8765/mcp"
 

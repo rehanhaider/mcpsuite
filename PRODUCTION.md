@@ -73,13 +73,33 @@ serves `/mcp` itself); the separate MCP HTTP service is only needed if you
 want MCP on its own port (`make autostart SVC=web` installs just the web
 service).
 
-After pulling source changes:
+After pulling source changes (this also refreshes the installed unit files):
 
 ```sh
 mise exec -- make deploy
 ```
 
 Do not run `make dev` while the `mcpsuite-web` service owns port 2222.
+
+A service that fails 5 starts within 60 seconds stops retrying and shows as
+`failed`; systemd then refuses a plain `restart` until the failed state is
+cleared. To inspect a service (same for `mcpsuite-mcp-http`):
+
+```sh
+systemctl --user status mcpsuite-web
+journalctl --user -u mcpsuite-web -n 50
+```
+
+To recover, stop both services (a broken install fails them together), fix
+the cause, then deploy. If the journal shows `better_sqlite3.node` with a
+`NODE_MODULE_VERSION` mismatch, the fix is the `pnpm rebuild` line:
+
+```sh
+systemctl --user stop mcpsuite-web mcpsuite-mcp-http
+mise exec -- make setup
+mise exec -- pnpm rebuild better-sqlite3   # only for a NODE_MODULE_VERSION mismatch
+mise exec -- make deploy
+```
 
 ## Put it behind HTTPS
 
