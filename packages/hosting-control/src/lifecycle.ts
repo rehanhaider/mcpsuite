@@ -184,7 +184,7 @@ export interface SetAccessInput {
 }
 
 export async function setWorkspaceAccess(store: HostingStore, workspaceId: string, input: SetAccessInput) {
-  if (!(await store.workspaceExists(workspaceId))) throw new HcError(404, "not_found", "Unknown workspace");
+  if (!(await store.lockWorkspace(workspaceId))) throw new HcError(404, "not_found", "Unknown workspace");
 
   const current = await store.getAccess(workspaceId);
   const currentVersion = current?.version ?? 0;
@@ -270,7 +270,7 @@ export async function transferWorkspaceOwner(
   workspaceId: string,
   input: TransferOwnerInput,
 ): Promise<TransferOwnerResult> {
-  if (!(await store.workspaceExists(workspaceId))) throw new HcError(404, "not_found", "Unknown workspace");
+  if (!(await store.lockWorkspace(workspaceId))) throw new HcError(404, "not_found", "Unknown workspace");
 
   const access = await store.getAccess(workspaceId);
   const currentVersion = access?.version ?? 0;
@@ -341,7 +341,7 @@ export async function initiateOwnerRecovery(
   workspaceId: string,
   reason: string,
 ): Promise<OwnerRecoveryInitiation> {
-  if (!(await store.workspaceExists(workspaceId))) throw new HcError(404, "not_found", "Unknown workspace");
+  if (!(await store.lockWorkspace(workspaceId))) throw new HcError(404, "not_found", "Unknown workspace");
 
   const owner = await store.ownerOf(workspaceId);
   const state = owner ? userAuthState(owner) : null;

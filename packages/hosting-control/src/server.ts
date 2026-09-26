@@ -297,16 +297,16 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
    * best-effort acceleration. Failure marks the row for the boot-time sweep
    * and NEVER surfaces to the caller (and never logs the code).
    */
-  function attemptDelivery(setup: SetupInitiation): (() => Promise<void>) | undefined {
+  function attemptDelivery(workspaceId: string, setup: SetupInitiation): (() => Promise<void>) | undefined {
     if (setup.delivery !== "queued" || !setup.outboxId) return undefined;
     const { email, code, purpose, outboxId } = setup;
     return async () => {
       try {
         await deliverAuthCode({ email, code, purpose });
-        await store.markOutbox(outboxId, "sent");
+        await store.markOutbox(workspaceId, outboxId, "sent");
       } catch (err) {
         try {
-          await store.markOutbox(outboxId, "pending", errorNote(err));
+          await store.markOutbox(workspaceId, outboxId, "pending", errorNote(err));
         } catch {
           /* the pending row already carries the retry */
         }
@@ -391,7 +391,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
             targetHash: sha256Hex(result.workspaceId),
             resultCode: "created",
             oneTimeFields: ["setupCode"],
-            afterCommit: result.setup ? attemptDelivery(result.setup) : undefined,
+            afterCommit: result.setup ? attemptDelivery(result.workspaceId, result.setup) : undefined,
           };
         });
       } else if (method === "PUT" && ownerMatch) {
@@ -438,7 +438,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
             reason,
             resultCode: "initiated",
             oneTimeFields: ["code"],
-            afterCommit: attemptDelivery(result.setup),
+            afterCommit: attemptDelivery(workspaceId, result.setup),
           };
         });
       } else if (method === "PUT" && accessMatch) {

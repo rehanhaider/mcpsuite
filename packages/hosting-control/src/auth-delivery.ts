@@ -58,15 +58,15 @@ export async function retryPendingAuthDeliveries(store: HostingStore): Promise<{
         return { email: user.email, code };
       });
       if (!issued) {
-        await store.markOutbox(row.id, "abandoned", "user unavailable");
+        await store.markOutbox(row.workspaceId, row.id, "abandoned", "user unavailable");
         continue;
       }
       await deliverAuthCode({ email: issued.email, code: issued.code, purpose: row.purpose });
-      await store.markOutbox(row.id, "sent");
+      await store.markOutbox(row.workspaceId, row.id, "sent");
       sent++;
     } catch (err) {
       try {
-        await store.markOutbox(row.id, "pending", errorNote(err));
+        await store.markOutbox(row.workspaceId, row.id, "pending", errorNote(err));
       } catch {
         /* keep sweeping */
       }

@@ -4,11 +4,13 @@
  * crm_operator (schema.sql, "Hosting control").
  *
  * crm_operator has no BYPASSRLS. Every method that names a workspace binds
- * the request's transaction to it first (./tx.ts), so the CRM rows and
- * hosting.workspace_access it reaches are that workspace's only — it cannot
- * list workspaces or read another one's rows. Receipts, the service audit and
- * the outbox are hosting control's own records (not workspace-bound). All SQL
- * is fixed statements with bound parameters.
+ * the request's transaction to it first (./tx.ts), so the CRM rows,
+ * hosting.workspace_access and the delivery outbox it reaches are that
+ * workspace's only — it cannot list workspaces or read another one's rows.
+ * Receipts and the service audit are hosting control's own records (not
+ * workspace-bound); the delivery sweep lists pending deliveries only through
+ * hosting.pending_auth_deliveries(). All SQL is fixed statements with bound
+ * parameters.
  *
  * Permanent deletion purges each member's issuer credentials
  * (crm.purge_openauth_identity), then deletes the workspace row; every
@@ -218,7 +220,7 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
 
     // --- outbox -----------------------------------------------------------
     insertOutbox: (row) =>
-      inTx(null, async (x) => {
+      inTx(row.workspaceId, async (x) => {
         const now = nowIso();
         await rows(
           x,
@@ -227,8 +229,8 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
                       ${now}::timestamptz, ${now}::timestamptz)`,
         );
       }),
-    markOutbox: (id, state, lastError) =>
-      inTx(null, async (x) => {
+    markOutbox: (workspaceId, id, state, lastError) =>
+      inTx(workspaceId, async (x) => {
         await rows(
           x,
           sql`UPDATE hosting.auth_delivery_outbox
@@ -238,10 +240,9 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
       }),
     listPendingOutbox: () =>
       inTx(null, async (x) => {
-        const found = await rows<{ id: string; workspace_id: string; user_id: string; purpose: string; state: string; attempts: number }>(
+        const found = await rows<{ id: string; workspace_id: string; user_id: string; purpose: string; attempts: number }>(
           x,
-          sql`SELECT id, workspace_id, user_id, purpose, state, attempts
-              FROM hosting.auth_delivery_outbox WHERE state = 'pending' ORDER BY created_at`,
+          sql`SELECT id, workspace_id, user_id, purpose, attempts FROM hosting.pending_auth_deliveries()`,
         );
         return found.map(
           (r): OutboxRow => ({
@@ -255,7 +256,7 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
         );
       }),
     deleteOutbox: (workspaceId) =>
-      inTx(null, async (x) => {
+      inTx(workspaceId, async (x) => {
         await rows(x, sql`DELETE FROM hosting.auth_delivery_outbox WHERE workspace_id = ${uid(workspaceId)}::uuid`);
       }),
 
@@ -303,6 +304,13 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
     workspaceExists: (workspaceId) =>
       inTx(workspaceId, async (x) => {
         const found = await rows(x, sql`SELECT 1 FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid`);
+        return found.length === 1;
+      }),
+    // READ COMMITTED lets two requests read the same version and both write;
+    // the row lock makes the second wait for the first to commit.
+    lockWorkspace: (workspaceId) =>
+      inTx(workspaceId, async (x) => {
+        const found = await rows(x, sql`SELECT 1 FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid FOR UPDATE`);
         return found.length === 1;
       }),
     createWorkspace: (input) =>
@@ -395,7 +403,7 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
       }),
     deleteWorkspace: (workspaceId) =>
       inTx(workspaceId, async (x) => {
-        const found = await rows(x, sql`SELECT 1 FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid`);
+        const found = await rows(x, sql`SELECT 1 FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid FOR UPDATE`);
         if (found.length === 0) return false;
         const members = await rows<{ id: string }>(x, sql`SELECT id FROM crm.users`);
         for (const m of members) await rows(x, sql`SELECT crm.purge_openauth_identity(${m.id}::uuid)`);

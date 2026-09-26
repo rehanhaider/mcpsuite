@@ -305,15 +305,15 @@ export function createSqliteHostingStore(db: Db, options: { identity?: IdentityS
           )
           .run(row.id, row.workspaceId, row.userId, row.purpose, now, now);
       }),
-    markOutbox: (id, state, lastError) =>
+    markOutbox: (workspaceId, id, state, lastError) =>
       unit(() => {
         sqlite
           .prepare(
             `UPDATE hc_auth_delivery_outbox
              SET state = ?, attempts = attempts + 1, last_error = ?, updated_at = ?
-             WHERE id = ?`,
+             WHERE id = ? AND workspace_id = ?`,
           )
-          .run(state, lastError ?? null, nowIso(), id);
+          .run(state, lastError ?? null, nowIso(), id, workspaceId);
       }),
     listPendingOutbox: () =>
       unit(() => {
@@ -368,6 +368,10 @@ export function createSqliteHostingStore(db: Db, options: { identity?: IdentityS
 
     // --- CRM rows ---------------------------------------------------------
     workspaceExists: (workspaceId) =>
+      unit(() => sqlite.prepare("SELECT id FROM workspaces WHERE id = ?").get(workspaceId) != null),
+    // The request's transaction holds SQLite's write lock (BEGIN IMMEDIATE),
+    // so lifecycle changes already run one at a time.
+    lockWorkspace: (workspaceId) =>
       unit(() => sqlite.prepare("SELECT id FROM workspaces WHERE id = ?").get(workspaceId) != null),
     createWorkspace: (input) =>
       unit(() => {

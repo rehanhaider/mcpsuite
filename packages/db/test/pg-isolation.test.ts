@@ -95,11 +95,13 @@ const DENIED_TABLES = ["sessions", "schema_version", "openauth_kv", "auth_codes"
 
 /**
  * Hosting control's private schema (schema.sql, "Hosting control"): reachable
- * by crm_operator only. workspace_access is workspace data (policy on the
- * transaction's workspace); the others are hosting control's own records.
+ * by crm_operator only. workspace_access and the delivery outbox are
+ * workspace data (policy on the transaction's workspace, plus one SELECT
+ * policy for the resolver-owned definer that reads them); receipts and the
+ * service audit are hosting control's own records.
  */
-const HOSTING_WORKSPACE_TABLES = ["workspace_access"];
-const HOSTING_OPERATOR_TABLES = ["idempotency_receipts", "service_audit", "auth_delivery_outbox"];
+const HOSTING_WORKSPACE_TABLES = ["workspace_access", "auth_delivery_outbox"];
+const HOSTING_OPERATOR_TABLES = ["idempotency_receipts", "service_audit"];
 
 describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)", () => {
   let admin: PgHandle;
@@ -343,7 +345,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
       expect(isolation?.roles, `${table} isolation policy`).toEqual(["crm_operator"]);
       expect(isolation?.qual).toContain("current_workspace_id()");
       expect(isolation?.with_check).toContain("current_workspace_id()");
-      // The only other policy lets the definer access reader SELECT.
+      // The only other policy lets the table's definer reader SELECT.
       const others = byTable.get(table)!.filter((p) => p.policyname !== "workspace_isolation");
       expect(others.map((p) => [p.roles, p.cmd])).toEqual([[["crm_identity_resolver"], "SELECT"]]);
     }

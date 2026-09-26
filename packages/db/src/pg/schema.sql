@@ -1499,11 +1499,13 @@ $$;
 --   auth_delivery_outbox  setup/reset code deliveries awaiting send;
 --   workspace_access      the lock/expiry state the CRM enforces.
 --
--- Receipts, the service audit and the outbox are hosting control's own
--- records, not workspace data: a receipt is read before any target is known
--- and the delivery sweep runs across workspaces, so their policies admit
--- crm_operator on every row. workspace_access is workspace data: its policy
--- admits only the transaction's workspace, as for the crm tables.
+-- Receipts and the service audit are hosting control's own records, not
+-- workspace data: a receipt is read before any target is known, so their
+-- policies admit crm_operator on every row. workspace_access and the outbox
+-- are workspace data: their policies admit only the transaction's
+-- workspace, as for the crm tables. The one read across workspaces is the
+-- delivery sweep's list of pending deliveries, through the fixed definer
+-- hosting.pending_auth_deliveries() (ids and purpose only).
 --
 -- crm_app has no USAGE on this schema. The CRM reads the access state of its
 -- OWN workspace only through crm.workspace_access_state (below).
@@ -1590,6 +1592,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON hosting.auth_delivery_outbox TO crm_oper
 GRANT SELECT, INSERT, UPDATE ON hosting.service_audit TO crm_operator;
 -- The access-state reader below.
 GRANT SELECT ON hosting.workspace_access TO crm_identity_resolver;
+-- The delivery sweep's reader below.
+GRANT SELECT ON hosting.auth_delivery_outbox TO crm_identity_resolver;
 
 ALTER TABLE hosting.idempotency_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hosting.idempotency_receipts FORCE ROW LEVEL SECURITY;
@@ -1604,14 +1608,36 @@ CREATE POLICY operator_records ON hosting.idempotency_receipts
   TO crm_operator USING (true) WITH CHECK (true);
 CREATE POLICY operator_records ON hosting.service_audit
   TO crm_operator USING (true) WITH CHECK (true);
-CREATE POLICY operator_records ON hosting.auth_delivery_outbox
-  TO crm_operator USING (true) WITH CHECK (true);
 CREATE POLICY workspace_isolation ON hosting.workspace_access
   TO crm_operator
   USING (workspace_id = crm.current_workspace_id())
   WITH CHECK (workspace_id = crm.current_workspace_id());
 CREATE POLICY access_state_read ON hosting.workspace_access
   FOR SELECT TO crm_identity_resolver USING (true);
+CREATE POLICY workspace_isolation ON hosting.auth_delivery_outbox
+  TO crm_operator
+  USING (workspace_id = crm.current_workspace_id())
+  WITH CHECK (workspace_id = crm.current_workspace_id());
+CREATE POLICY delivery_sweep ON hosting.auth_delivery_outbox
+  FOR SELECT TO crm_identity_resolver USING (true);
+
+-- The delivery sweep's input (crm_operator): every pending delivery, oldest
+-- first, as hosting control's own references — outbox id, workspace, user and
+-- purpose. No email, no code, no CRM data. Each row is then handled in a
+-- transaction bound to its workspace.
+CREATE FUNCTION hosting.pending_auth_deliveries()
+RETURNS TABLE (id uuid, workspace_id uuid, user_id uuid, purpose text, attempts integer)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = hosting, pg_temp
+AS $$
+  SELECT o.id, o.workspace_id, o.user_id, o.purpose, o.attempts
+  FROM hosting.auth_delivery_outbox o
+  WHERE o.state = 'pending'
+  ORDER BY o.created_at
+$$;
+ALTER FUNCTION hosting.pending_auth_deliveries() OWNER TO crm_identity_resolver;
+REVOKE ALL ON FUNCTION hosting.pending_auth_deliveries() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION hosting.pending_auth_deliveries() TO crm_operator;
 
 -- The CRM's read of its own workspace's access state (crm_app). Returns the
 -- stored row only when p_workspace_id is the transaction's workspace — never

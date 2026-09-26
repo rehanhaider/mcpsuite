@@ -11,6 +11,10 @@
  *   - atomicity: a fault injected after the change, after the receipt, or
  *     after the service audit rolls the whole request back and releases the
  *     key for a retry;
+ *   - concurrency: two requests guarded by the same expectedVersion — one
+ *     wins, the other is a version_conflict;
+ *   - hosted delivery: the outbox row commits with the request (and rolls
+ *     back with it), a failed send stays pending, and the sweep delivers it;
  *   - a locked workspace is refused by the CRM's access read;
  *   - PostgreSQL only: role proofs for crm_operator and crm_app.
  *
@@ -27,6 +31,8 @@
  * crm_operator, and connects hosting control as crm_operator.
  */
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -44,7 +50,7 @@ import { connectPg, createPgPorts, type PgHandle } from "../../db/src/pg/reposit
 import { initPgSchema } from "../../db/src/pg/init.ts";
 import { createPgIdentity } from "../../db/src/pg/identity.ts";
 import { connectPgHostingStore } from "../../db/src/pg/hosting.ts";
-import { createHostingControlServer, type HostingControlServer } from "../src/index.ts";
+import { createHostingControlServer, retryPendingAuthDeliveries, type HostingControlServer } from "../src/index.ts";
 
 const PG_ENABLED = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
 const KEY = "hc_contract_service_key_0123456789abcdef";
@@ -446,6 +452,136 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
 
     // --- atomicity ------------------------------------------------------------
 
+    // --- concurrency ----------------------------------------------------------
+
+    it("two access changes guarded by the same version: one wins, one conflicts", async () => {
+      for (let round = 0; round < 10; round += 1) {
+        const ws = await workspace();
+        const [a, b] = await Promise.all([
+          call("PUT", `/api/v1/workspaces/${ws.id}/access`, {
+            idem: idem("race-lock"),
+            body: { accessMode: "locked", expectedVersion: 1 },
+          }),
+          call("PUT", `/api/v1/workspaces/${ws.id}/access`, {
+            idem: idem("race-expire"),
+            body: { accessMode: "active", accessExpiresAt: "2099-01-01T00:00:00.000Z", expectedVersion: 1 },
+          }),
+        ]);
+        expect([a.status, b.status].sort()).toEqual([200, 409]);
+        const loser = a.status === 409 ? a : b;
+        expect(loser.json.error.code).toBe("version_conflict");
+        expect((await call("GET", `/api/v1/workspaces/${ws.id}`)).json.data.version).toBe(2);
+      }
+    });
+
+    it("two owner transfers guarded by the same version: one wins, one conflicts", async () => {
+      for (let round = 0; round < 10; round += 1) {
+        const ws = await workspace();
+        const [first, second] = [await activeMember(ws.id), await activeMember(ws.id)];
+        const transfer = (target: string) =>
+          call("PUT", `/api/v1/workspaces/${ws.id}/owner`, {
+            idem: idem("race-transfer"),
+            body: { targetUserId: target, reason: "contract", expectedVersion: 1 },
+          });
+        const [a, b] = await Promise.all([transfer(first), transfer(second)]);
+        expect([a.status, b.status].sort()).toEqual([200, 409]);
+        expect((a.status === 409 ? a : b).json.error.code).toBe("version_conflict");
+        expect(await h.count("memberships", { workspace_id: ws.id, role: "owner" })).toBe(1);
+      }
+    });
+
+    // --- hosted delivery (the outbox) -----------------------------------------
+
+    describe("hosted delivery", () => {
+      let sink: ReturnType<typeof createServer>;
+      let failing = false;
+      const hits: Array<{ email?: string; code?: string; purpose?: string }> = [];
+
+      beforeAll(async () => {
+        sink = createServer((req, res) => {
+          const chunks: Buffer[] = [];
+          req.on("data", (c: Buffer) => chunks.push(c));
+          req.on("end", () => {
+            if (failing) {
+              res.statusCode = 503;
+              return res.end();
+            }
+            hits.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+            res.statusCode = 204;
+            res.end();
+          });
+        });
+        await new Promise<void>((r) => sink.listen(0, "127.0.0.1", r));
+        process.env.MCPSUITE_AUTH_DELIVERY_URL = `http://127.0.0.1:${(sink.address() as AddressInfo).port}/deliver`;
+      });
+
+      afterAll(async () => {
+        delete process.env.MCPSUITE_AUTH_DELIVERY_URL;
+        await new Promise<void>((r) => sink.close(() => r()));
+      });
+
+      it("commits the outbox row with the request and marks it sent after delivery", async () => {
+        const ownerEmail = email("hosted");
+        const res = await provision(ownerEmail);
+        expect(res.status).toBe(201);
+        const ws = res.json.data.workspaceId as string;
+        expect(res.json.data.setupDelivery).toBe("queued");
+        expect(res.json.data.setupCode).toBeUndefined();
+        expect(await h.count("outbox", { workspace_id: ws, state: "sent" })).toBe(1);
+        expect(hits.at(-1)).toMatchObject({ email: ownerEmail, purpose: "setup" });
+      });
+
+      it.each(FAULT_POINTS)("a fault %s rolls the outbox row back with the request", async (point) => {
+        const ownerEmail = email(`hosted-fault-${point}`);
+        const before = await h.count("outbox");
+        const sent = hits.length;
+        armed = point;
+        try {
+          expect((await provision(ownerEmail)).status).toBe(500);
+        } finally {
+          armed = null;
+        }
+        expect(await h.count("outbox")).toBe(before);
+        expect(hits.length).toBe(sent);
+      });
+
+      it("a failed send stays pending; the sweep delivers it with a fresh code", async () => {
+        const ws = await workspace();
+        failing = true;
+        let queued: CallResult;
+        try {
+          queued = await call("POST", `/api/v1/workspaces/${ws.id}/owner/recovery`, {
+            idem: idem("hosted-recover"),
+            body: { reason: "contract" },
+          });
+        } finally {
+          failing = false;
+        }
+        expect(queued.status).toBe(202);
+        expect(queued.json.data.delivery).toBe("queued");
+        expect(await h.count("outbox", { workspace_id: ws.id, state: "pending" })).toBe(1);
+
+        const swept = await retryPendingAuthDeliveries(h.store);
+        expect(swept.sent).toBeGreaterThanOrEqual(1);
+        expect(await h.count("outbox", { workspace_id: ws.id, state: "pending" })).toBe(0);
+        // Provisioning's setup delivery plus the swept recovery.
+        expect(await h.count("outbox", { workspace_id: ws.id, state: "sent" })).toBe(2);
+        const delivered = hits.at(-1)!;
+        expect(delivered).toMatchObject({ email: ws.ownerEmail, purpose: "setup" });
+        // The swept code is live: it redeems.
+        expect(
+          await h.crm.redeemCodeAndSetPassword({ email: ws.ownerEmail, purpose: "setup", code: delivered.code!, password: "swept-password-1" }),
+        ).toEqual({ ok: true, userId: ws.ownerId });
+      });
+
+      it("permanent deletion removes the workspace's deliveries", async () => {
+        const ws = await workspace();
+        expect(await h.count("outbox", { workspace_id: ws.id })).toBe(1);
+        expect((await call("DELETE", `/api/v1/workspaces/${ws.id}`, { idem: idem("hosted-delete"), body: { reason: "contract" } })).status).toBe(204);
+        expect(await h.count("outbox", { workspace_id: ws.id })).toBe(0);
+      });
+    });
+
     describe.each(FAULT_POINTS)("a fault %s rolls the request back and frees its key", (point) => {
       /** Arm the fault for one call, then prove the same key succeeds disarmed. */
       async function faulted(run: (key: string) => Promise<CallResult>, retryStatus: number): Promise<void> {
@@ -605,6 +741,30 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
         q("INSERT INTO hosting.workspace_access (workspace_id, created_at, updated_at) VALUES ($1, now(), now())", [wsB]),
       ).rejects.toThrow(/row-level security/i);
     });
+  });
+
+  it("the outbox is workspace-bound; only the sweep's definer lists pending deliveries", async () => {
+    await h.admin.pool.query(
+      `INSERT INTO hosting.auth_delivery_outbox (id, workspace_id, user_id, purpose, state, created_at, updated_at)
+       SELECT gen_random_uuid(), m.workspace_id, m.user_id, 'setup', 'pending', now(), now()
+       FROM crm.memberships m WHERE m.workspace_id IN ($1, $2)`,
+      [wsA, wsB],
+    );
+    try {
+      await asOperatorIn(null, async (q) => {
+        expect((await q("SELECT count(*)::int AS n FROM hosting.auth_delivery_outbox"))[0].n).toBe(0);
+        const pending = await q("SELECT workspace_id::text AS ws FROM hosting.pending_auth_deliveries()");
+        expect(pending.map((r) => r.ws).sort()).toEqual([wsA, wsB].sort());
+      });
+      await asOperatorIn(wsA, async (q) => {
+        expect((await q("SELECT workspace_id::text AS ws FROM hosting.auth_delivery_outbox")).map((r) => r.ws)).toEqual([wsA]);
+        const touched = await q("UPDATE hosting.auth_delivery_outbox SET attempts = attempts + 1 WHERE workspace_id = $1 RETURNING 1", [wsB]);
+        expect(touched).toHaveLength(0);
+      });
+      await expect(h.app.pool.query("SELECT * FROM hosting.pending_auth_deliveries()")).rejects.toThrow(/permission denied/i);
+    } finally {
+      await h.admin.pool.query("DELETE FROM hosting.auth_delivery_outbox WHERE workspace_id IN ($1, $2)", [wsA, wsB]);
+    }
   });
 
   it("crm_operator has no generic issuer storage, sessions or schema changes", async () => {
