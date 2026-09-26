@@ -16,6 +16,8 @@ _units := $(_units:mcp=mcpsuite-mcp-http.service)
 # Render one unit template ($$u) into the user unit directory.
 _render_unit = sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
 	chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"
+# The selected units that `make autostart` has installed; deploy acts on these.
+_installed = $(strip $(foreach u,$(_units),$(if $(wildcard $(SYSTEMD_USER_DIR)/$(u)),$(u))))
 
 .PHONY: help setup db-setup dev build start mcp mcp-http \
         test typecheck smoke clean deploy \
@@ -60,14 +62,12 @@ smoke: ## Exercise every catalog operation against the live DB (safe, self-clean
 	pnpm --filter @mcpsuite/db smoke
 
 deploy: ## Build the web app, refresh the installed units, restart the services
+	@test -n "$(_installed)" || { echo ">>> No services installed ($(SVC)); run make autostart first." >&2; exit 1; }
 	$(MAKE) build
-	@for u in $(_units); do \
-		[ -f "$(SYSTEMD_USER_DIR)/$$u" ] || continue; \
-		$(_render_unit); \
-	done
+	@for u in $(_installed); do $(_render_unit); done
 	systemctl --user daemon-reload
-	systemctl --user reset-failed $(_units)
-	systemctl --user restart $(_units)
+	systemctl --user reset-failed $(_installed)
+	systemctl --user restart $(_installed)
 	@echo ">>> Deployed.  web -> http://localhost:2222   mcp -> http://localhost:8765/mcp"
 
 clean: ## Remove build artifacts
