@@ -270,14 +270,14 @@ describe("MCP approval tasks over HTTP", () => {
     }
   });
 
-  it("keeps requester-only operations out of tools and the catalog resource", async () => {
+  it("keeps requester-only operations out of tools and marks them non-callable in the catalog resource", async () => {
     const hidden = ["pendingAction.getOwnTask", "pendingAction.cancelOwnTask"];
     const listed = await send(rpc("tools/list"));
     const toolNames = listed.result.tools.map((tool: { name: string }) => tool.name);
     for (const name of hidden) expect(toolNames).not.toContain(name.replace(".", "_"));
     const catalog = await send(rpc("resources/read", { uri: "mcpsuite://catalog" }));
-    const operations = JSON.parse(catalog.result.contents[0].text) as Array<{ name: string }>;
-    for (const name of hidden) expect(operations.map((op) => op.name)).not.toContain(name);
+    const operations = JSON.parse(catalog.result.contents[0].text) as Array<{ name: string; mcpExpose: boolean }>;
+    for (const name of hidden) expect(operations.find((op) => op.name === name)?.mcpExpose).toBe(false);
   });
 
   it("hides tasks from other client keys with the same error as an unknown id", async () => {
