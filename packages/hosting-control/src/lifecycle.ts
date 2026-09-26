@@ -224,17 +224,24 @@ export interface WorkspaceControlState {
   version: number;
 }
 
+/**
+ * One consistent read: it holds the workspace like a lifecycle change does,
+ * so an owner transfer can never land between the owner and version reads
+ * (the pair callers use for `expectedVersion`).
+ */
 export async function getWorkspaceControlState(store: HostingStore, workspaceId: string): Promise<WorkspaceControlState | null> {
-  if (!(await store.workspaceExists(workspaceId))) return null;
-  const owner = await store.ownerOf(workspaceId);
-  const access = await store.getAccess(workspaceId);
-  return {
-    workspaceId,
-    accessMode: access?.accessMode ?? "active",
-    accessExpiresAt: access?.accessExpiresAt ?? null,
-    ownerUserId: owner?.id ?? null,
-    version: access?.version ?? 0,
-  };
+  return store.withTransaction(async () => {
+    if (!(await store.lockWorkspace(workspaceId))) return null;
+    const owner = await store.ownerOf(workspaceId);
+    const access = await store.getAccess(workspaceId);
+    return {
+      workspaceId,
+      accessMode: access?.accessMode ?? "active",
+      accessExpiresAt: access?.accessExpiresAt ?? null,
+      ownerUserId: owner?.id ?? null,
+      version: access?.version ?? 0,
+    };
+  });
 }
 
 // --- Owner transfer ---------------------------------------------------------

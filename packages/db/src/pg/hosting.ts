@@ -307,10 +307,15 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
         return found.length === 1;
       }),
     // READ COMMITTED lets two requests read the same version and both write;
-    // the row lock makes the second wait for the first to commit.
+    // the row lock makes the second wait for the first to commit. NO KEY
+    // UPDATE conflicts with itself but not with the key-share locks foreign
+    // key checks take, so CRM inserts into the workspace are not blocked.
     lockWorkspace: (workspaceId) =>
       inTx(workspaceId, async (x) => {
-        const found = await rows(x, sql`SELECT 1 FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid FOR UPDATE`);
+        const found = await rows(
+          x,
+          sql`SELECT 1 FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid FOR NO KEY UPDATE`,
+        );
         return found.length === 1;
       }),
     createWorkspace: (input) =>

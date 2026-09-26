@@ -138,8 +138,9 @@ export interface HostingStore {
   workspaceExists(workspaceId: string): Promise<boolean>;
   /**
    * Whether the workspace exists, holding it for the rest of the transaction:
-   * a concurrent lifecycle change to the same workspace waits until this one
-   * commits, so a read-then-write (the version check) cannot interleave.
+   * a concurrent lifecycle change (or control-state read) of the same
+   * workspace waits until this one commits, so a read-then-write (the
+   * version check) cannot interleave.
    * SQLite's write transaction already serializes; PostgreSQL locks the row.
    */
   lockWorkspace(workspaceId: string): Promise<boolean>;

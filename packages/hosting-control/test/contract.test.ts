@@ -490,6 +490,41 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
       }
     });
 
+    it("the inspect read never pairs one owner with another state's version", async () => {
+      // Pause the inspect between its owner read and its version read, and
+      // let a transfer try to commit in that gap.
+      let ownerRead: () => void = () => {};
+      const ownerReadDone = new Promise<void>((r) => (ownerRead = r));
+      const paused: HostingStore = {
+        ...h.store,
+        ownerOf: async (workspaceId) => {
+          const owner = await h.store.ownerOf(workspaceId);
+          ownerRead();
+          await new Promise((r) => setTimeout(r, 300));
+          return owner;
+        },
+      };
+      const inspector = createHostingControlServer({ store: paused, serviceKeys: [KEY], host: "127.0.0.1", port: 0 });
+      const inspectorPort = (await inspector.listen()).port;
+      try {
+        const ws = await workspace();
+        const successor = await activeMember(ws.id);
+        const read = fetch(`http://127.0.0.1:${inspectorPort}/api/v1/workspaces/${ws.id}`, {
+          headers: { authorization: `Bearer ${KEY}` },
+        }).then(async (r) => ((await r.json()) as { data: { ownerUserId: string; version: number } }).data);
+        await ownerReadDone;
+        const moved = call("PUT", `/api/v1/workspaces/${ws.id}/owner`, {
+          idem: idem("race-inspect"),
+          body: { targetUserId: successor, reason: "contract" },
+        });
+        const state = await read;
+        expect((await moved).status).toBe(200);
+        expect(`${state.ownerUserId}@${state.version}`).toBe(`${ws.ownerId}@1`);
+      } finally {
+        await inspector.close();
+      }
+    });
+
     // --- hosted delivery (the outbox) -----------------------------------------
 
     describe("hosted delivery", () => {
