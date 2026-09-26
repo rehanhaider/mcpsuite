@@ -87,12 +87,13 @@ const WORKSPACE_OWNED_TABLES = [
 /** RLS'd via `id` instead of `workspace_id`. */
 const WORKSPACE_ROOT_TABLE = "workspaces";
 /**
- * RLS on, no crm_app policy or grant. sessions/openauth_kv/auth_codes are
- * identity-level auth storage reachable only via the SECURITY DEFINER
- * functions in schema.sql (covered in pg-auth.test.ts); schema_version is
- * deployment metadata that only hosting control (crm_operator) may read.
+ * Identity-level auth storage: RLS forced, reachable by key before a
+ * workspace is bound and only the workspace's users' rows after (policies
+ * proven in pg-auth.test.ts).
  */
-const DENIED_TABLES = ["sessions", "schema_version", "openauth_kv", "auth_codes"];
+const IDENTITY_TABLES = ["sessions", "openauth_kv", "auth_codes"];
+/** RLS on, no crm_app policy or grant: deployment metadata only hosting control may read. */
+const DENIED_TABLES = ["schema_version"];
 
 /**
  * Hosting control's private schema (schema.sql, "Hosting control"): reachable
@@ -321,7 +322,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
   it("classifies every crm table; none may exist outside the registry", async () => {
     const res = await admin.pool.query("SELECT tablename FROM pg_tables WHERE schemaname = 'crm' ORDER BY tablename");
     const live = res.rows.map((r) => String(r.tablename)).sort();
-    const expected = [...WORKSPACE_OWNED_TABLES, WORKSPACE_ROOT_TABLE, ...DENIED_TABLES].sort();
+    const expected = [...WORKSPACE_OWNED_TABLES, WORKSPACE_ROOT_TABLE, ...IDENTITY_TABLES, ...DENIED_TABLES].sort();
     expect(live).toEqual(expected);
   });
 
@@ -366,7 +367,12 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
        WHERE n.nspname IN ('crm', 'hosting') AND c.relkind = 'r'`,
     );
     expect(res.rows.length).toBe(
-      WORKSPACE_OWNED_TABLES.length + 1 + DENIED_TABLES.length + HOSTING_WORKSPACE_TABLES.length + HOSTING_OPERATOR_TABLES.length,
+      WORKSPACE_OWNED_TABLES.length +
+        1 +
+        IDENTITY_TABLES.length +
+        DENIED_TABLES.length +
+        HOSTING_WORKSPACE_TABLES.length +
+        HOSTING_OPERATOR_TABLES.length,
     );
     for (const row of res.rows) {
       expect(row.rls, `RLS enabled on ${row.name}`).toBe(true);
@@ -396,29 +402,35 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     expect(owners.rows.map((r) => r.tableowner)).toEqual(["crm_schema_owner"]);
   });
 
-  it("crm_app cannot create tables or read auth/deployment tables", async () => {
+  it("crm_app cannot create tables or read deployment metadata", async () => {
     await expect(app.pool.query("CREATE TABLE crm.evil (id int)")).rejects.toThrow(/permission denied/i);
-    await expect(app.pool.query("SELECT * FROM crm.sessions")).rejects.toThrow(/permission denied/i);
     await expect(app.pool.query("SELECT * FROM crm.schema_version")).rejects.toThrow(/permission denied/i);
   });
 
-  it("identity resolvers: fixed shape for crm_app, no PUBLIC execute, no table access needed", async () => {
+  it("identity lookups: one keyed row of fixed fields, no PUBLIC execute, no table access needed", async () => {
     // Without workspace context crm_app sees zero users…
     const direct = await app.pool.query("SELECT count(*)::int AS n FROM crm.users");
     expect(direct.rows[0]?.n).toBe(0);
-    // …but the narrow resolver returns exactly the fixed identity fields.
-    // It keys on the verified OpenAuth subject, not the email
-    // (subject linking + pending/disabled semantics live in pg-auth.test.ts).
+    // …but a keyed lookup returns exactly the fixed identity fields
+    // (what a match means — pending, disabled — is decided in the adapter,
+    // covered in pg-auth.test.ts and identity-contract.test.ts).
     await admin.pool.query("UPDATE crm.users SET auth_subject = $1 WHERE id = $2", ["sub-alpha-owner", A.userId]);
-    const resolved = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-alpha-owner"]);
+    const resolved = await app.pool.query("SELECT * FROM crm.identity_by_subject($1)", ["sub-alpha-owner"]);
     expect(resolved.rows).toHaveLength(1);
     expect(resolved.rows[0]).toMatchObject({ user_id: A.userId, workspace_id: wsA, role: "owner", password_must_change: false });
-    expect(Object.keys(resolved.rows[0]!).sort()).toEqual(["password_must_change", "role", "user_id", "workspace_id"]);
-    const unknown = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", ["sub-nobody"]);
-    expect(unknown.rows).toHaveLength(0);
-    // Emails are no longer a resolution key for authentication.
-    const byEmail = await app.pool.query("SELECT * FROM crm.resolve_user_identity($1)", [A.email]);
-    expect(byEmail.rows).toHaveLength(0);
+    expect(Object.keys(resolved.rows[0]!).sort()).toEqual([
+      "auth_subject",
+      "disabled_at",
+      "email",
+      "password_must_change",
+      "role",
+      "status",
+      "user_id",
+      "workspace_id",
+    ]);
+    expect((await app.pool.query("SELECT * FROM crm.identity_by_subject($1)", ["sub-nobody"])).rows).toHaveLength(0);
+    // A subject lookup never matches an email.
+    expect((await app.pool.query("SELECT * FROM crm.identity_by_subject($1)", [A.email])).rows).toHaveLength(0);
 
     const key = await app.pool.query("SELECT * FROM crm.resolve_mcp_key($1)", [B.clientTokenHash]);
     expect(key.rows[0]).toMatchObject({ client_id: B.clientId, workspace_id: wsB, enabled: true });
@@ -427,7 +439,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     const acl = await admin.pool.query(
       `SELECT proname, coalesce(proacl::text, '') AS acl FROM pg_proc p
        JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname = 'crm' AND proname IN ('resolve_user_identity', 'resolve_mcp_key', 'current_workspace_id')`,
+       WHERE n.nspname = 'crm' AND proname IN ('identity_by_subject', 'resolve_mcp_key', 'current_workspace_id')`,
     );
     expect(acl.rows).toHaveLength(3);
     for (const row of acl.rows) {

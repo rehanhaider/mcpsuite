@@ -33,16 +33,17 @@
  * - `maintenance.backup()` throws `forbidden`: hosted physical backups happen
  *   only through private operational credentials, never app surfaces.
  * - `mcpClients.getByTokenHash` is workspace-scoped here; global key
- *   resolution goes through `crm.resolve_mcp_key` (schema.sql), not a port.
+ *   resolution goes through the `crm.resolve_mcp_key` lookup (schema.sql),
+ *   not a port.
  * - Hard deletes also clear company/person list memberships (typed FKs
  *   cascade); SQLite leaves those rows orphaned.
  * - Association storage is typed-per-entity (company_tags, …); the generic
  *   port API is preserved by dispatching on the validated entity type.
- * - Identity-level auth storage (sessions, openauth_kv, auth_codes) carries
- *   zero crm_app grants: session sweeps, code issuance and issuer-state purges
- *   go through the fixed SECURITY DEFINER functions from schema.sql, called
- *   inside the same workspace transaction as the triggering mutation
- *   (disable-revocation and permanent user deletion per docs/issues/0022).
+ * - Identity-level auth storage (sessions, openauth_kv, auth_codes): session
+ *   sweeps and issuer-state purges run as direct statements inside the same
+ *   workspace transaction as the triggering mutation (disable-revocation and
+ *   permanent user deletion per docs/issues/0022); the identity-storage
+ *   policies limit a bound transaction to its own users' rows.
  */
 import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
@@ -101,7 +102,7 @@ import {
 } from "@mcpsuite/core";
 import * as t from "./schema.ts";
 import { inPgNestedTransaction, inPgTransaction } from "./tx.ts";
-import { createPgIdentity } from "./identity.ts";
+import { createPgIdentity, purgeIssuerIdentity } from "./identity.ts";
 
 // ---------------------------------------------------------------------------
 // Async port surface
@@ -249,6 +250,13 @@ export async function provisionPgWorkspace(
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
+
+/** Delete a user's login sessions — the user must belong to this workspace. */
+const deleteUserSessions = (ws: string, userId: string): SQL =>
+  sql`DELETE FROM crm.sessions
+      WHERE user_id = ${uid(userId)}::uuid
+        AND user_id IN (SELECT id FROM crm.users WHERE workspace_id = ${ws}::uuid)
+      RETURNING 1`;
 
 type Row<T> = T extends { $inferSelect: infer R } ? R : never;
 
@@ -797,14 +805,9 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
       });
     },
     async deleteSessions(userId) {
-      // crm.sessions carries no runtime grants (schema.sql): the sweep goes through
-      // the fixed SECURITY DEFINER path, workspace-guarded inside the function.
       return run(async (x) => {
-        const rows = await execRows<{ n: number }>(
-          x,
-          sql`SELECT crm.delete_user_sessions(${uid(userId)}::uuid) AS n`,
-        );
-        return num(rows[0]?.n);
+        const rows = await execRows(x, deleteUserSessions(ws, userId));
+        return rows.length;
       });
     },
     async createPending(input) {
@@ -865,7 +868,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
       await run(async (x) => {
         const target = uid(id);
         const [row] = await x
-          .select({ id: t.users.id })
+          .select({ id: t.users.id, email: t.users.email, authSubject: t.users.authSubject })
           .from(t.users)
           .where(and(eq(t.users.workspaceId, ws), eq(t.users.id, target)))
           .limit(1);
@@ -873,13 +876,11 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         if ((await roleOf(x, id)) === "owner") {
           throw OpError.validation("The owner cannot be deleted — transfer ownership first");
         }
-        // 1. OpenAuth issuer state — refresh tokens and authorization rows
-        //    keyed by the subject, password hash and email→subject binding
-        //    keyed by the email (workspace-guarded SECURITY DEFINER; must run
-        //    while the user row still exists).
-        await execRows(x, sql`SELECT crm.purge_openauth_identity(${target}::uuid)`);
-        // 2. Login sessions (same fixed path as deleteSessions).
-        await execRows(x, sql`SELECT crm.delete_user_sessions(${target}::uuid)`);
+        // 1. OpenAuth issuer state — refresh tokens keyed by the subject,
+        //    password hash and email→subject binding keyed by the email.
+        await purgeIssuerIdentity(x, { email: row.email, subject: row.authSubject });
+        // 2. Login sessions (same statement as deleteSessions).
+        await execRows(x, deleteUserSessions(ws, target));
         // 3. The user's MCP clients are credentials, not business records —
         //    they die with the user. History referencing them (activities,
         //    audit, pending actions) survives via ON DELETE SET NULL (col).
@@ -2794,7 +2795,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
     },
     async getByTokenHash(hash) {
       // Workspace-scoped on purpose: global key resolution belongs to the
-      // narrow SECURITY DEFINER resolver (crm.resolve_mcp_key), not a port.
+      // read-only crm.resolve_mcp_key lookup (schema.sql), not a port.
       return run(async (x) => {
         const [r] = await x
           .select()

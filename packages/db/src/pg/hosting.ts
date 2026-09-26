@@ -13,7 +13,7 @@
  * parameters.
  *
  * Permanent deletion purges each member's issuer credentials
- * (crm.purge_openauth_identity), then deletes the workspace row; every
+ * (purgeIssuerIdentity), then deletes the workspace row; every
  * workspace-owned table, the users, their sessions and codes, the access
  * state and the outbox cascade from it (schema.sql foreign keys).
  */
@@ -23,7 +23,7 @@ import { DEFAULT_DEAL_STAGES, DEFAULT_ENGAGEMENT_STAGES } from "../bootstrap.ts"
 import type { AccessState, HostedMember, HostingStore, OutboxRow, Receipt } from "../hosting.ts";
 import type { IdentityStore } from "../identity.ts";
 import { redactDatabaseUrl } from "../runtime.ts";
-import { createPgIdentity } from "./identity.ts";
+import { createPgIdentity, purgeIssuerIdentity } from "./identity.ts";
 import { connectPg, type PgDb } from "./repositories.ts";
 import { inPgNestedTransaction, inPgTransaction } from "./tx.ts";
 
@@ -410,8 +410,11 @@ export function createPgHostingStore(db: PgDb, options: { identity?: IdentitySto
       inTx(workspaceId, async (x) => {
         const found = await rows(x, sql`SELECT 1 FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid FOR UPDATE`);
         if (found.length === 0) return false;
-        const members = await rows<{ id: string }>(x, sql`SELECT id FROM crm.users`);
-        for (const m of members) await rows(x, sql`SELECT crm.purge_openauth_identity(${m.id}::uuid)`);
+        const members = await rows<{ email: string; auth_subject: string | null }>(
+          x,
+          sql`SELECT email, auth_subject FROM crm.users WHERE workspace_id = ${uid(workspaceId)}::uuid`,
+        );
+        for (const m of members) await purgeIssuerIdentity(x, { email: m.email, subject: m.auth_subject });
         await rows(x, sql`DELETE FROM crm.workspaces WHERE id = ${uid(workspaceId)}::uuid`);
         return true;
       }),

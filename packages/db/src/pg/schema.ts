@@ -108,9 +108,10 @@ export const memberships = crm.table("memberships", {
 });
 
 /**
- * Global auth-issuer data (doc §"Authentication tables"): RLS-enabled with no
- * policy, so workspace runtime roles can never read it. Identity resolution
- * goes through the narrow SECURITY DEFINER resolvers in schema.sql.
+ * Global auth-issuer data (doc §"Authentication tables"): reachable by key
+ * before a workspace is bound, and only the workspace's users' rows after
+ * (schema.sql identity-storage policies). Users behind a session are found
+ * through the read-only lookups in schema.sql.
  */
 export const sessions = crm.table("sessions", {
   id: uuid("id").primaryKey(),
@@ -129,13 +130,11 @@ export const sessions = crm.table("sessions", {
 
 /**
  * OpenAuth issuer key-value storage and setup/reset code bookkeeping (schema.sql).
- * Identity-level, NOT workspace-scoped: like crm.sessions they carry
- * RLS-on/no-runtime-policy and zero grants for crm_app/crm_operator, and are
- * reachable only through the fixed SECURITY DEFINER functions
- * (crm.openauth_kv_*, crm.issue_auth_code, crm.consume_auth_code,
- * crm.delete_user_sessions, crm.purge_openauth_subject). These drizzle tables
- * exist for the schema mirror and admin-side tests — the adapter never
- * queries them directly.
+ * Identity-level, NOT workspace-scoped: like crm.sessions they are scoped by
+ * the identity-storage policies in schema.sql (reachable by key before a
+ * workspace is bound, only the workspace's users' rows after). The adapter
+ * (./identity.ts) queries them with raw SQL; these drizzle tables are the
+ * schema mirror.
  */
 export const openauthKv = crm.table("openauth_kv", {
   key: text("key").primaryKey(),
