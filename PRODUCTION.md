@@ -92,6 +92,10 @@ systemctl --user stop mcpsuite-web
 mise exec -- make setup && mise exec -- make deploy
 ```
 
+If the journal shows `better_sqlite3.node` with a `NODE_MODULE_VERSION`
+mismatch, rebuild it under the pinned Node before deploying:
+`mise exec -- pnpm rebuild better-sqlite3`.
+
 ## Put it behind HTTPS
 
 Keep port 2222 private. A reverse proxy should terminate TLS and forward all

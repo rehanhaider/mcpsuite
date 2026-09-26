@@ -18,11 +18,14 @@ _render_unit = sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_
 	chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"
 # The selected units that `make autostart` has installed; deploy acts on these.
 _installed = $(strip $(foreach u,$(_units),$(if $(wildcard $(SYSTEMD_USER_DIR)/$(u)),$(u))))
-# Clear the failed state of units ($(1)) that tripped the start limit, which
-# otherwise refuses every start. reset-failed errors on a unit that isn't
-# loaded, so only failed units are reset.
+# Clear the start-limit counter of units ($(1)) before a deliberate start, so
+# earlier starts don't make systemd refuse it. Only running or failed units:
+# reset-failed errors on a unit that isn't loaded, and a unit mid-crash-loop
+# (activating) keeps its counter.
 _reset_failed = for u in $(1); do \
-	if systemctl --user is-failed --quiet "$$u"; then systemctl --user reset-failed "$$u"; fi; \
+	if systemctl --user is-active --quiet "$$u" || systemctl --user is-failed --quiet "$$u"; then \
+		systemctl --user reset-failed "$$u"; \
+	fi; \
 	done
 
 .PHONY: help setup db-setup dev build start mcp mcp-http \
