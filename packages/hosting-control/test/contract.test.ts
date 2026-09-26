@@ -789,7 +789,7 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
     }
   });
 
-  it("crm_operator reads issuer keys but never values, and only its bound workspace's sessions and codes", async () => {
+  it("crm_operator reads no credential — issuer values, session tokens, code hashes — and only its bound workspace's sessions and codes", async () => {
     const userOf = async (ws: string): Promise<string> =>
       String((await h.admin.pool.query("SELECT id FROM crm.users WHERE workspace_id = $1", [ws])).rows[0]?.id);
     const [userA, userB] = [await userOf(wsA), await userOf(wsB)];
@@ -810,6 +810,12 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
       for (const denied of [
         "SELECT value FROM crm.openauth_kv",
         "SELECT * FROM crm.openauth_kv",
+        "SELECT auth_refresh FROM crm.sessions",
+        "SELECT token_hash FROM crm.sessions",
+        "SELECT * FROM crm.sessions",
+        "SELECT code_hash FROM crm.auth_codes",
+        "SELECT * FROM crm.auth_codes",
+        "UPDATE crm.auth_codes SET attempts = 0",
         "INSERT INTO crm.openauth_kv (key, value) VALUES ('k', '{}')",
         "UPDATE crm.openauth_kv SET expires_at = now()",
         "INSERT INTO crm.sessions (id, token_hash, expires_at, created_at) VALUES (gen_random_uuid(), 'h', now(), now())",

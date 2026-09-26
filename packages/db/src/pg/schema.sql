@@ -813,11 +813,12 @@ TO crm_app, crm_operator;
 --                 OpenAuth issuer storage.
 --   crm_operator  what provisioning, owner recovery and deletion need: codes
 --                 for its bound workspace's users, ending their sessions, and
---                 issuer keys by name — never openauth_kv.value, so hosting
---                 control cannot read stored credentials.
+--                 issuer keys by name. Column grants withhold every credential
+--                 — openauth_kv.value, sessions.token_hash/auth_refresh,
+--                 auth_codes.code_hash — so hosting control cannot read one.
 GRANT SELECT, INSERT, UPDATE, DELETE ON crm.sessions, crm.openauth_kv, crm.auth_codes TO crm_app;
-GRANT SELECT, DELETE ON crm.sessions TO crm_operator;
-GRANT SELECT, INSERT, UPDATE ON crm.auth_codes TO crm_operator;
+GRANT SELECT (user_id), DELETE ON crm.sessions TO crm_operator;
+GRANT SELECT (user_id, email, purpose, created_at, used_at), INSERT, UPDATE (used_at) ON crm.auth_codes TO crm_operator;
 GRANT SELECT (key, expires_at), DELETE ON crm.openauth_kv TO crm_operator;
 
 -- The non-login resolver role owns the read-only lookup functions below
@@ -860,9 +861,10 @@ GRANT SELECT ON crm.users, crm.memberships, crm.mcp_clients, crm.openauth_kv TO 
 -- workspace-scoped: a credential exists before any workspace context does
 -- (sign-in is the step that DISCOVERS the workspace). Their policies follow
 -- the request's two phases:
---   unbound (no workspace yet — sign-in, session and code lookups): rows are
---     reachable, and the adapter reads them only by key (token hash, email,
---     code, issuer key);
+--   unbound (app.workspace_id not set — sign-in, session and code lookups):
+--     rows are reachable, and the adapter reads them only by key (token
+--     hash, email, code, issuer key). A set but malformed workspace is NOT
+--     unbound: it sees no user rows, so it reaches nothing (deny by default);
 --   bound (the transaction has its workspace): only rows of that
 --     workspace's users are reachable — the policy's sub-select on crm.users
 --     runs under the users table's own workspace policy.
@@ -972,21 +974,25 @@ ALTER TABLE crm.schema_version FORCE ROW LEVEL SECURITY;
 
 -- crm_app: the issuer storage is keyed global data; sessions and codes are
 -- reachable unbound (by key) and, once bound, only for the workspace's users.
--- A session with no user (hosted open registration, before provisioning) has
--- no workspace to bind.
+-- A bound transaction may also reach sessions with no user yet (hosted open
+-- registration): adoption upgrades such a row after binding its workspace.
 CREATE POLICY identity_storage ON crm.openauth_kv
   TO crm_app USING (true) WITH CHECK (true);
 CREATE POLICY identity_storage ON crm.sessions
   TO crm_app
-  USING (crm.current_workspace_id() IS NULL OR user_id IS NULL OR user_id IN (SELECT id FROM crm.users))
-  WITH CHECK (crm.current_workspace_id() IS NULL OR user_id IS NULL OR user_id IN (SELECT id FROM crm.users));
+  USING (coalesce(current_setting('app.workspace_id', true), '') = ''
+         OR (crm.current_workspace_id() IS NOT NULL AND user_id IS NULL)
+         OR user_id IN (SELECT id FROM crm.users))
+  WITH CHECK (coalesce(current_setting('app.workspace_id', true), '') = ''
+         OR (crm.current_workspace_id() IS NOT NULL AND user_id IS NULL)
+         OR user_id IN (SELECT id FROM crm.users));
 CREATE POLICY identity_storage ON crm.auth_codes
   TO crm_app
-  USING (crm.current_workspace_id() IS NULL OR user_id IN (SELECT id FROM crm.users))
-  WITH CHECK (crm.current_workspace_id() IS NULL OR user_id IN (SELECT id FROM crm.users));
+  USING (coalesce(current_setting('app.workspace_id', true), '') = '' OR user_id IN (SELECT id FROM crm.users))
+  WITH CHECK (coalesce(current_setting('app.workspace_id', true), '') = '' OR user_id IN (SELECT id FROM crm.users));
 
 -- crm_operator: only its bound workspace's users' sessions and codes; issuer
--- keys by name (the column grant withholds values).
+-- keys by name (the column grants withhold every credential).
 CREATE POLICY operator_storage ON crm.openauth_kv
   TO crm_operator USING (true);
 CREATE POLICY operator_storage ON crm.sessions

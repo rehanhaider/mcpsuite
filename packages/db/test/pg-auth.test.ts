@@ -479,6 +479,23 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     expect((await codeRows(ownerB.id)).some((r) => r.code_hash === sha256Hex(normalizeAuthCode(bCode.code)) && r.used_at === null)).toBe(true);
     await portsB.users.deleteSessions(ownerB.id);
 
+    // A set but malformed workspace is not "unbound": it reaches nothing,
+    // not even sessions that have no user yet.
+    await identity.createSession(null, { email: "stranger@auth-a.test", authSubject: "acct_stranger" });
+    await insertSession(ownerB.id);
+    const probe = await app.pool.connect();
+    try {
+      await probe.query("BEGIN");
+      await probe.query("SELECT set_config('app.workspace_id', 'not-a-uuid', true)");
+      expect((await probe.query("SELECT count(*)::int AS n FROM crm.sessions")).rows[0]?.n).toBe(0);
+      expect((await probe.query("SELECT count(*)::int AS n FROM crm.auth_codes")).rows[0]?.n).toBe(0);
+      await probe.query("ROLLBACK");
+    } finally {
+      probe.release();
+    }
+    await portsB.users.deleteSessions(ownerB.id);
+    await admin.pool.query("DELETE FROM crm.sessions WHERE email = 'stranger@auth-a.test'");
+
     // Workspace tables stay invisible without a workspace: identity work
     // reads users only through the keyed lookup functions.
     expect((await app.pool.query("SELECT count(*)::int AS n FROM crm.users")).rows[0]?.n).toBe(0);
