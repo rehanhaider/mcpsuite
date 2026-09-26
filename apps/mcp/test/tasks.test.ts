@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { RequestContext } from "@mcpsuite/core";
+import { z } from "zod";
+import type { OperationDef, RequestContext } from "@mcpsuite/core";
 import { createRuntime, openDatabase, type Db, type Runtime } from "@mcpsuite/db";
 import { handleMcpRequest } from "../src/handler.ts";
 import { WORKSPACE_LOCKED_RPC_CODE } from "../src/server.ts";
@@ -168,20 +169,47 @@ describe("MCP approval tasks over HTTP", () => {
     expect(await runtime.portsFor(human.workspaceId).companies.get(target)).toBeNull();
   });
 
-  it("returns completed tool errors for rejection with note and failed approved execution", async () => {
+  it("returns a completed tool error for rejection with the reviewer's note", async () => {
     const rejectedId = await pending(await company());
     expect((await runtime.run(human, "pendingAction.reject", { id: rejectedId, note: "Keep this customer" })).status).toBe("ok");
     const rejected = (await send(rpc("tasks/get", { taskId: rejectedId }))).result;
     expect(rejected.status).toBe("completed");
     expect(rejected.result.isError).toBe(true);
     expect(rejected.result.content[0].text).toContain("Keep this customer");
+  });
 
-    const failedId = await pending("missing-company-id");
-    expect((await runtime.run(human, "pendingAction.approve", { id: failedId })).status).toBe("error");
+  it("maps an existing failed row to a completed tool error", async () => {
+    const failedId = await pending(await company());
+    await runtime.portsFor(human.workspaceId).pendingActions.setStatus(failedId, {
+      status: "failed", reviewedByUserId: human.userId,
+      result: { error: { code: "not_found", message: "Stored execution failure" } },
+    });
     const failed = (await send(rpc("tasks/get", { taskId: failedId }))).result;
     expect(failed.status).toBe("completed");
     expect(failed.result.isError).toBe(true);
-    expect(failed.result.content[0].text).toContain("not_found");
+    expect(failed.result.content[0].text).toContain("Stored execution failure");
+  });
+
+  it("keeps a failed SQLite approval pending and rolls back the target's partial write", async () => {
+    runtime.catalog.set("test.partialWrite", {
+      name: "test.partialWrite", title: "Partial write test", description: "Test approval rollback",
+      input: z.object({ id: z.string() }), minRole: "admin", scope: "write",
+      risk: "destructive", mcpExpose: true,
+      handler: async ({ ports }, { id }) => {
+        await ports.companies.update(id, { name: "Partial write" });
+        throw new Error("forced failure after write");
+      },
+    } as OperationDef);
+    const target = await company();
+    const called = await send(rpc("tools/call", {
+      name: "test_partialWrite", arguments: { id: target }, _meta: optIn(),
+    }));
+    const taskId = called.result.taskId;
+    expect(called.result.status).toBe("input_required");
+    expect((await runtime.run(human, "pendingAction.approve", { id: taskId })).status).toBe("error");
+    expect((await runtime.portsFor(human.workspaceId).pendingActions.get(taskId))?.status).toBe("pending");
+    expect((await send(rpc("tasks/get", { taskId }))).result.status).toBe("input_required");
+    expect((await runtime.portsFor(human.workspaceId).companies.get(target))?.name).toBe("Task test company");
   });
 
   it("reports an expired pending request as cancelled without executing it", async () => {
@@ -207,6 +235,17 @@ describe("MCP approval tasks over HTTP", () => {
     expect((await send(rpc("tasks/cancel", { taskId }))).result).toEqual({ resultType: "complete" });
     const audit = await runtime.portsFor(human.workspaceId).audit.list({ operation: "pendingAction.cancel", limit: 10, offset: 0 });
     expect(audit.items.some((event) => event.entityId === taskId)).toBe(true);
+  });
+
+  it("acks cancellation even when the requester's write scope was removed", async () => {
+    const taskId = await pending(await company());
+    const client = await runtime.identity.resolveMcpToken(key);
+    expect(client).not.toBeNull();
+    expect((await runtime.run(human, "mcpClient.update", { id: client!.clientId, scopes: ["read"] })).status).toBe("ok");
+    expect((await runtime.identity.resolveMcpToken(key))?.scopes).toEqual(["read"]);
+    expect((await send(rpc("tasks/cancel", { taskId }))).result).toEqual({ resultType: "complete" });
+    expect((await runtime.portsFor(human.workspaceId).pendingActions.get(taskId))?.status).toBe("pending");
+    expect((await send(rpc("tasks/get", { taskId }))).result.status).toBe("input_required");
   });
 
   it("hides tasks from other client keys with the same error as an unknown id", async () => {

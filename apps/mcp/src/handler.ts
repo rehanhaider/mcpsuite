@@ -132,11 +132,12 @@ async function handleTaskRequest(
 
   if (request.method === "tasks/get") return json(200, { jsonrpc: "2.0", id, result: taskState(pa) });
   if (request.method === "tasks/cancel" && pa.status === "pending") {
-    const result = await runtime.run(ctx, "pendingAction.cancel", { id: taskId });
-    if (result.status === "error") {
-      // A review may have won the race after our read. Terminal tasks still ack.
-      const latest = await runtime.portsFor(ctx.workspaceId).pendingActions.get(taskId);
-      if (latest?.status === "pending") return json(200, rpcError(id, result.error.message));
+    // Cancellation is cooperative: the catalog may refuse it (for example,
+    // after the client's write scope is removed), but a known task still acks.
+    try {
+      await runtime.run(ctx, "pendingAction.cancel", { id: taskId });
+    } catch {
+      // The acknowledgement does not promise a terminal cancelled status.
     }
   }
   // URL-mode approval happens in the web UI. inputResponses only acknowledges
