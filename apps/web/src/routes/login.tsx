@@ -50,7 +50,7 @@ export const Route = createFileRoute("/login")({
   }),
   beforeLoad: async ({ context, search }) => {
     const auth = await context.queryClient.ensureQueryData(whoamiQuery);
-    if (auth?.passwordMustChange) throw redirect({ to: "/set-password" });
+    if (auth?.passwordMustChange) throw redirect({ to: "/set-password", search: { redirect: search.redirect } });
     if (auth) throw redirect({ href: search.redirect ?? "/app" });
   },
   component: LoginPage,
@@ -77,7 +77,7 @@ function LoginPage() {
       if (res.ok) {
         await queryClient.resetQueries();
         if (res.mustChangePassword) {
-          navigate({ to: "/set-password" });
+          navigate({ to: "/set-password", search: { redirect: search.redirect } });
         } else {
           navigate({ href: search.redirect ?? "/app" });
         }

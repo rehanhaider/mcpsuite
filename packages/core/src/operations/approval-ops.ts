@@ -48,14 +48,15 @@ export const approvalOps = [
     handler: async (op, { id }) => {
       const pa = await ownPendingAction(op, id);
       if (pa.status !== "pending" || pa.expiresAt >= nowIso()) return pa;
-      const updated = await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewNote: "expired" });
+      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewNote: "expired" });
+      if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
       await audit(op, {
         operation: "pendingAction.expire",
         entityType: "pending_action",
         entityId: id,
         summary: `Expired pending ${pa.operation}`,
       });
-      return updated;
+      return found(await op.ports.pendingActions.get(id), "pending action", id);
     },
   }),
 
@@ -124,14 +125,15 @@ export const approvalOps = [
     handler: async (op, { id }) => {
       const pa = await ownPendingAction(op, id);
       if (pa.status !== "pending") return pa;
-      const updated = await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewedByUserId: op.ctx.userId });
+      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewedByUserId: op.ctx.userId });
+      if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
       await audit(op, {
         operation: "pendingAction.cancel",
         entityType: "pending_action",
         entityId: id,
         summary: `Cancelled pending ${pa.operation}`,
       });
-      return updated;
+      return found(await op.ports.pendingActions.get(id), "pending action", id);
     },
   }),
 

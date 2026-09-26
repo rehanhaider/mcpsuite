@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import type { OperationDef, RequestContext } from "@mcpsuite/core";
+import { runOperation, type OperationDef, type RequestContext } from "@mcpsuite/core";
 import { createRuntime, mcpContext, openDatabase, type Db, type Runtime } from "@mcpsuite/db";
 import { handleMcpRequest } from "../src/handler.ts";
 import { WORKSPACE_LOCKED_RPC_CODE } from "../src/server.ts";
@@ -227,6 +227,36 @@ describe("MCP approval tasks over HTTP", () => {
     const audit = await runtime.portsFor(human.workspaceId).audit.list({ operation: "pendingAction.expire", limit: 10, offset: 0 });
     expect(audit.items.some((event) => event.entityId === taskId)).toBe(true);
     expect(await runtime.portsFor(human.workspaceId).companies.get(target)).not.toBeNull();
+  });
+
+  it.each([
+    { operation: "pendingAction.cancelOwnTask", auditOperation: "pendingAction.cancel", expire: false },
+    { operation: "pendingAction.getOwnTask", auditOperation: "pendingAction.expire", expire: true },
+  ])("keeps an approval that wins the race with $operation", async ({ operation, auditOperation, expire }) => {
+    const taskId = await pending(await company());
+    if (expire) {
+      db.$client.prepare("UPDATE pending_actions SET expires_at = ? WHERE id = ?")
+        .run(new Date(Date.now() - 1000).toISOString(), taskId);
+    }
+    const ports = runtime.portsFor(human.workspaceId);
+    const result = { data: { approved: true } };
+    const racedPorts = {
+      ...ports,
+      pendingActions: {
+        ...ports.pendingActions,
+        cancelIfPending: async (id: string, patch: { reviewedByUserId?: string | null; reviewNote?: string | null }) => {
+          await ports.pendingActions.setStatus(id, { status: "approved", reviewedByUserId: human.userId, result });
+          return ports.pendingActions.cancelIfPending(id, patch);
+        },
+      },
+    };
+    const client = await runtime.identity.resolveMcpToken(key);
+    expect(client).not.toBeNull();
+    const outcome = await runOperation(runtime.catalog, racedPorts, mcpContext(client!), operation, { id: taskId });
+    expect(outcome).toMatchObject({ status: "ok", data: { status: "approved", result } });
+    expect(await ports.pendingActions.get(taskId)).toMatchObject({ status: "approved", result });
+    const audit = await ports.audit.list({ operation: auditOperation, limit: 10, offset: 0 });
+    expect(audit.items.some((event) => event.entityId === taskId)).toBe(false);
   });
 
   it("acknowledges inputResponses without approving and cancels through the audited catalog operation", async () => {
