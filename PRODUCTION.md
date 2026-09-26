@@ -83,12 +83,18 @@ Do not run `make dev` while the `mcpsuite-web` service owns port 2222.
 
 A service that fails 5 starts within 60 seconds stops retrying and shows as
 `failed`; systemd then refuses a plain `restart` until the failed state is
-cleared. To inspect and recover (same for `mcpsuite-mcp-http`):
+cleared. To inspect a service (same for `mcpsuite-mcp-http`):
 
 ```sh
 systemctl --user status mcpsuite-web
 journalctl --user -u mcpsuite-web -n 50
-systemctl --user stop mcpsuite-web
+```
+
+To recover, stop both services (a broken install fails them together), fix
+the cause, then deploy:
+
+```sh
+systemctl --user stop mcpsuite-web mcpsuite-mcp-http
 mise exec -- make setup && mise exec -- make deploy
 ```
 
