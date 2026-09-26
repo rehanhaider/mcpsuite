@@ -13,6 +13,9 @@ SVC ?= web mcp
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 _units := $(SVC:web=mcpsuite-web.service)
 _units := $(_units:mcp=mcpsuite-mcp-http.service)
+# Render one unit template ($$u) into the user unit directory.
+_render_unit = sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
+	chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"
 
 .PHONY: help setup db-setup dev build start mcp mcp-http \
         test typecheck smoke clean deploy \
@@ -56,8 +59,14 @@ typecheck: ## Typecheck every package
 smoke: ## Exercise every catalog operation against the live DB (safe, self-cleaning)
 	pnpm --filter @mcpsuite/db smoke
 
-deploy: ## Build the web app and restart the systemd services
+deploy: ## Build the web app, refresh the installed units, restart the services
 	$(MAKE) build
+	@for u in $(_units); do \
+		[ -f "$(SYSTEMD_USER_DIR)/$$u" ] || continue; \
+		$(_render_unit); \
+	done
+	systemctl --user daemon-reload
+	systemctl --user reset-failed $(_units)
 	systemctl --user restart $(_units)
 	@echo ">>> Deployed.  web -> http://localhost:2222   mcp -> http://localhost:8765/mcp"
 
@@ -70,8 +79,7 @@ autostart: ## Enable + start web UI & MCP on boot (SVC=web|mcp to limit)
 	@loginctl enable-linger "$$USER" >/dev/null 2>&1 || true
 	@for u in $(_units); do \
 		echo ">>> installing $$u"; \
-		sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_DIR)/$$u"; \
-		chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"; \
+		$(_render_unit); \
 	done
 	systemctl --user daemon-reload
 	systemctl --user enable --now $(_units)

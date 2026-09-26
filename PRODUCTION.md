@@ -73,7 +73,7 @@ serves `/mcp` itself); the separate MCP HTTP service is only needed if you
 want MCP on its own port (`make autostart SVC=web` installs just the web
 service).
 
-After pulling source changes:
+After pulling source changes (this also refreshes the installed unit files):
 
 ```sh
 mise exec -- make deploy
@@ -82,12 +82,13 @@ mise exec -- make deploy
 Do not run `make dev` while the `mcpsuite-web` service owns port 2222.
 
 A service that fails 5 starts within 60 seconds stops retrying and shows as
-`failed`. To inspect and recover (same for `mcpsuite-mcp-http`):
+`failed`; systemd then refuses a plain `restart` until the failed state is
+cleared. To inspect and recover (same for `mcpsuite-mcp-http`):
 
 ```sh
 systemctl --user status mcpsuite-web
 journalctl --user -u mcpsuite-web -n 50
-mise exec -- make setup && systemctl --user restart mcpsuite-web
+mise exec -- make setup && mise exec -- make deploy
 ```
 
 ## Put it behind HTTPS
