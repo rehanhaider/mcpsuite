@@ -18,6 +18,12 @@ _render_unit = sed "s|@REPO@|$(PWD)|g" ".scripts/systemd/$$u" > "$(SYSTEMD_USER_
 	chmod 0644 "$(SYSTEMD_USER_DIR)/$$u"
 # The selected units that `make autostart` has installed; deploy acts on these.
 _installed = $(strip $(foreach u,$(_units),$(if $(wildcard $(SYSTEMD_USER_DIR)/$(u)),$(u))))
+# Clear the failed state of units ($(1)) that tripped the start limit, which
+# otherwise refuses every start. reset-failed errors on a unit that isn't
+# loaded, so only failed units are reset.
+_reset_failed = for u in $(1); do \
+	if systemctl --user is-failed --quiet "$$u"; then systemctl --user reset-failed "$$u"; fi; \
+	done
 
 .PHONY: help setup db-setup dev build start mcp mcp-http \
         test typecheck smoke clean deploy \
@@ -61,12 +67,12 @@ typecheck: ## Typecheck every package
 smoke: ## Exercise every catalog operation against the live DB (safe, self-cleaning)
 	pnpm --filter @mcpsuite/db smoke
 
-deploy: ## Build the web app, refresh the installed units, restart the services
+deploy: ## Refresh the installed units, build the web app, restart the services
 	@test -n "$(_installed)" || { echo ">>> No services installed ($(SVC)); run make autostart first." >&2; exit 1; }
-	$(MAKE) build
 	@for u in $(_installed); do $(_render_unit); done
 	systemctl --user daemon-reload
-	systemctl --user reset-failed $(_installed)
+	$(MAKE) build
+	@$(call _reset_failed,$(_installed))
 	systemctl --user restart $(_installed)
 	@echo ">>> Deployed.  web -> http://localhost:2222   mcp -> http://localhost:8765/mcp"
 
@@ -82,6 +88,7 @@ autostart: ## Enable + start web UI & MCP on boot (SVC=web|mcp to limit)
 		$(_render_unit); \
 	done
 	systemctl --user daemon-reload
+	@$(call _reset_failed,$(_units))
 	systemctl --user enable --now $(_units)
 	@echo ">>> Autostart ON ($(SVC)).  web -> http://localhost:2222   mcp -> http://localhost:8765/mcp"
 
