@@ -3,7 +3,7 @@
  *
  * Every rule lives here, in TypeScript: sessions and adoption, the issuer
  * storage, code issue and redemption, ending sessions, and subject linking.
- * The database contributes row-level security and four read-only lookups
+ * The database contributes row-level security and a few read-only lookups
  * (schema.sql, "Cross-workspace lookups"): sign-in must find a user before a
  * workspace is bound, and a transaction without a workspace sees no user rows.
  *
@@ -21,8 +21,9 @@
  * once the workspace is known.
  *
  * The same store serves hosting control (crm_operator), which may only issue
- * codes, check that a password credential exists, and resolve a subject's
- * email — it can read issuer keys but never their values.
+ * codes, check that a password credential exists, resolve a subject's email,
+ * and end or purge its bound workspace's users' sign-ins — it can read no
+ * credential and list no identity.
  *
  * Difference from the SQLite adapter, deliberate:
  *   - A disabled user's setup/reset code does not redeem.
@@ -392,15 +393,12 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
         const stored = await kvGet(x, authPasswordKey(email));
         return stored != null && openAuthVerifyPassword(password, JSON.parse(stored.value) as OpenAuthScryptHash);
       }),
-    // Key and expiry only — hosting control may not read credential values.
+    // A yes/no lookup (schema.sql): hosting control asks before the email
+    // belongs to any user, when its policies let it see no issuer rows.
     hasPasswordCredential: (email) =>
       inTx(null, async (x) => {
-        const found = await rows(
-          x,
-          sql`SELECT 1 FROM crm.openauth_kv
-              WHERE key = ${authPasswordKey(email)} AND (expires_at IS NULL OR expires_at > now())`,
-        );
-        return found.length === 1;
+        const [row] = await rows<{ ok: boolean }>(x, sql`SELECT crm.has_password_credential(${normalizeEmail(email)}) AS ok`);
+        return row?.ok === true;
       }),
 
     // --- codes ------------------------------------------------------------

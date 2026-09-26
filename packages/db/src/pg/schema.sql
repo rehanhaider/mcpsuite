@@ -813,13 +813,15 @@ TO crm_app, crm_operator;
 --                 OpenAuth issuer storage.
 --   crm_operator  what provisioning, owner recovery and deletion need: codes
 --                 for its bound workspace's users, ending their sessions, and
---                 issuer keys by name. Column grants withhold every credential
---                 — openauth_kv.value, sessions.token_hash/auth_refresh,
---                 auth_codes.code_hash — so hosting control cannot read one.
+--                 removing those users' issuer keys. Column grants withhold
+--                 every credential — openauth_kv.value,
+--                 sessions.token_hash/auth_refresh, auth_codes.code_hash — and
+--                 its policies reach only its bound workspace's users' rows,
+--                 so it can neither read a credential nor list identities.
 GRANT SELECT, INSERT, UPDATE, DELETE ON crm.sessions, crm.openauth_kv, crm.auth_codes TO crm_app;
 GRANT SELECT (user_id), DELETE ON crm.sessions TO crm_operator;
 GRANT SELECT (user_id, email, purpose, created_at, used_at), INSERT, UPDATE (used_at) ON crm.auth_codes TO crm_operator;
-GRANT SELECT (key, expires_at), DELETE ON crm.openauth_kv TO crm_operator;
+GRANT SELECT (key), DELETE ON crm.openauth_kv TO crm_operator;
 
 -- The non-login resolver role owns the read-only lookup functions below
 -- (§Cross-workspace lookups) and may read exactly what they return. It has no
@@ -991,10 +993,19 @@ CREATE POLICY identity_storage ON crm.auth_codes
   USING (coalesce(current_setting('app.workspace_id', true), '') = '' OR user_id IN (SELECT id FROM crm.users))
   WITH CHECK (coalesce(current_setting('app.workspace_id', true), '') = '' OR user_id IN (SELECT id FROM crm.users));
 
--- crm_operator: only its bound workspace's users' sessions and codes; issuer
--- keys by name (the column grants withhold every credential).
+-- crm_operator: only its bound workspace's users' sessions, codes and issuer
+-- keys — the email-keyed records ("email" ␟ <email> ␟ …) and the subject's
+-- refresh tokens ("oauth:refresh" ␟ <subject> ␟ …). Unbound it reaches none;
+-- it can never list the deployment's identities. The column grants withhold
+-- every credential.
 CREATE POLICY operator_storage ON crm.openauth_kv
-  TO crm_operator USING (true);
+  TO crm_operator
+  USING (
+    (starts_with(key, 'email' || chr(31))
+      AND split_part(key, chr(31), 2) IN (SELECT lower(email) FROM crm.users))
+    OR (starts_with(key, 'oauth:refresh' || chr(31))
+      AND split_part(key, chr(31), 2) IN (SELECT auth_subject FROM crm.users WHERE auth_subject IS NOT NULL))
+  );
 CREATE POLICY operator_storage ON crm.sessions
   TO crm_operator USING (user_id IN (SELECT id FROM crm.users));
 CREATE POLICY operator_storage ON crm.auth_codes
@@ -1130,6 +1141,21 @@ AS $$
     AND (expires_at IS NULL OR expires_at > now())
   ORDER BY key
   LIMIT 1
+$$;
+
+-- Whether a password credential exists for an email — yes or no, never the
+-- hash. Hosting control provisions a trial-first owner as active only when
+-- one exists, before any user row (and so any workspace) does.
+CREATE FUNCTION crm.has_password_credential(p_email text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = crm, pg_temp
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM crm.openauth_kv
+    WHERE key = 'email' || chr(31) || lower(btrim(p_email)) || chr(31) || 'password'
+      AND (expires_at IS NULL OR expires_at > now())
+  )
 $$;
 
 -- =============================================================================
@@ -1308,8 +1334,9 @@ CREATE POLICY operator_read ON crm.schema_version
 
 -- --- Ownership + execution grants -------------------------------------------
 -- Owned by the non-login resolver role, EXECUTE revoked from PUBLIC and
--- granted to crm_app. Hosting control resolves a verified subject to its
--- email when it provisions a trial-first owner; it calls nothing else here.
+-- granted to crm_app. Hosting control provisions a trial-first owner from a
+-- verified subject: it resolves the subject's email and asks whether a
+-- password credential exists; it calls nothing else here.
 
 DO $$
 DECLARE fn text;
@@ -1320,6 +1347,7 @@ BEGIN
     'identity_by_user_id(uuid)',
     'resolve_mcp_key(text)',
     'email_for_auth_subject(text)',
+    'has_password_credential(text)',
     'workspace_access_state(uuid)'
   ] LOOP
     EXECUTE format('ALTER FUNCTION crm.%s OWNER TO crm_identity_resolver', fn);
@@ -1329,7 +1357,7 @@ BEGIN
 END
 $$;
 
-GRANT EXECUTE ON FUNCTION crm.email_for_auth_subject(text) TO crm_operator;
+GRANT EXECUTE ON FUNCTION crm.email_for_auth_subject(text), crm.has_password_credential(text) TO crm_operator;
 
 -- --- Version stamp -----------------------------------------------------------
 
