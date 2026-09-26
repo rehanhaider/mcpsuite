@@ -87,28 +87,93 @@ function normalizeRows(rows: Array<Record<string, string>>, mapping: Record<stri
   return out;
 }
 
+/** Where an import row's company or person comes from: an existing record, or one this import creates. */
+type ImportRef = { kind: "existing"; id: string } | { kind: "new"; key: string };
+
+interface ImportRowPlan {
+  company: ImportRef | null;
+  person: ImportRef | null;
+}
+
+const importKey = (value: string): string => value.trim().toLowerCase();
+
+/**
+ * Decide, before anything is written, which existing company and person each
+ * row reuses and which records the import creates. Preview and run both use
+ * this, so the approver sees exactly what the import will do.
+ *
+ * Companies match by name. People match by email when the row has one;
+ * otherwise by name among the people linked to the row's company. Rows that
+ * repeat a record this import creates share it (same keys, same rules).
+ */
+async function planImport(op: OpCtx, rows: NormalizedRow[]): Promise<ImportRowPlan[]> {
+  const companies = new Map<string, ImportRef>(); // lowercased name -> ref
+  const peopleByEmail = new Map<string, ImportRef>(); // lowercased email -> ref
+  const peopleByNameAt = new Map<string, ImportRef>(); // lowercased name | company ref -> ref
+  const refKey = (ref: ImportRef): string => (ref.kind === "existing" ? `id:${ref.id}` : `new:${ref.key}`);
+  const linkedPeople = new Map<string, Promise<Array<{ person: { id: string; name: string } }>>>(); // company id -> links
+  let newPeople = 0;
+
+  const plans: ImportRowPlan[] = [];
+  for (const row of rows) {
+    let company: ImportRef | null = null;
+    if (row.company.name) {
+      const key = importKey(row.company.name);
+      company = companies.get(key) ?? null;
+      if (!company) {
+        const existing = await op.ports.companies.getByName(row.company.name);
+        company = existing ? { kind: "existing", id: existing.id } : { kind: "new", key: `company:${key}` };
+        companies.set(key, company);
+      }
+    }
+
+    let person: ImportRef | null = null;
+    if (row.person.name) {
+      const name = importKey(row.person.name);
+      const nameAt = company ? `${name}|${refKey(company)}` : null;
+      if (row.person.email) {
+        const email = importKey(row.person.email);
+        person = peopleByEmail.get(email) ?? null;
+        if (!person) {
+          const existing = await op.ports.people.getByEmail(row.person.email);
+          person = existing ? { kind: "existing", id: existing.id } : { kind: "new", key: `person:${++newPeople}` };
+          peopleByEmail.set(email, person);
+        }
+      } else if (nameAt) {
+        person = peopleByNameAt.get(nameAt) ?? null;
+        if (!person && company?.kind === "existing") {
+          if (!linkedPeople.has(company.id)) linkedPeople.set(company.id, op.ports.companies.people(company.id));
+          const linked = await linkedPeople.get(company.id)!;
+          const match = linked.find((l) => importKey(l.person.name) === name);
+          if (match) person = { kind: "existing", id: match.person.id };
+        }
+      }
+      // No email and no company: nothing identifies the person, so always new.
+      person ??= { kind: "new", key: `person:${++newPeople}` };
+      if (nameAt && !peopleByNameAt.has(nameAt)) peopleByNameAt.set(nameAt, person);
+    }
+    plans.push({ company, person });
+  }
+  return plans;
+}
+
 async function previewImport(op: OpCtx, csvServices: CsvServices, input: z.infer<typeof zImportPreview>) {
   const rows = csvServices.parse(input.csv);
   if (rows.length === 0) throw OpError.validation("CSV has no data rows");
   const headers = Object.keys(rows[0] ?? {});
   const mapping = resolveMapping(headers, input.mapping);
   const normalized = normalizeRows(rows, mapping);
+  const plans = await planImport(op, normalized);
 
-  const existingCompanies = await op.ports.companies.list({
-    includeArchived: true,
-    sort: "name",
-    dir: "asc",
-    limit: 500,
-    offset: 0,
-  });
-  const companyNames = new Set(existingCompanies.items.map((c) => c.name.trim().toLowerCase()));
-  let duplicateCompanies = 0;
-  const uniqueNew = new Set<string>();
-  for (const row of normalized) {
-    const name = row.company.name?.trim().toLowerCase();
-    if (!name) continue;
-    if (companyNames.has(name)) duplicateCompanies++;
-    else uniqueNew.add(name);
+  const newCompanies = new Set<string>();
+  const newPeople = new Set<string>();
+  let existingCompanyMatches = 0;
+  let existingPeopleMatches = 0;
+  for (const plan of plans) {
+    if (plan.company?.kind === "existing") existingCompanyMatches++;
+    else if (plan.company) newCompanies.add(plan.company.key);
+    if (plan.person?.kind === "existing") existingPeopleMatches++;
+    else if (plan.person) newPeople.add(plan.person.key);
   }
   return {
     headers,
@@ -116,8 +181,10 @@ async function previewImport(op: OpCtx, csvServices: CsvServices, input: z.infer
     totalRows: rows.length,
     importableRows: normalized.length,
     skippedRows: rows.length - normalized.length,
-    newCompanies: uniqueNew.size,
-    existingCompanyMatches: duplicateCompanies,
+    newCompanies: newCompanies.size,
+    existingCompanyMatches,
+    newPeople: newPeople.size,
+    existingPeopleMatches,
     sample: normalized.slice(0, 10),
   };
 }
@@ -257,7 +324,7 @@ export function buildDataOps(csvServices: CsvServices) {
       name: "import.preview",
       title: "Preview CSV import",
       description:
-        "Inspect a CSV: detected column mapping, row counts, duplicate detection against existing companies, and a normalized sample. Run before import.run.",
+        "Inspect a CSV: detected column mapping, row counts, how many companies and people are new vs matched to existing records (the same matching import.run uses), and a normalized sample. Run before import.run.",
       input: zImportPreview,
       minRole: "member",
       scope: "write",
@@ -268,7 +335,7 @@ export function buildDataOps(csvServices: CsvServices) {
       name: "import.run",
       title: "Run CSV import",
       description:
-        "Import a CSV into companies/people/engagements (leads). Dedupes companies by name and people by email/name+company. Risky (bulk data) — agents need approval unless trusted.",
+        "Import a CSV into companies/people/engagements (leads). Reuses the existing company with the same name, and the existing person with the same email (or, for a row without an email, the same name at the same company). Skips a lead already imported under the same sourceLabel for the same company and person, so re-running with the same sourceLabel does not duplicate (the default label is dated). Risky (bulk data) — agents need approval unless trusted.",
       input: zImportRun,
       minRole: "member",
       scope: "write",
@@ -298,21 +365,28 @@ export function buildDataOps(csvServices: CsvServices) {
           (await op.ports.tags.getByName(sourceLabel)) ?? (await op.ports.tags.create({ name: sourceLabel, color: "info" }));
 
         const result = await op.ports.tx(async () => {
+          const plans = await planImport(op, normalized);
+          const createdIds = new Map<string, string>(); // new ref key -> id created by this run
           let companiesCreated = 0,
             companiesMatched = 0,
             peopleCreated = 0,
-            engagementsCreated = 0;
+            peopleMatched = 0,
+            engagementsCreated = 0,
+            engagementsSkipped = 0;
 
-          for (const row of normalized) {
+          for (const [i, row] of normalized.entries()) {
+            const plan = plans[i]!;
+
             let companyId: string | null = null;
-            if (row.company.name) {
-              const existing = await op.ports.companies.getByName(row.company.name);
-              if (existing) {
-                companyId = existing.id;
-                companiesMatched++;
-              } else {
+            if (plan.company?.kind === "existing") {
+              companyId = plan.company.id;
+              companiesMatched++;
+            } else if (plan.company) {
+              companyId = createdIds.get(plan.company.key) ?? null;
+              if (companyId) companiesMatched++;
+              else {
                 const created = await op.ports.companies.create({
-                  name: row.company.name,
+                  name: row.company.name!,
                   industry: row.company.industry ?? null,
                   hq: row.company.hq ?? null,
                   country: row.company.country ?? null,
@@ -321,26 +395,52 @@ export function buildDataOps(csvServices: CsvServices) {
                   ownerUserId: input.ownerUserId ?? op.ctx.userId,
                 });
                 companyId = created.id;
+                createdIds.set(plan.company.key, companyId);
                 companiesCreated++;
               }
             }
 
             let personId: string | null = null;
-            if (row.person.name) {
-              const person = await op.ports.people.create({
-                name: row.person.name,
-                title: row.person.title ?? null,
-                email: row.person.email ?? null,
-                linkedin: row.person.linkedin ?? null,
-                ownerUserId: input.ownerUserId ?? op.ctx.userId,
-              });
-              personId = person.id;
-              peopleCreated++;
-              if (companyId) {
+            let personCreated = false;
+            if (plan.person?.kind === "existing") {
+              personId = plan.person.id;
+              peopleMatched++;
+            } else if (plan.person) {
+              personId = createdIds.get(plan.person.key) ?? null;
+              if (personId) peopleMatched++;
+              else {
+                const person = await op.ports.people.create({
+                  name: row.person.name!,
+                  title: row.person.title ?? null,
+                  email: row.person.email ?? null,
+                  linkedin: row.person.linkedin ?? null,
+                  ownerUserId: input.ownerUserId ?? op.ctx.userId,
+                });
+                personId = person.id;
+                createdIds.set(plan.person.key, personId);
+                peopleCreated++;
+                personCreated = true;
+              }
+            }
+            if (personId && companyId) {
+              if (personCreated) {
                 await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary: true });
+              } else {
+                // A matched person keeps their links as they are: add this company only if missing,
+                // as primary only when they have none.
+                const links = await op.ports.people.companies(personId);
+                if (!links.some((l) => l.companyId === companyId)) {
+                  const isPrimary = !links.some((l) => l.isPrimary);
+                  await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary });
+                }
               }
             }
 
+            // A lead this label already imported for the same company and person is kept, not repeated.
+            if (await op.ports.engagements.findTagged({ tagId: tag.id, companyId, personId })) {
+              engagementsSkipped++;
+              continue;
+            }
             const company = companyId ? await op.ports.companies.get(companyId) : null;
             const personName = row.person.name;
             const engagement = await op.ports.engagements.create({
@@ -364,14 +464,22 @@ export function buildDataOps(csvServices: CsvServices) {
               await op.ports.activities.touchLinked(a, nowIso());
             }
           }
-          return { companiesCreated, companiesMatched, peopleCreated, engagementsCreated, tag: sourceLabel };
+          return {
+            companiesCreated,
+            companiesMatched,
+            peopleCreated,
+            peopleMatched,
+            engagementsCreated,
+            engagementsSkipped,
+            tag: sourceLabel,
+          };
         });
 
         await audit(op, {
           operation: "import.run",
           entityType: "workspace",
           entityId: null,
-          summary: `Imported CSV: ${result.engagementsCreated} leads, ${result.companiesCreated} new companies, ${result.peopleCreated} people (tag "${sourceLabel}")`,
+          summary: `Imported CSV: ${result.engagementsCreated} leads (${result.engagementsSkipped} already imported), ${result.companiesCreated} new companies, ${result.peopleCreated} new people (tag "${sourceLabel}")`,
           meta: result,
         });
         return result;

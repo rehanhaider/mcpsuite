@@ -610,6 +610,100 @@ describe("search + import/export", () => {
     expect(exported.rowCount).toBe(2);
     expect(exported.csv).toContain("Acme");
   });
+
+  describe("re-import is idempotent (issue #12)", () => {
+    // Ada and Bob match by email; Cy has no email and matches by name at Acme.
+    const csv =
+      "Company,Contact,Title,Email,Notes\n" +
+      "Acme,Ada Lovelace,CTO,ada@acme.io,met at conf\n" +
+      "Beta Corp,Bob,CEO,bob@beta.co,\n" +
+      "Acme,Cy Twombly,Designer,,\n";
+    const counts = () => ports.maintenance.counts();
+    const primaryLinks = (personId: string): number =>
+      (
+        db.$client.prepare("SELECT COUNT(*) n FROM company_people WHERE person_id = ? AND is_primary = 1").get(personId) as {
+          n: number;
+        }
+      ).n;
+
+    it("importing the same CSV twice keeps companies, people, leads and notes stable", async () => {
+      const first = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      expect(first).toMatchObject({ companiesCreated: 2, peopleCreated: 3, engagementsCreated: 3, engagementsSkipped: 0 });
+      const after = await counts();
+      const notes = (db.$client.prepare("SELECT COUNT(*) n FROM activities WHERE kind = 'note'").get() as { n: number }).n;
+
+      const again = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      expect(again).toMatchObject({
+        companiesCreated: 0,
+        companiesMatched: 3,
+        peopleCreated: 0,
+        peopleMatched: 3,
+        engagementsCreated: 0,
+        engagementsSkipped: 3,
+      });
+      expect(await counts()).toEqual(after);
+      expect((db.$client.prepare("SELECT COUNT(*) n FROM activities WHERE kind = 'note'").get() as { n: number }).n).toBe(notes);
+      const ada = await ports.people.getByEmail("ada@acme.io");
+      expect(primaryLinks(ada!.id)).toBe(1);
+    });
+
+    it("matches email case-insensitively and a no-email row by name at the same company", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      const shouted = "Company,Contact,Email\nAcme,Ada L.,ADA@ACME.IO\nAcme,cy twombly,\n";
+      const result = await ok(run(owner, "import.run", { csv: shouted, sourceLabel: "batch-2" }));
+      expect(result).toMatchObject({ peopleCreated: 0, peopleMatched: 2, engagementsCreated: 2 });
+      expect((await counts()).people).toBe(3);
+    });
+
+    it("keeps people apart when only the name matches at a different company, or nothing identifies them", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      const other = "Company,Contact\nGamma,Cy Twombly\n,Solo Person\n";
+      const first = await ok(run(owner, "import.run", { csv: other, sourceLabel: "batch-3" }));
+      expect(first).toMatchObject({ peopleCreated: 2, peopleMatched: 0 });
+      // A person with neither email nor company has nothing to match on.
+      const second = await ok(run(owner, "import.run", { csv: other, sourceLabel: "batch-3" }));
+      expect(second).toMatchObject({ peopleCreated: 1, peopleMatched: 1 });
+    });
+
+    it("a matched person keeps their primary company and role; a new company is added as secondary", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      const ada = (await ports.people.getByEmail("ada@acme.io"))!;
+      const beta = (await ports.companies.getByName("Beta Corp"))!;
+      await ports.people.link({ companyId: beta.id, personId: ada.id, isPrimary: true, roleTitle: "Advisor" });
+
+      const moved = "Company,Contact,Title,Email\nAcme,Ada Lovelace,CEO,ada@acme.io\nGamma,Ada Lovelace,Chair,ada@acme.io\n";
+      await ok(run(owner, "import.run", { csv: moved, sourceLabel: "batch-2" }));
+      const links = await ports.people.companies(ada.id);
+      const byName = Object.fromEntries(links.map((l) => [l.company.name, l]));
+      expect(byName["Beta Corp"]).toMatchObject({ isPrimary: true, roleTitle: "Advisor" });
+      expect(byName["Acme"]).toMatchObject({ isPrimary: false, roleTitle: "CTO" });
+      expect(byName["Gamma"]).toMatchObject({ isPrimary: false, roleTitle: "Chair" });
+    });
+
+    it("a repeated row inside one CSV creates one person and one lead", async () => {
+      const dup = "Company,Contact,Email\nAcme,Ada,ada@acme.io\nAcme,Ada,ada@acme.io\nAcme,Ada,\n";
+      const preview = await ok(run(owner, "import.preview", { csv: dup }));
+      expect(preview).toMatchObject({ newCompanies: 1, newPeople: 1, existingPeopleMatches: 0 });
+      const result = await ok(run(owner, "import.run", { csv: dup, sourceLabel: "dup" }));
+      expect(result).toMatchObject({ companiesCreated: 1, peopleCreated: 1, peopleMatched: 2, engagementsCreated: 1, engagementsSkipped: 2 });
+    });
+
+    it("preview reports people and agrees with what the run then does", async () => {
+      const before = await ok(run(owner, "import.preview", { csv }));
+      expect(before).toMatchObject({ newCompanies: 2, existingCompanyMatches: 0, newPeople: 3, existingPeopleMatches: 0 });
+      const result = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      expect(result.companiesCreated).toBe(before.newCompanies);
+      expect(result.peopleCreated).toBe(before.newPeople);
+      const after = await ok(run(owner, "import.preview", { csv }));
+      expect(after).toMatchObject({ newCompanies: 0, existingCompanyMatches: 3, newPeople: 0, existingPeopleMatches: 3 });
+    });
+
+    it("preview matches companies beyond the first 500 by name", async () => {
+      for (let i = 0; i <= 500; i++) await ports.companies.create({ name: `Co ${String(i).padStart(3, "0")}` });
+      const preview = await ok(run(owner, "import.preview", { csv: "Company\nCo 500\n" }));
+      expect(preview).toMatchObject({ newCompanies: 0, existingCompanyMatches: 1 });
+    });
+  });
 });
 
 describe("admin", () => {

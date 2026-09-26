@@ -116,6 +116,8 @@ export interface CompanyPort {
 export interface PersonPort {
   list(filter: PersonFilter): Promise<Page<PersonListItem>>;
   get(id: string): Promise<Person | null>;
+  /** Case-insensitive email match, archived included; the oldest person when several share it. */
+  getByEmail(email: string): Promise<Person | null>;
   create(input: Partial<Person> & { name: string }): Promise<Person>;
   update(id: string, patch: Partial<Person>): Promise<Person>;
   setArchived(id: string, archived: boolean): Promise<Person>;
@@ -162,6 +164,11 @@ export interface PipelinePort {
 export interface EngagementPort {
   list(filter: EngagementFilter): Promise<Page<EngagementListItem>>;
   get(id: string): Promise<Engagement | null>;
+  /**
+   * An engagement carrying the tag with exactly this company and person (null
+   * matches null), archived included: how a re-run import finds its own leads.
+   */
+  findTagged(input: { tagId: string; companyId: string | null; personId: string | null }): Promise<Engagement | null>;
   create(input: Partial<Engagement> & { title: string; pipelineId: string; stageId: string }): Promise<Engagement>;
   update(id: string, patch: Partial<Engagement>): Promise<Engagement>;
   setArchived(id: string, archived: boolean): Promise<Engagement>;

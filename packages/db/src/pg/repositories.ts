@@ -1179,6 +1179,17 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         return row ? mapPerson(row) : null;
       });
     },
+    async getByEmail(email) {
+      return run(async (x) => {
+        const [row] = await x
+          .select()
+          .from(t.people)
+          .where(and(eq(t.people.workspaceId, ws), sql`lower(${t.people.email}) = ${email.trim().toLowerCase()}`))
+          .orderBy(asc(t.people.createdAt), asc(t.people.id))
+          .limit(1);
+        return row ? mapPerson(row) : null;
+      });
+    },
     async create(input) {
       return run(async (x) => {
         const id = input.id ?? newId();
@@ -1581,6 +1592,24 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
           .select()
           .from(t.engagements)
           .where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.id, uid(id))))
+          .limit(1);
+        return row ? mapEngagement(row) : null;
+      });
+    },
+    async findTagged({ tagId, companyId, personId }) {
+      return run(async (x) => {
+        const [row] = await x
+          .select()
+          .from(t.engagements)
+          .where(
+            and(
+              eq(t.engagements.workspaceId, ws),
+              companyId ? eq(t.engagements.companyId, uid(companyId)) : isNull(t.engagements.companyId),
+              personId ? eq(t.engagements.personId, uid(personId)) : isNull(t.engagements.personId),
+              tagCondition("engagement", sql`${t.engagements.id}`, [tagId]),
+            ),
+          )
+          .orderBy(asc(t.engagements.createdAt), asc(t.engagements.id))
           .limit(1);
         return row ? mapEngagement(row) : null;
       });
