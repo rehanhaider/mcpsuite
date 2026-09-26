@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import { getRuntimeAsync } from "@mcpsuite/db";
 import { connectPg, type PgHandle } from "../../../packages/db/src/pg/repositories.ts";
 import { initPgSchema } from "../../../packages/db/src/pg/init.ts";
+import { dropTestDatabase, setTestRolePassword } from "../../../packages/db/test/pg-test-support.ts";
 import { runHostingLifecycleFlow } from "./e2e-hosting-flow.ts";
 
 const ENABLED = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
@@ -24,20 +25,6 @@ const E2E_DB = "mcpsuite_web_e2e_hosting";
 const APP_ROLE_TEST_PASSWORD = "crm_app_test_pw"; // same constants as the db and hosting-control pg suites
 const OPERATOR_ROLE_TEST_PASSWORD = "crm_operator_test_pw";
 
-/**
- * Drop a test database once its pools have really disconnected. Closing a
- * pool returns before the server has ended its backends; a FORCE drop then
- * terminates a connection the client is still closing, which surfaces as an
- * uncaught "terminating connection" error.
- */
-async function dropDatabase(root: PgHandle, name: string): Promise<void> {
-  for (let i = 0; i < 50; i += 1) {
-    const res = await root.pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1", [name]);
-    if (Number(res.rows[0]?.n ?? 0) === 0) break;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  await root.pool.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-}
 
 describe.runIf(ENABLED)("hosted workspace lifecycle, end to end — PostgreSQL", () => {
   let root: PgHandle;
@@ -52,8 +39,8 @@ describe.runIf(ENABLED)("hosted workspace lifecycle, end to end — PostgreSQL",
     adminUrl.pathname = `/${E2E_DB}`;
     admin = await connectPg({ databaseUrl: adminUrl.toString(), max: 1 });
     await initPgSchema(admin.pool);
-    await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
-    await admin.pool.query(`ALTER ROLE crm_operator WITH PASSWORD '${OPERATOR_ROLE_TEST_PASSWORD}'`);
+    await setTestRolePassword(admin.pool, "crm_app", APP_ROLE_TEST_PASSWORD);
+    await setTestRolePassword(admin.pool, "crm_operator", OPERATOR_ROLE_TEST_PASSWORD);
 
     const appUrl = new URL(adminUrl.toString());
     appUrl.username = "crm_app";
@@ -72,7 +59,7 @@ describe.runIf(ENABLED)("hosted workspace lifecycle, end to end — PostgreSQL",
     if (runtime && runtime.adapter === "postgres") await runtime.close();
     await admin?.close();
     if (root) {
-      await dropDatabase(root, E2E_DB).catch(() => {});
+      await dropTestDatabase(root, E2E_DB).catch(() => {});
       await root.close();
     }
   });

@@ -30,6 +30,7 @@ import {
   type PgPorts,
 } from "../src/pg/repositories.ts";
 import { initPgSchema } from "../src/pg/init.ts";
+import { dropTestDatabase, setTestRolePassword } from "./pg-test-support.ts";
 import { joinAuthKey, normalizeAuthCode } from "../src/openauth.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
@@ -126,7 +127,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
       }
     }
     if (lastError) throw lastError;
-    await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
+    await setTestRolePassword(admin.pool, "crm_app", APP_ROLE_TEST_PASSWORD);
 
     const appUrl = new URL(adminUrl.toString());
     appUrl.username = "crm_app";
@@ -145,7 +146,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     await app?.close();
     await admin?.close();
     if (root) {
-      await root.pool.query(`DROP DATABASE IF EXISTS ${AUTH_DB} WITH (FORCE)`).catch(() => {});
+      await dropTestDatabase(root, AUTH_DB).catch(() => {});
       await root.close();
     }
   });

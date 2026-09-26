@@ -38,6 +38,7 @@ import {
   type PgPoolClientLike,
 } from "../src/pg/repositories.ts";
 import { initPgSchema } from "../src/pg/init.ts";
+import { setTestRolePassword } from "./pg-test-support.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
 
@@ -293,7 +294,7 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
       }
     }
     if (initError) throw initError;
-    await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
+    await setTestRolePassword(admin.pool, "crm_app", APP_ROLE_TEST_PASSWORD);
 
     const appUrl = new URL(adminUrl);
     appUrl.username = "crm_app";

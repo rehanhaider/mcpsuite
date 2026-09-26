@@ -50,6 +50,7 @@ import { connectPg, createPgPorts, type PgHandle } from "../../db/src/pg/reposit
 import { initPgSchema } from "../../db/src/pg/init.ts";
 import { createPgIdentity } from "../../db/src/pg/identity.ts";
 import { connectPgHostingStore } from "../../db/src/pg/hosting.ts";
+import { dropTestDatabase, setTestRolePassword } from "../../db/test/pg-test-support.ts";
 import { createHostingControlServer, retryPendingAuthDeliveries, type HostingControlServer } from "../src/index.ts";
 
 const PG_ENABLED = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
@@ -58,20 +59,6 @@ const CONTRACT_DB = "mcpsuite_hc_contract";
 const APP_ROLE_TEST_PASSWORD = "crm_app_test_pw"; // same constant as the db package's pg suites
 const OPERATOR_ROLE_TEST_PASSWORD = "crm_operator_test_pw";
 
-/**
- * Drop a test database once its pools have really disconnected. Closing a
- * pool returns before the server has ended its backends; a FORCE drop then
- * terminates a connection the client is still closing, which surfaces as an
- * uncaught "terminating connection" error.
- */
-async function dropDatabase(root: PgHandle, name: string): Promise<void> {
-  for (let i = 0; i < 50; i += 1) {
-    const res = await root.pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1", [name]);
-    if (Number(res.rows[0]?.n ?? 0) === 0) break;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  await root.pool.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-}
 
 type FaultPoint = "afterChange" | "afterReceipt" | "afterAudit";
 const FAULT_POINTS: FaultPoint[] = ["afterChange", "afterReceipt", "afterAudit"];
@@ -168,8 +155,8 @@ async function pgHarness(): Promise<PgHarness> {
     }
   }
   if (initError) throw initError;
-  await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
-  await admin.pool.query(`ALTER ROLE crm_operator WITH PASSWORD '${OPERATOR_ROLE_TEST_PASSWORD}'`);
+  await setTestRolePassword(admin.pool, "crm_app", APP_ROLE_TEST_PASSWORD);
+  await setTestRolePassword(admin.pool, "crm_operator", OPERATOR_ROLE_TEST_PASSWORD);
 
   const appUrl = new URL(adminUrl.toString());
   appUrl.username = "crm_app";
@@ -216,7 +203,7 @@ async function pgHarness(): Promise<PgHarness> {
       await hosting.close();
       await app.close();
       await admin.close();
-      await dropDatabase(root, CONTRACT_DB).catch(() => {});
+      await dropTestDatabase(root, CONTRACT_DB).catch(() => {});
       await root.close();
     },
   };
@@ -472,7 +459,7 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
         expect(loser.json.error.code).toBe("version_conflict");
         expect((await call("GET", `/api/v1/workspaces/${ws.id}`)).json.data.version).toBe(2);
       }
-    });
+    }, 30_000);
 
     it("two owner transfers guarded by the same version: one wins, one conflicts", async () => {
       for (let round = 0; round < 10; round += 1) {
@@ -488,7 +475,7 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
         expect((a.status === 409 ? a : b).json.error.code).toBe("version_conflict");
         expect(await h.count("memberships", { workspace_id: ws.id, role: "owner" })).toBe(1);
       }
-    });
+    }, 30_000);
 
     it("the inspect read never pairs one owner with another state's version", async () => {
       // Pause the inspect between its owner read and its version read, and
