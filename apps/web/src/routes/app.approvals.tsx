@@ -37,8 +37,15 @@ function ApprovalsPage() {
   const isAdmin = auth?.role === "owner" || auth?.role === "admin";
 
   const actions = useQuery(opQuery<PendingAction[]>("pendingAction.list", { status: search.status }));
+  const linkedAction = useQuery({
+    ...opQuery<PendingAction>("pendingAction.get", { id: search.action }),
+    enabled: !!search.action,
+  });
   const clients = useQuery({ ...opQuery<McpClient[]>("mcpClient.list"), enabled: isAdmin });
   const users = useQuery(opQuery<User[]>("user.list"));
+  const visibleActions = linkedAction.data
+    ? [linkedAction.data, ...(actions.data ?? []).filter((pa) => pa.id !== linkedAction.data.id)]
+    : (actions.data ?? []);
 
   const requesterName = (pa: PendingAction): string => {
     if (pa.requestedByClientId) return clients.data?.find((c) => c.id === pa.requestedByClientId)?.name ?? "MCP agent";
@@ -67,9 +74,9 @@ function ApprovalsPage() {
         ))}
       </div>
 
-      {actions.isLoading ? (
+      {actions.isLoading || linkedAction.isLoading ? (
         <Spinner />
-      ) : (actions.data?.length ?? 0) === 0 ? (
+      ) : visibleActions.length === 0 ? (
         <EmptyState
           icon={<ShieldCheck className="size-10 text-foreground/20" />}
           title={search.status === "pending" ? "Nothing waiting for review" : `No ${search.status} actions`}
@@ -81,7 +88,7 @@ function ApprovalsPage() {
         />
       ) : (
         <div className="space-y-3">
-          {actions.data!.map((pa) => (
+          {visibleActions.map((pa) => (
             <PendingCard key={pa.id} action={pa} requester={requesterName(pa)} isAdmin={isAdmin} reviewer={users.data ?? []} linked={search.action === pa.id} />
           ))}
         </div>

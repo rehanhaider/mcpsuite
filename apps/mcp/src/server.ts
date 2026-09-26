@@ -163,7 +163,7 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
       if (await workspaceLocked(runtime, ctx)) throw lockedMcpError();
       return json(
         uri.href,
-        [...runtime.catalog.values()].map((op) => ({
+        [...runtime.catalog.values()].filter((op) => op.mcpExpose).map((op) => ({
           name: op.name,
           tool: toolName(op.name),
           title: op.title,

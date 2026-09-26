@@ -1,12 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { AppShell } from "~/components/AppShell.tsx";
+import { safeLoginRedirect } from "~/lib/login-redirect.ts";
 import { whoamiQuery } from "~/routes/__root.tsx";
 
 export const Route = createFileRoute("/app")({
-  beforeLoad: async ({ context }) => {
+  beforeLoad: async ({ context, location }) => {
     const auth = await context.queryClient.ensureQueryData(whoamiQuery);
-    if (!auth) throw redirect({ to: "/login" });
+    if (!auth) {
+      throw redirect({
+        to: "/login",
+        search: { redirect: safeLoginRedirect(location.href) },
+      });
+    }
     return { auth };
   },
   component: AppLayout,

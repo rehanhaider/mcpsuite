@@ -136,6 +136,7 @@ function authorize(op: OperationDef, ctx: RequestContext): void {
     }
     return;
   }
+  if (op.requesterOnly) return;
   // Agents: scope gates reachability. The role floor only hard-blocks
   // non-risky operations — risky ones fall through to the approval gate,
   // where the approving human supplies the missing authority.

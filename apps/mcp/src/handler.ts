@@ -70,9 +70,6 @@ function taskFields(pa: PendingAction, status: string, statusMessage?: string) {
 }
 
 function taskState(pa: PendingAction): object {
-  if (pa.status === "pending" && pa.expiresAt < new Date().toISOString()) {
-    return { ...taskFields(pa, "cancelled", "expired"), resultType: "complete" };
-  }
   if (pa.status === "pending") {
     const preview = pa.preview ? JSON.stringify(pa.preview) : "No preview available";
     return {
@@ -108,7 +105,12 @@ function taskState(pa: PendingAction): object {
       result: toText({ status: "error", error: { code: "forbidden", message: `Rejected by reviewer${note}` } }),
     };
   }
-  return { ...taskFields(pa, "cancelled"), resultType: "complete" };
+  return { ...taskFields(pa, "cancelled", pa.reviewNote === "expired" ? "expired" : undefined), resultType: "complete" };
+}
+
+async function readOwnTask(runtime: AnyRuntime, ctx: RequestContext, id: string): Promise<PendingAction | null> {
+  const result = await runtime.run(ctx, "pendingAction.getOwnTask", { id });
+  return result.status === "ok" ? result.data as PendingAction : null;
 }
 
 async function handleTaskRequest(
@@ -123,19 +125,16 @@ async function handleTaskRequest(
     return json(200, rpcError(id, "Invalid inputResponses"));
   }
 
-  // The workspace-scoped port is a narrow owner read. Catalog pendingAction.get
-  // requires the approvals scope, which a task creator need not have.
-  const pa = await runtime.portsFor(ctx.workspaceId).pendingActions.get(taskId);
-  if (!pa || !ctx.clientId || pa.requestedByClientId !== ctx.clientId) {
+  const pa = await readOwnTask(runtime, ctx, taskId);
+  if (!pa) {
     return json(200, rpcError(id, "Unknown task"));
   }
 
   if (request.method === "tasks/get") return json(200, { jsonrpc: "2.0", id, result: taskState(pa) });
   if (request.method === "tasks/cancel" && pa.status === "pending") {
-    // Cancellation is cooperative: the catalog may refuse it (for example,
-    // after the client's write scope is removed), but a known task still acks.
+    // Cancellation is cooperative: always acknowledge a known, owned task.
     try {
-      await runtime.run(ctx, "pendingAction.cancel", { id: taskId });
+      await runtime.run(ctx, "pendingAction.cancelOwnTask", { id: taskId });
     } catch {
       // The acknowledgement does not promise a terminal cancelled status.
     }
@@ -237,8 +236,8 @@ export async function handleMcpRequest(request: Request, runtime: AnyRuntime): P
         if (!rpc || !rpcId(rpc.id) || !record(rpc.result)) return value;
         const approval = pending.get(rpc.id);
         if (!approval) return value;
-        const pa = await runtime.portsFor(ctx.workspaceId).pendingActions.get(approval.pendingActionId);
-        if (!pa || pa.requestedByClientId !== ctx.clientId) return rpcError(rpc.id, "Unknown task");
+        const pa = await readOwnTask(runtime, ctx, approval.pendingActionId);
+        if (!pa) return rpcError(rpc.id, "Unknown task");
         return {
           jsonrpc: "2.0", id: rpc.id,
           result: { ...taskFields(pa, "input_required", approval.message), resultType: "task" },

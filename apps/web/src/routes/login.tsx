@@ -10,6 +10,7 @@ import { useState } from "react";
 import { ButtonSpinner } from "~/components/ui.tsx";
 import { Button } from "~/components/ui/button.tsx";
 import { Input } from "~/components/ui/input.tsx";
+import { safeLoginRedirect } from "~/lib/login-redirect.ts";
 import { whoamiQuery } from "~/routes/__root.tsx";
 import { login } from "~/server/fns.ts";
 
@@ -36,6 +37,7 @@ interface LoginSearch {
   notice?: string;
   email?: string;
   flow?: string;
+  redirect?: string;
 }
 
 export const Route = createFileRoute("/login")({
@@ -44,10 +46,12 @@ export const Route = createFileRoute("/login")({
     notice: typeof search.notice === "string" ? search.notice : undefined,
     email: typeof search.email === "string" ? search.email : undefined,
     flow: typeof search.flow === "string" ? search.flow : undefined,
+    redirect: typeof search.redirect === "string" ? safeLoginRedirect(search.redirect) : undefined,
   }),
-  beforeLoad: async ({ context }) => {
+  beforeLoad: async ({ context, search }) => {
     const auth = await context.queryClient.ensureQueryData(whoamiQuery);
-    if (auth) throw redirect({ to: auth.passwordMustChange ? "/set-password" : "/app" });
+    if (auth?.passwordMustChange) throw redirect({ to: "/set-password" });
+    if (auth) throw redirect({ href: search.redirect ?? "/app" });
   },
   component: LoginPage,
 });
@@ -72,7 +76,11 @@ function LoginPage() {
       const res = await login({ data: { email: email.trim(), password } });
       if (res.ok) {
         await queryClient.resetQueries();
-        navigate({ to: res.mustChangePassword ? "/set-password" : "/app" });
+        if (res.mustChangePassword) {
+          navigate({ to: "/set-password" });
+        } else {
+          navigate({ href: search.redirect ?? "/app" });
+        }
       } else {
         setError(res.error);
       }
