@@ -794,7 +794,10 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
       String((await h.admin.pool.query("SELECT id FROM crm.users WHERE workspace_id = $1", [ws])).rows[0]?.id);
     const [userA, userB] = [await userOf(wsA), await userOf(wsB)];
     const key = "email\u001fa@roles.test\u001fpassword";
-    await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{\"hash\":\"secret\"}')", [key]);
+    const keyB = "email\u001fb@roles.test\u001fpassword";
+    for (const k of [key, keyB]) {
+      await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{\"hash\":\"secret\"}')", [k]);
+    }
     for (const u of [userA, userB]) {
       await h.admin.pool.query(
         `INSERT INTO crm.sessions (id, token_hash, user_id, expires_at, created_at)
@@ -803,9 +806,18 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
       );
     }
     try {
-      // Issuer storage: the key column only — credential values stay unreadable.
+      // Issuer storage: the key column only, and only its bound workspace's
+      // users' keys — never a listing of the deployment's identities.
       await asOperatorIn(null, async (q) => {
-        expect(await q("SELECT key FROM crm.openauth_kv WHERE key = $1", [key])).toHaveLength(1);
+        expect((await q("SELECT count(*)::int AS n FROM crm.openauth_kv"))[0].n).toBe(0);
+      });
+      await asOperatorIn(wsA, async (q) => {
+        expect((await q("SELECT key FROM crm.openauth_kv")).map((r) => r.key)).toEqual([key]);
+        expect(await q("DELETE FROM crm.openauth_kv WHERE key = $1 RETURNING 1", [keyB])).toHaveLength(0);
+      });
+      // "Has a password" is a yes/no lookup that works before binding.
+      await asOperatorIn(null, async (q) => {
+        expect((await q("SELECT crm.has_password_credential($1) AS ok", ["b@roles.test"]))[0].ok).toBe(true);
       });
       for (const denied of [
         "SELECT value FROM crm.openauth_kv",
@@ -838,8 +850,47 @@ describe.runIf(PG_ENABLED)("hosting-control on PostgreSQL — role proofs", () =
         ).rejects.toThrow(/row-level security/i);
       });
     } finally {
-      await h.admin.pool.query("DELETE FROM crm.openauth_kv WHERE key = $1", [key]);
+      await h.admin.pool.query("DELETE FROM crm.openauth_kv WHERE key = ANY($1)", [[key, keyB]]);
       await h.admin.pool.query("DELETE FROM crm.sessions WHERE token_hash LIKE 'roles-%'");
+    }
+  });
+
+  it("as crm_operator, owner recovery revokes refresh tokens and deletion purges the members' issuer keys", async () => {
+    const hc = createHostingControlServer({ store: h.store, serviceKeys: [KEY], host: "127.0.0.1", port: 0 });
+    const { port } = await hc.listen();
+    const call = (method: string, path: string, idem: string, body: unknown) =>
+      fetch(`http://127.0.0.1:${port}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${KEY}`, "idempotency-key": idem, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      const made = await call("POST", "/api/v1/workspaces", "purge-provision", { organizationName: "Purge", ownerEmail: "purge@roles.test" });
+      const ws = ((await made.json()) as { data: { workspaceId: string } }).data.workspaceId;
+      await h.admin.pool.query("UPDATE crm.users SET status = 'active', auth_subject = 'acct_purge' WHERE email = 'purge@roles.test'");
+      const keys = [
+        "email\u001fpurge@roles.test\u001fpassword",
+        "email\u001fpurge@roles.test\u001fsubject",
+        "oauth:refresh\u001facct_purge\u001ft1",
+      ];
+      const survivor = "email\u001fnot-purge@roles.test\u001fpassword";
+      for (const k of [...keys, survivor]) {
+        await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{}') ON CONFLICT DO NOTHING", [k]);
+      }
+      const present = async (k: string) =>
+        Number((await h.admin.pool.query("SELECT count(*)::int AS n FROM crm.openauth_kv WHERE key = $1", [k])).rows[0]?.n);
+
+      // Recovery for an active owner issues a reset code, which ends sign-ins.
+      expect((await call("POST", `/api/v1/workspaces/${ws}/owner/recovery`, "purge-recover", { reason: "roles" })).status).toBe(202);
+      expect(await present(keys[2]!)).toBe(0);
+      await h.admin.pool.query("INSERT INTO crm.openauth_kv (key, value) VALUES ($1, '{}')", [keys[2]]);
+
+      expect((await call("DELETE", `/api/v1/workspaces/${ws}`, "purge-delete", { reason: "roles" })).status).toBe(204);
+      for (const k of keys) expect(await present(k), k).toBe(0);
+      expect(await present(survivor)).toBe(1);
+      await h.admin.pool.query("DELETE FROM crm.openauth_kv WHERE key = $1", [survivor]);
+    } finally {
+      await hc.close();
     }
   });
 

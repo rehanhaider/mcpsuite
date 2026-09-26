@@ -501,7 +501,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     expect((await app.pool.query("SELECT count(*)::int AS n FROM crm.users")).rows[0]?.n).toBe(0);
   });
 
-  it("SQL holds only the eight read-only lookups, none callable by PUBLIC", async () => {
+  it("SQL holds only the nine read-only lookups, none callable by PUBLIC", async () => {
     const fns = await admin.pool.query(
       `SELECT n.nspname || '.' || p.proname AS name, p.provolatile AS volatility, l.lanname AS language,
               pg_get_userbyid(p.proowner) AS owner, coalesce(p.proacl::text, '') AS acl,
@@ -517,6 +517,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     expect([...byName.keys()]).toEqual([
       "crm.current_workspace_id",
       "crm.email_for_auth_subject",
+      "crm.has_password_credential",
       "crm.identity_by_email",
       "crm.identity_by_subject",
       "crm.identity_by_user_id",
@@ -534,9 +535,14 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
       for (const entry of entries) expect(entry.startsWith("="), `${row.name} grants nothing to PUBLIC`).toBe(false);
     }
     // crm_app: every crm lookup, not hosting's sweep. crm_operator: the RLS
-    // predicate, subject → email, and its sweep — nothing else.
+    // predicate, subject → email, "has a password", and its sweep — nothing else.
     const expectApp = (name: string) => name.startsWith("crm.");
-    const operatorMay = new Set(["crm.current_workspace_id", "crm.email_for_auth_subject", "hosting.pending_auth_deliveries"]);
+    const operatorMay = new Set([
+      "crm.current_workspace_id",
+      "crm.email_for_auth_subject",
+      "crm.has_password_credential",
+      "hosting.pending_auth_deliveries",
+    ]);
     for (const row of fns.rows) {
       expect(row.app, `crm_app on ${row.name}`).toBe(expectApp(String(row.name)));
       expect(row.operator, `crm_operator on ${row.name}`).toBe(operatorMay.has(String(row.name)));
