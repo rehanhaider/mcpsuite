@@ -665,6 +665,21 @@ describe("search + import/export", () => {
       expect(second).toMatchObject({ peopleCreated: 1, peopleMatched: 1 });
     });
 
+    it("a matched person keeps their primary company and role; a new company is added as secondary", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      const ada = (await ports.people.getByEmail("ada@acme.io"))!;
+      const beta = (await ports.companies.getByName("Beta Corp"))!;
+      await ports.people.link({ companyId: beta.id, personId: ada.id, isPrimary: true, roleTitle: "Advisor" });
+
+      const moved = "Company,Contact,Title,Email\nAcme,Ada Lovelace,CEO,ada@acme.io\nGamma,Ada Lovelace,Chair,ada@acme.io\n";
+      await ok(run(owner, "import.run", { csv: moved, sourceLabel: "batch-2" }));
+      const links = await ports.people.companies(ada.id);
+      const byName = Object.fromEntries(links.map((l) => [l.company.name, l]));
+      expect(byName["Beta Corp"]).toMatchObject({ isPrimary: true, roleTitle: "Advisor" });
+      expect(byName["Acme"]).toMatchObject({ isPrimary: false, roleTitle: "CTO" });
+      expect(byName["Gamma"]).toMatchObject({ isPrimary: false, roleTitle: "Chair" });
+    });
+
     it("a repeated row inside one CSV creates one person and one lead", async () => {
       const dup = "Company,Contact,Email\nAcme,Ada,ada@acme.io\nAcme,Ada,ada@acme.io\nAcme,Ada,\n";
       const preview = await ok(run(owner, "import.preview", { csv: dup }));

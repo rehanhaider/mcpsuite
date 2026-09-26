@@ -111,6 +111,7 @@ async function planImport(op: OpCtx, rows: NormalizedRow[]): Promise<ImportRowPl
   const peopleByEmail = new Map<string, ImportRef>(); // lowercased email -> ref
   const peopleByNameAt = new Map<string, ImportRef>(); // lowercased name | company ref -> ref
   const refKey = (ref: ImportRef): string => (ref.kind === "existing" ? `id:${ref.id}` : `new:${ref.key}`);
+  const linkedPeople = new Map<string, Promise<Array<{ person: { id: string; name: string } }>>>(); // company id -> links
   let newPeople = 0;
 
   const plans: ImportRowPlan[] = [];
@@ -141,7 +142,8 @@ async function planImport(op: OpCtx, rows: NormalizedRow[]): Promise<ImportRowPl
       } else if (nameAt) {
         person = peopleByNameAt.get(nameAt) ?? null;
         if (!person && company?.kind === "existing") {
-          const linked = await op.ports.companies.people(company.id);
+          if (!linkedPeople.has(company.id)) linkedPeople.set(company.id, op.ports.companies.people(company.id));
+          const linked = await linkedPeople.get(company.id)!;
           const match = linked.find((l) => importKey(l.person.name) === name);
           if (match) person = { kind: "existing", id: match.person.id };
         }
@@ -399,6 +401,7 @@ export function buildDataOps(csvServices: CsvServices) {
             }
 
             let personId: string | null = null;
+            let personCreated = false;
             if (plan.person?.kind === "existing") {
               personId = plan.person.id;
               peopleMatched++;
@@ -416,10 +419,21 @@ export function buildDataOps(csvServices: CsvServices) {
                 personId = person.id;
                 createdIds.set(plan.person.key, personId);
                 peopleCreated++;
+                personCreated = true;
               }
             }
             if (personId && companyId) {
-              await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary: true });
+              if (personCreated) {
+                await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary: true });
+              } else {
+                // A matched person keeps their links as they are: add this company only if missing,
+                // as primary only when they have none.
+                const links = await op.ports.people.companies(personId);
+                if (!links.some((l) => l.companyId === companyId)) {
+                  const isPrimary = !links.some((l) => l.isPrimary);
+                  await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary });
+                }
+              }
             }
 
             // A lead this label already imported for the same company and person is kept, not repeated.
