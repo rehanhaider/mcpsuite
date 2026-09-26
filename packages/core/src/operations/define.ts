@@ -19,6 +19,8 @@ export interface OperationDef<I extends z.ZodTypeAny = z.ZodTypeAny, O = unknown
   minRole: Role;
   /** MCP scope required for agent actors. */
   scope: McpScope;
+  /** One pending action, authorized by requester ownership in the handler instead of agent scope or role. */
+  requesterOnly?: true;
   /**
    * Risky operations create pending approvals for agent actors whose trust
    * profile does not clear the category. Humans with minRole run directly.
@@ -46,6 +48,7 @@ export function defineOperation<I extends z.ZodTypeAny, O>(def: {
   input: I;
   minRole: Role;
   scope: McpScope;
+  requesterOnly?: true;
   risk?: RiskCategory | null;
   mcpExpose?: boolean;
   preview?: (op: OpCtx, input: z.infer<I>) => Promise<Record<string, unknown>>;

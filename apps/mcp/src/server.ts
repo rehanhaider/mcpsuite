@@ -74,7 +74,7 @@ export function lockedRpcRejection(body: unknown): unknown | null {
   return Array.isArray(body) ? rejected : rejected[0];
 }
 
-function toText(result: OpResult): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+export function toText(result: OpResult): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
   if (result.status === "ok") {
     return { content: [{ type: "text", text: JSON.stringify(result.data ?? null, null, 2) }] };
   }
@@ -110,18 +110,24 @@ export function toolName(operationName: string): string {
   return operationName.replace(/\./g, "_");
 }
 
-export function createMcpServer(runtime: AnyRuntime, ctx: RequestContext): McpServer {
+export function createMcpServer(
+  runtime: AnyRuntime,
+  ctx: RequestContext,
+  onPendingApproval?: (requestId: string | number, result: Extract<OpResult, { status: "pending_approval" }>) => void,
+): McpServer {
   const server = new McpServer(SERVER_INFO, {
+    ...(onPendingApproval ? { capabilities: { extensions: { "io.modelcontextprotocol/tasks": {} } } } : {}),
     instructions:
       "mcpsuite CRM — agent-native sales CRM. Naming: engagements are outreach leads; deals carry money. " +
       "Start with stats_home for an operational overview, search_global to find records, " +
-      "*_get_context tools for full record bundles. Risky operations may return pendingApproval=true — " +
-      "a human must approve them in the web UI (Approvals page) before they take effect.",
+      "*_get_context tools for full record bundles. Risky operations may return pendingApproval=true; " +
+      "task-capable HTTP clients receive a task handle instead. A human must approve in the web UI " +
+      "(Approvals page) before the operation takes effect.",
   });
 
   for (const op of runtime.catalog.values()) {
     if (!op.mcpExpose) continue;
-    registerTool(server, runtime, ctx, op);
+    registerTool(server, runtime, ctx, op, onPendingApproval);
   }
   registerResources(server, runtime, ctx);
   return server;
@@ -228,7 +234,13 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
   );
 }
 
-function registerTool(server: McpServer, runtime: AnyRuntime, ctx: RequestContext, op: OperationDef): void {
+function registerTool(
+  server: McpServer,
+  runtime: AnyRuntime,
+  ctx: RequestContext,
+  op: OperationDef,
+  onPendingApproval?: (requestId: string | number, result: Extract<OpResult, { status: "pending_approval" }>) => void,
+): void {
   const objectSchema = op.input as unknown as z.ZodObject<ZodRawShape>;
   const shape: ZodRawShape = typeof objectSchema.shape === "object" ? objectSchema.shape : {};
   server.registerTool(
@@ -238,11 +250,13 @@ function registerTool(server: McpServer, runtime: AnyRuntime, ctx: RequestContex
       description: op.risk ? `${op.description} [risk: ${op.risk}]` : op.description,
       inputSchema: shape,
     },
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra) => {
       // Locked workspaces answer with the same catalog error envelope agents
       // already understand; the operation is never executed.
       if (await workspaceLocked(runtime, ctx)) return toText(workspaceLockedResult());
-      return toText(await runtime.run(ctx, op.name, args ?? {}));
+      const result = await runtime.run(ctx, op.name, args ?? {});
+      if (result.status === "pending_approval") onPendingApproval?.(extra.requestId, result);
+      return toText(result);
     },
   );
 }

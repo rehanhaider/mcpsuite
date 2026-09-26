@@ -2739,6 +2739,26 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         return pa;
       });
     },
+    async cancelIfPending(id, patch) {
+      return run(async (x) => {
+        const rows = await x
+          .update(t.pendingActions)
+          .set({
+            status: "cancelled",
+            reviewedByUserId: patch.reviewedByUserId ?? null,
+            reviewedAt: new Date(),
+            reviewNote: patch.reviewNote ?? null,
+            result: null,
+          })
+          .where(and(
+            eq(t.pendingActions.workspaceId, ws),
+            eq(t.pendingActions.id, uid(id)),
+            eq(t.pendingActions.status, "pending"),
+          ))
+          .returning({ id: t.pendingActions.id });
+        return rows.length > 0;
+      });
+    },
     async countPending() {
       return run(async (x) => {
         const [row] = await x

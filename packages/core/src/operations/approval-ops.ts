@@ -1,9 +1,19 @@
 /** Pending action review — the human (or explicitly authorized agent) side of the approval gate. */
 import { z } from "zod";
 import { OpError } from "../errors.ts";
-import { zId, PENDING_STATUSES } from "../domain.ts";
-import { defineOperation } from "./define.ts";
+import { zId, PENDING_STATUSES, type PendingAction } from "../domain.ts";
+import { nowIso } from "../ids.ts";
+import { defineOperation, type OpCtx } from "./define.ts";
 import { audit, found } from "./helpers.ts";
+
+async function ownPendingAction(op: OpCtx, id: string): Promise<PendingAction> {
+  const pa = await op.ports.pendingActions.get(id);
+  const isRequester = op.ctx.actorType === "agent"
+    ? pa?.requestedByClientId === op.ctx.clientId && !!op.ctx.clientId
+    : op.ctx.actorType === "human" && pa?.requestedByUserId === op.ctx.userId && !!op.ctx.userId;
+  if (!pa || !isRequester) throw OpError.notFound("pending action", id);
+  return pa;
+}
 
 export const approvalOps = [
   defineOperation({
@@ -24,6 +34,30 @@ export const approvalOps = [
     minRole: "member",
     scope: "approvals",
     handler: async ({ ports }, { id }) => found(await ports.pendingActions.get(id), "pending action", id),
+  }),
+
+  defineOperation({
+    name: "pendingAction.getOwnTask",
+    title: "Get own approval task",
+    description: "Fetch one approval request owned by the requester and expire it when due.",
+    input: z.object({ id: zId }),
+    minRole: "member",
+    scope: "approvals",
+    requesterOnly: true,
+    mcpExpose: false,
+    handler: async (op, { id }) => {
+      const pa = await ownPendingAction(op, id);
+      if (pa.status !== "pending" || pa.expiresAt >= nowIso()) return pa;
+      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewNote: "expired" });
+      if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
+      await audit(op, {
+        operation: "pendingAction.expire",
+        entityType: "pending_action",
+        entityId: id,
+        summary: `Expired pending ${pa.operation}`,
+      });
+      return found(await op.ports.pendingActions.get(id), "pending action", id);
+    },
   }),
 
   defineOperation({
@@ -76,6 +110,30 @@ export const approvalOps = [
         summary: `Cancelled pending ${pa.operation}`,
       });
       return updated;
+    },
+  }),
+
+  defineOperation({
+    name: "pendingAction.cancelOwnTask",
+    title: "Cancel own approval task",
+    description: "Cancel one approval request owned by the requester.",
+    input: z.object({ id: zId }),
+    minRole: "member",
+    scope: "approvals",
+    requesterOnly: true,
+    mcpExpose: false,
+    handler: async (op, { id }) => {
+      const pa = await ownPendingAction(op, id);
+      if (pa.status !== "pending") return pa;
+      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewedByUserId: op.ctx.userId });
+      if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
+      await audit(op, {
+        operation: "pendingAction.cancel",
+        entityType: "pending_action",
+        entityId: id,
+        summary: `Cancelled pending ${pa.operation}`,
+      });
+      return found(await op.ports.pendingActions.get(id), "pending action", id);
     },
   }),
 

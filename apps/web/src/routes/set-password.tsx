@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ButtonSpinner } from "~/components/ui.tsx";
 import { Button } from "~/components/ui/button.tsx";
 import { Input } from "~/components/ui/input.tsx";
+import { safeLoginRedirect } from "~/lib/login-redirect.ts";
 import { whoamiQuery } from "~/routes/__root.tsx";
 import { changePassword, setPassword } from "~/server/fns.ts";
 
@@ -18,12 +19,14 @@ import { changePassword, setPassword } from "~/server/fns.ts";
 interface SetPasswordSearch {
   email?: string;
   code?: string;
+  redirect?: string;
 }
 
 export const Route = createFileRoute("/set-password")({
   validateSearch: (search: Record<string, unknown>): SetPasswordSearch => ({
     email: typeof search.email === "string" ? search.email : undefined,
     code: typeof search.code === "string" ? search.code : undefined,
+    redirect: typeof search.redirect === "string" ? safeLoginRedirect(search.redirect) : undefined,
   }),
   beforeLoad: async ({ context }) => {
     const auth = await context.queryClient.ensureQueryData(whoamiQuery);
@@ -45,7 +48,7 @@ function SetPasswordPage() {
       }
     >
       {forcedChange ? (
-        <ForcedChangeForm />
+        <ForcedChangeForm redirectTo={search.redirect ?? "/app"} />
       ) : (
         <RedeemCodeForm
           purpose="setup"
@@ -184,7 +187,7 @@ export function RedeemCodeForm(props: {
   );
 }
 
-function ForcedChangeForm() {
+function ForcedChangeForm({ redirectTo }: { redirectTo: string }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [repeat, setRepeat] = useState("");
@@ -205,7 +208,7 @@ function ForcedChangeForm() {
       const res = await changePassword({ data: { current, next } });
       if (res.ok) {
         await queryClient.resetQueries();
-        navigate({ to: "/app" });
+        navigate({ href: redirectTo });
       } else {
         setError(res.error);
       }
