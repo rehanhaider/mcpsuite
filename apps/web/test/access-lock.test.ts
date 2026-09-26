@@ -13,10 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-// The runtime opens DB_PATH lazily on first use — point it at a temp file
-// before any handler runs.
+// The runtime opens DB_PATH lazily on first use — point it at a temp file,
+// and keep adapter selection on SQLite, before any handler runs.
 const dir = mkdtempSync(join(tmpdir(), "mcpsuite-web-lock-"));
 process.env.DB_PATH = join(dir, "web-test.db");
+delete process.env.DATABASE_URL;
 
 import { closeDb, createSession, getRuntime } from "@mcpsuite/db";
 import { Route as OpsRoute } from "../src/routes/api.ops.$name.ts";

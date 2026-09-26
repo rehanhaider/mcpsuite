@@ -29,6 +29,7 @@ import type { IdentityStore, IdentityTestHooks } from "../src/identity.ts";
 import { connectPg, createPgPorts, provisionPgWorkspace, type PgHandle } from "../src/pg/repositories.ts";
 import { createPgIdentity } from "../src/pg/identity.ts";
 import { createPgRuntime } from "../src/pg/runtime.ts";
+import { dropTestDatabase, setTestRolePassword } from "./pg-test-support.ts";
 import { createRuntime } from "../src/runtime.ts";
 import { initPgSchema } from "../src/pg/init.ts";
 
@@ -115,7 +116,7 @@ async function pgHarness(): Promise<Harness> {
     }
   }
   if (lastError) throw lastError;
-  await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
+  await setTestRolePassword(admin.pool, "crm_app", APP_ROLE_TEST_PASSWORD);
   const appUrl = new URL(adminUrl.toString());
   appUrl.username = "crm_app";
   appUrl.password = APP_ROLE_TEST_PASSWORD;
@@ -137,7 +138,7 @@ async function pgHarness(): Promise<Harness> {
     close: async () => {
       await app.close();
       await admin.close();
-      await root.pool.query(`DROP DATABASE IF EXISTS ${CONTRACT_DB} WITH (FORCE)`).catch(() => {});
+      await dropTestDatabase(root, CONTRACT_DB).catch(() => {});
       await root.close();
     },
   };

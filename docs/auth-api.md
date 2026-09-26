@@ -304,7 +304,7 @@ Setting `MCPSUITE_AUTH_SIGNUP_URL` switches the deployment into open registratio
   `{ userId: null, subject, email, workspaceId: null, …, provisioned: false }`
   — the signup page reads it to drive provisioning.
 - Hosting-control provisioning (`POST /api/v1/workspaces`) checks
-  `hasPasswordCredentialSync(email)`: with a completed credential (proof the
+  `identity.hasPasswordCredential(email)`: with a completed credential (proof the
   holder registered + verified here) the owner is created **active** with no
   setup code; without one the pending-owner + setup-code path applies
   unchanged. Nobody can provision an email they did not verify.

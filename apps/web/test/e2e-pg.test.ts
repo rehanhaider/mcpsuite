@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import { getRuntimeAsync, seedPgWorkspaceWithOwner, type SeededPgWorkspace } from "@mcpsuite/db";
 import { connectPg, type PgHandle } from "../../../packages/db/src/pg/repositories.ts";
 import { initPgSchema } from "../../../packages/db/src/pg/init.ts";
+import { dropTestDatabase, setTestRolePassword } from "../../../packages/db/test/pg-test-support.ts";
 import { runSignInToMcpFlow } from "./e2e-flow.ts";
 
 const ENABLED = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
@@ -37,7 +38,7 @@ describe.runIf(ENABLED)("sign-in to MCP, end to end — PostgreSQL (crm_app unde
     const admin = await connectPg({ databaseUrl: adminUrl.toString(), max: 1 });
     try {
       await initPgSchema(admin.pool);
-      await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
+      await setTestRolePassword(admin.pool, "crm_app", APP_ROLE_TEST_PASSWORD);
     } finally {
       await admin.close();
     }
@@ -59,7 +60,7 @@ describe.runIf(ENABLED)("sign-in to MCP, end to end — PostgreSQL (crm_app unde
     const runtime = await getRuntimeAsync().catch(() => null);
     if (runtime && runtime.adapter === "postgres") await runtime.close();
     if (root) {
-      await root.pool.query(`DROP DATABASE IF EXISTS ${E2E_DB} WITH (FORCE)`).catch(() => {});
+      await dropTestDatabase(root, E2E_DB).catch(() => {});
       await root.close();
     }
   });

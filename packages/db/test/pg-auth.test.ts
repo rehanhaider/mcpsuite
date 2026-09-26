@@ -30,6 +30,7 @@ import {
   type PgPorts,
 } from "../src/pg/repositories.ts";
 import { initPgSchema } from "../src/pg/init.ts";
+import { dropTestDatabase, setTestRolePassword } from "./pg-test-support.ts";
 import { joinAuthKey, normalizeAuthCode } from "../src/openauth.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
@@ -126,7 +127,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
       }
     }
     if (lastError) throw lastError;
-    await admin.pool.query(`ALTER ROLE crm_app WITH PASSWORD '${APP_ROLE_TEST_PASSWORD}'`);
+    await setTestRolePassword(admin.pool, "crm_app", APP_ROLE_TEST_PASSWORD);
 
     const appUrl = new URL(adminUrl.toString());
     appUrl.username = "crm_app";
@@ -145,7 +146,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     await app?.close();
     await admin?.close();
     if (root) {
-      await root.pool.query(`DROP DATABASE IF EXISTS ${AUTH_DB} WITH (FORCE)`).catch(() => {});
+      await dropTestDatabase(root, AUTH_DB).catch(() => {});
       await root.close();
     }
   });
@@ -437,7 +438,9 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     await app.pool.query("SELECT crm.openauth_kv_remove($1)", ["oauth:refresh:sub-kv:t1"]);
 
     // Privilege hygiene for every credential function: resolver-owned, no PUBLIC
-    // execute, crm_app only (crm_operator has no credential access).
+    // execute. crm_app may call them all; hosting control (crm_operator) only
+    // the narrow set provisioning, recovery and deletion need — never the
+    // generic issuer storage, sessions or resolvers.
     const fns = [
       "resolve_user_identity",
       "resolve_auth_email",
@@ -455,6 +458,10 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
       "find_user_by_auth_subject",
       "email_for_auth_subject",
       "redeem_auth_code",
+      "has_password_credential",
+      "record_code_issue",
+      "end_user_sessions",
+      "workspace_access_state",
     ];
     const acl = await admin.pool.query(
       `SELECT proname, coalesce(proacl::text, '') AS acl, pg_get_userbyid(proowner) AS owner
@@ -469,10 +476,25 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
       expect(entries.length, `${row.proname} has explicit acl`).toBeGreaterThan(0);
       for (const entry of entries) expect(entry.startsWith("="), `${row.proname} grants nothing to PUBLIC`).toBe(false);
     }
-    const operatorCan = await admin.pool.query(
-      "SELECT has_function_privilege('crm_operator', 'crm.openauth_kv_get(text)', 'EXECUTE') AS ok",
+    const operatorFns = new Set([
+      "email_for_auth_subject",
+      "has_password_credential",
+      "record_code_issue",
+      "issue_auth_code",
+      "end_user_sessions",
+      "purge_openauth_identity",
+    ]);
+    const privileges = await admin.pool.query(
+      `SELECT proname, has_function_privilege('crm_operator', p.oid, 'EXECUTE') AS operator,
+              has_function_privilege('crm_app', p.oid, 'EXECUTE') AS app
+       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = 'crm' AND proname = ANY($1)`,
+      [fns],
     );
-    expect(operatorCan.rows[0]?.ok).toBe(false);
+    for (const row of privileges.rows) {
+      expect(row.app, `crm_app may execute ${row.proname}`).toBe(true);
+      expect(row.operator, `crm_operator on ${row.proname}`).toBe(operatorFns.has(String(row.proname)));
+    }
   });
 
   // ── 8. Permanent deletion: cascade vs survival ────────────────────────────

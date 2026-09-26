@@ -11,6 +11,12 @@ routed from the public domain.
 private SaaS -> private HTTPS -> hosting control API -> CRM database transaction
 ```
 
+It runs on either database adapter. The business rules (versions, eligibility,
+error codes, idempotency, one-time codes) live here; every read and write goes
+through the adapter's `HostingStore` (`@mcpsuite/db`, `src/hosting.ts`), with
+one implementation per adapter (`src/sqlite-hosting.ts`, `src/pg/hosting.ts`).
+This package holds no database handle and runs no SQL of its own.
+
 ## Run
 
 ```bash
@@ -23,7 +29,8 @@ HC_SERVICE_KEY=<at least 32 random chars> pnpm --filter @mcpsuite/hosting-contro
 | `HC_SERVICE_KEY_SECONDARY` | — | Optional second key so rotation can overlap. |
 | `HC_HOST` | `127.0.0.1` | Bind address. Keep it on the private network. |
 | `HC_PORT` | `8787` | Listen port. |
-| `DB_PATH` | `./data/mcpsuite.db` | The shared CRM SQLite file (mise sets it). |
+| `DATABASE_URL` | — | `postgresql://…` selects the PostgreSQL adapter. It must carry hosting control's **own** `crm_operator` login — never the CRM's `crm_app`, never a superuser. Unset (or `file:`) selects SQLite. |
+| `DB_PATH` | `./data/mcpsuite.db` | SQLite only: the shared CRM SQLite file (mise sets it). |
 | `MCPSUITE_AUTH_DELIVERY_URL` | — | **Hosted mode** when set: one-time setup/reset codes are POSTed here as `{ email, code, purpose }` and never appear in any response, log, or stored row. Unset = **display mode** (self-host/dev): the response may carry the code exactly once. |
 | `MCPSUITE_AUTH_DELIVERY_KEY` | — | Optional bearer key sent as `Authorization: Bearer …` with each delivery POST. |
 
@@ -41,7 +48,7 @@ balancer can probe it; it returns no workspace, user, credential, or CRM data.
 | `PUT` | `/api/v1/workspaces/:id/access` | Set generic access state. Body: `{ accessMode: "active"\|"locked", accessExpiresAt?: ISO\|null, expectedVersion?, reason? }` (`state`/`expiresAt` accepted as aliases). Same-state repeat succeeds with no duplicate effect; `expectedVersion` mismatch is `version_conflict` with `currentVersion`. |
 | `PUT` | `/api/v1/workspaces/:id/owner` | Bounded hosting-superuser owner transfer. Body: exactly one of `targetUserId`/`targetEmail`, plus mandatory `reason` and optional `expectedVersion`. The target must be an existing **active** user of this workspace — pending, disabled, unknown, and other-workspace targets all answer the same `409 target_not_eligible` (never creates users, never moves them between workspaces). One transaction demotes the previous owner to `admin`, promotes the target, keeps exactly one owner, bumps the control-state `version`, and writes both audits. `200` with `{ workspaceId, ownerUserId, previousOwnerUserId, version }`; repeating a completed transfer to the same target succeeds as a no-op. |
 | `POST` | `/api/v1/workspaces/:id/owner/recovery` | Initiate credential recovery for the **current** owner (mandatory `reason`). Issues a one-time code — purpose `setup` while the owner is still pending, `reset` once active — and routes it through the delivery seam. `202` with `{ workspaceId, recovery: "initiated", purpose, delivery: "queued"\|"display", code? }`; `code` exists in display mode only, in the live response only. A disabled or absent owner is `409 owner_not_available` (recovery never picks a different person — that is what owner transfer is for). One idempotency key queues at most one recovery event. |
-| `DELETE` | `/api/v1/workspaces/:id` | Idempotent permanent delete. Removes every workspace-scoped row (tables discovered by their `workspace_id` column), users whose only membership was this workspace, their sessions, and the workspace's queued deliveries. Absent target still returns `204`. |
+| `DELETE` | `/api/v1/workspaces/:id` | Idempotent permanent delete. Removes every workspace-scoped row, users whose only membership was this workspace, their sessions, the access state and the workspace's queued deliveries; the service audit keeps only the one-way hash. SQLite deletes from an explicit table list (`WORKSPACE_SCOPED_TABLES`, checked against the schema by a test); PostgreSQL purges each member's issuer credentials, then deletes the workspace row and everything cascades from it. Absent target still returns `204`. |
 
 Common contract: mutations require an `Idempotency-Key` header. Same key +
 same canonical body replays the original response; same key + different
@@ -53,7 +60,7 @@ errors `{ error: { code, message, retryable }, requestId }`; the
 ### One-time codes and the delivery seam
 
 Setup/reset codes are issued through the CRM's single-use code store
-(`issueAuthCodeSync` from `@mcpsuite/db` — hash at rest, redeemable by the login
+(`identity.issueCode` on the adapter's identity store — hash at rest, redeemable by the login
 flow, superseding earlier codes of the same purpose; `reset` also ends the
 owner's sessions) inside the same transaction as the mutation, then routed
 through the product delivery seam (`deliverAuthCode`). The raw code never
@@ -72,16 +79,20 @@ enters storage or logs:
   `hc_auth_delivery_outbox` row (user reference + purpose — no email, no
   code) before the `201`/`202` returns; the immediate send is best-effort and
   a failure leaves the row pending. `listen()` sweeps pending rows on every
-  start (also exported as `retryPendingAuthDeliveries(db)`), issuing a FRESH
+  start (also exported as `retryPendingAuthDeliveries(store)`), issuing a FRESH
   superseding code at send time — which is why codes never need to be stored.
 - openauth's per-identity issue window (5 codes / 15 min) surfaces as
   `429 rate_limited` (retryable); the initiation rolls back and the
   idempotency key is released for a later retry.
 
-## Own tables (created by this package on open)
+## Own tables
 
-This package creates its own SQLite tables at startup — it never touches
-`packages/db/src/schema-sql.ts`:
+On SQLite the store creates these tables at startup (`hc_` prefix; never part
+of `packages/db/src/schema-sql.ts`). On PostgreSQL they are the `hosting`
+schema in `packages/db/src/pg/schema.sql` (`hosting.idempotency_receipts`,
+`hosting.workspace_access`, `hosting.service_audit`,
+`hosting.auth_delivery_outbox`), applied at deployment; hosting control only
+checks they exist.
 
 - `hc_idempotency_receipts` — one row per idempotency key: action, canonical
   request hash, state, safe stored response, timestamps. Mutations and their
@@ -100,22 +111,31 @@ This package creates its own SQLite tables at startup — it never touches
   email address and no code (the sweep re-resolves the user and issues a
   fresh code). Deleted with its workspace.
 
+## PostgreSQL roles
+
+Hosting control connects as `crm_operator` (no superuser, no `BYPASSRLS`).
+Each operation binds its target workspace as the transaction's row-level
+security context, so it reaches that workspace's CRM rows, access state and
+delivery outbox only — it cannot list workspaces. Receipts and the service
+audit are its own records, readable on every row by `crm_operator` alone. The
+boot sweep lists pending deliveries through one fixed function,
+`hosting.pending_auth_deliveries()` (outbox ids, workspace, user and purpose
+only). Access set, owner transfer, recovery and delete lock the workspace row
+first, so concurrent changes to one workspace run one at a time. It may
+call exactly six credential functions (subject → email, "has a password",
+code-issue rate record, code issue, end sessions, purge credentials) and never
+the generic issuer storage. `crm_app` has no access to the `hosting` schema.
+
 ## The read contract: how the CRM enforces access state
 
 Enforcement inside the CRM (web, operation API, MCP) is deliberately **not**
-implemented by this package. The contract is implemented as
-`resolveWorkspaceAccess(db, workspaceId, now?) → { mode, expiresAt }` — it
-lives in `@mcpsuite/db` (so CRM surfaces consult it through their existing
-dependency) and is re-exported here as part of the contract this package
-owns. The CRM consults it in the web server functions (`op`, `whoami`,
-`changePassword`), `POST /api/ops/:name`, `GET /api/me`, and per tool call /
-resource read on both MCP transports. The contract:
-
-```sql
-SELECT access_mode, access_expires_at
-FROM hc_workspace_access
-WHERE workspace_id = ?;
-```
+implemented by this package. The CRM reads the state through its identity
+store, `runtime.identity.workspaceAccess(workspaceId) → { mode, expiresAt }`:
+on SQLite from `hc_workspace_access`, on PostgreSQL through
+`crm.workspace_access_state(workspaceId)`, which answers only for the
+transaction's own workspace. The CRM consults it in the web server functions
+(`op`, `whoami`, `changePassword`), `POST /api/ops/:name`, `GET /api/me`, and
+per tool call / resource read on both MCP transports. The contract:
 
 - **No row → treat as `active`.** Self-hosted databases never get a row, so
   self-hosting is unaffected.
@@ -126,12 +146,11 @@ WHERE workspace_id = ?;
 - While locked: login, a locked notice, and `GET /api/me` stay available;
   CRM records, catalog operations, `/api/ops/*`, exports, and MCP must refuse.
 - The check belongs where the request context is resolved (session / MCP key
-  resolution), so every surface inherits it. If the schema later moves to
-  Postgres, this table's successor keeps the same three-column read shape.
+  resolution), so every surface inherits it.
 
 ## Deltas vs `docs/architecture/hosting-control-api.md`
 
-Implemented for the current single-node SQLite product; known deviations:
+Known deviations:
 
 - **Identity fields**: the doc provisions from a verified OpenAuth
   `authSubject` and transfers by `targetAuthSubject`. Until the OpenAuth
@@ -142,7 +161,7 @@ Implemented for the current single-node SQLite product; known deviations:
   doc's shape.
 - **Owner setup/recovery codes**: the doc has OpenAuth run its own recovery
   flow and hosted email deliver it. Here the redeemable code comes from the
-  CRM code store (`issueAuthCodeSync`) and travels through the
+  CRM code store (`identity.issueCode`) and travels through the
   `MCPSUITE_AUTH_DELIVERY_URL` seam; in display mode (self-host/dev, no URL) the
   live response may carry the one-time code — a documented convenience the
   doc does not have. Replays never repeat a code, and hosted responses never

@@ -23,24 +23,18 @@
  * Setup/reset codes are one-time material: they may appear in the LIVE
  * response only when no delivery URL is configured (display mode), are
  * stripped from the stored receipt, and are never logged; only their
- * redemption hash rests in the CRM code store (issueAuthCodeSync).
+ * redemption hash rests in the CRM code store.
+ *
+ * All data access goes through a HostingStore (@mcpsuite/db), so the service
+ * runs on SQLite or PostgreSQL; on PostgreSQL it connects as crm_operator.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { newId, nowIso } from "@mcpsuite/core";
-import { deliverAuthCode, sha256Hex, type Db } from "@mcpsuite/db";
+import { createSqliteHostingStore, deliverAuthCode, sha256Hex, type Db, type HostingStore, type Receipt } from "@mcpsuite/db";
 import { HcError } from "./errors.ts";
 import { errorNote, retryPendingAuthDeliveries } from "./auth-delivery.ts";
-import {
-  abandonReceipt,
-  beginReceipt,
-  completeReceipt,
-  ensureHcTables,
-  markOutbox,
-  writeAudit,
-  type Receipt,
-} from "./hc-store.ts";
 import {
   deleteWorkspacePermanently,
   getWorkspaceControlState,
@@ -58,7 +52,16 @@ const MIN_KEY_LENGTH = 32; // the doc requires at least 32 random bytes
 const MAX_BODY_BYTES = 1_000_000;
 
 export interface HostingControlOptions {
-  db: Db;
+  /** The adapter's store (PostgreSQL, or SQLite). */
+  store?: HostingStore;
+  /** Convenience for SQLite: the CRM database file's handle. Used when `store` is absent. */
+  db?: Db;
+  /**
+   * Test-only fault seams inside a mutation's transaction: after the
+   * lifecycle change, after the receipt completes, after the service audit is
+   * written. Throwing from one proves the whole request rolls back.
+   */
+  faults?: { afterChange?(): void | Promise<void>; afterReceipt?(): void | Promise<void>; afterAudit?(): void | Promise<void> };
   /** One or more raw service keys (>= 32 chars each) so rotation can overlap. */
   serviceKeys: string[];
   /** Default 127.0.0.1 — the service must stay off the public interface. */
@@ -107,7 +110,9 @@ interface MutationOutcome {
 }
 
 export function createHostingControlServer(opts: HostingControlOptions): HostingControlServer {
-  const db = opts.db;
+  if (!opts.store && !opts.db) throw new Error("hosting-control needs a store (or a SQLite db handle)");
+  const store: HostingStore = opts.store ?? createSqliteHostingStore(opts.db!);
+  const faults = opts.faults ?? {};
   const host = opts.host ?? "127.0.0.1";
   const port = opts.port ?? Number(process.env.HC_PORT ?? 8787);
   if (opts.serviceKeys.length === 0) throw new Error("hosting-control requires at least one service key");
@@ -119,7 +124,8 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
   const keyDigests = opts.serviceKeys.map((k) => createHash("sha256").update(k).digest());
   const baseIdentity = opts.serviceIdentity ?? "hosting-control";
 
-  ensureHcTables(db);
+  // Requests wait for the adapter's own tables to exist (SQLite creates them).
+  const ready = store.ensureSchema();
   const productVersion = readProductVersion();
 
   // --- helpers --------------------------------------------------------------
@@ -139,16 +145,16 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
     return { ok: true, identity: `${baseIdentity}#key${matched}` };
   }
 
-  function schemaVersion(): number {
+  async function schemaVersion(): Promise<number> {
     try {
-      return Number(db.$client.pragma("user_version", { simple: true })) || 0;
+      return await store.schemaVersion();
     } catch {
       return 0;
     }
   }
 
-  function writeAuditRow(rc: RequestState, resultCode: string, httpStatus: number, retryable: boolean): void {
-    writeAudit(db, {
+  async function writeAuditRow(rc: RequestState, resultCode: string, httpStatus: number, retryable: boolean): Promise<void> {
+    await store.writeAudit({
       id: newId(),
       requestId: rc.requestId,
       idempotencyKey: rc.idempotencyKey,
@@ -168,11 +174,11 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
     });
   }
 
-  function finishAudit(rc: RequestState, resultCode: string, httpStatus: number, retryable: boolean): void {
+  async function finishAudit(rc: RequestState, resultCode: string, httpStatus: number, retryable: boolean): Promise<void> {
     if (rc.audited) return;
     rc.audited = true;
     try {
-      writeAuditRow(rc, resultCode, httpStatus, retryable);
+      await writeAuditRow(rc, resultCode, httpStatus, retryable);
     } catch (err) {
       console.error("[hosting-control] failed to write service audit row:", err);
     }
@@ -207,7 +213,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
     res: ServerResponse,
     rc: RequestState,
     action: string,
-    build: (body: Record<string, unknown>) => MutationOutcome,
+    build: (body: Record<string, unknown>) => Promise<MutationOutcome>,
   ): Promise<void> {
     rc.action = action;
     const idemKey = headerValue(req, "idempotency-key");
@@ -218,7 +224,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
     const body = await readJsonObject(req);
     const requestHash = sha256Hex(`${action}\n${rc.path}\n${canonicalJson(body)}`);
 
-    const begin = beginReceipt(db, idemKey, action, requestHash, rc.requestId);
+    const begin = await store.beginReceipt(idemKey, action, requestHash, rc.requestId);
     if (!begin.started) {
       const receipt = begin.receipt;
       if (receipt.action !== action || receipt.requestHash !== requestHash) {
@@ -228,14 +234,17 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
         throw new HcError(409, "request_in_progress", "A request with this idempotency key is in progress", undefined, true);
       }
       rc.targetHash = receipt.targetHash;
-      finishAudit(rc, "replayed", receipt.httpStatus ?? 200, false);
+      await finishAudit(rc, "replayed", receipt.httpStatus ?? 200, false);
       sendStored(res, receipt);
       return;
     }
 
     try {
-      const execute = db.$client.transaction(() => {
-        const out = build(body);
+      // One transaction: the lifecycle change, the receipt completion and the
+      // service audit commit together or not at all.
+      const { status, responseBody, afterCommit } = await store.withTransaction(async () => {
+        const out = await build(body);
+        await faults.afterChange?.();
         const responseBody = out.status === 204 ? null : JSON.stringify({ data: out.data, requestId: rc.requestId });
         // One-time material may leave through the live response exactly once;
         // the stored receipt (replayed verbatim later) never contains it.
@@ -254,12 +263,13 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
         rc.workspaceId = out.workspaceId ?? null;
         rc.targetHash = out.targetHash ?? null;
         rc.reason = out.reason ?? null;
-        completeReceipt(db, idemKey, { targetHash: out.targetHash ?? null, httpStatus: out.status, responseBody: storedBody });
+        await store.completeReceipt(idemKey, { targetHash: out.targetHash ?? null, httpStatus: out.status, responseBody: storedBody });
+        await faults.afterReceipt?.();
         // The audit row commits atomically with the mutation and the receipt.
-        writeAuditRow(rc, out.resultCode ?? "ok", out.status, false);
+        await writeAuditRow(rc, out.resultCode ?? "ok", out.status, false);
+        await faults.afterAudit?.();
         return { status: out.status, responseBody, afterCommit: out.afterCommit };
       });
-      const { status, responseBody, afterCommit } = execute();
       rc.audited = true;
       // Post-commit work (auth-code delivery). The durable state is already
       // committed; a failure here defers to the outbox, never to the caller.
@@ -273,7 +283,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
       }
     } catch (err) {
       try {
-        abandonReceipt(db, idemKey); // release the key so the caller may retry
+        await store.abandonReceipt(idemKey); // release the key so the caller may retry
       } catch {
         /* keep the original error */
       }
@@ -287,16 +297,16 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
    * best-effort acceleration. Failure marks the row for the boot-time sweep
    * and NEVER surfaces to the caller (and never logs the code).
    */
-  function attemptDelivery(setup: SetupInitiation): (() => Promise<void>) | undefined {
+  function attemptDelivery(workspaceId: string, setup: SetupInitiation): (() => Promise<void>) | undefined {
     if (setup.delivery !== "queued" || !setup.outboxId) return undefined;
     const { email, code, purpose, outboxId } = setup;
     return async () => {
       try {
         await deliverAuthCode({ email, code, purpose });
-        markOutbox(db, outboxId, "sent");
+        await store.markOutbox(workspaceId, outboxId, "sent");
       } catch (err) {
         try {
-          markOutbox(db, outboxId, "pending", errorNote(err));
+          await store.markOutbox(workspaceId, outboxId, "pending", errorNote(err));
         } catch {
           /* the pending row already carries the retry */
         }
@@ -317,8 +327,15 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
 
     // Health carries no workspace, user, credential, or CRM data and may be
     // probed by the load balancer without the service key.
+    try {
+      await ready;
+    } catch (err) {
+      console.error("[hosting-control] storage is not ready:", err);
+      sendError(res, requestId, new HcError(503, "unavailable", "Hosting control storage is not ready", undefined, true));
+      return;
+    }
     if (method === "GET" && (path === "/healthz" || path === "/api/v1/health")) {
-      sendJson(res, 200, { data: { status: "ok", productVersion, schemaVersion: schemaVersion() }, requestId });
+      sendJson(res, 200, { data: { status: "ok", productVersion, schemaVersion: await schemaVersion() }, requestId });
       return;
     }
 
@@ -340,7 +357,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
     rc.identity = auth.identity;
     if (!auth.ok) {
       rc.action = "auth.rejected";
-      finishAudit(rc, "unauthorized", 401, false);
+      await finishAudit(rc, "unauthorized", 401, false);
       sendError(res, requestId, new HcError(401, "unauthorized", "Missing or invalid hosting-control service key"));
       return;
     }
@@ -352,9 +369,9 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
       const recoveryMatch = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/owner\/recovery$/);
 
       if (method === "POST" && path === "/api/v1/workspaces") {
-        await runMutation(req, res, rc, "workspace.provision", (body) => {
+        await runMutation(req, res, rc, "workspace.provision", async (body) => {
           const input = parseProvisionBody(body);
-          const result = provisionWorkspace(db, input);
+          const result = await provisionWorkspace(store, input);
           return {
             status: 201,
             data: {
@@ -374,16 +391,16 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
             targetHash: sha256Hex(result.workspaceId),
             resultCode: "created",
             oneTimeFields: ["setupCode"],
-            afterCommit: result.setup ? attemptDelivery(result.setup) : undefined,
+            afterCommit: result.setup ? attemptDelivery(result.workspaceId, result.setup) : undefined,
           };
         });
       } else if (method === "PUT" && ownerMatch) {
         const workspaceId = decodeURIComponent(ownerMatch[1]!);
         rc.workspaceId = workspaceId;
         rc.targetHash = sha256Hex(workspaceId);
-        await runMutation(req, res, rc, "workspace.owner.transfer", (body) => {
+        await runMutation(req, res, rc, "workspace.owner.transfer", async (body) => {
           const input = parseTransferBody(body);
-          const result = transferWorkspaceOwner(db, workspaceId, input);
+          const result = await transferWorkspaceOwner(store, workspaceId, input);
           return {
             status: 200,
             data: {
@@ -402,9 +419,9 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
         const workspaceId = decodeURIComponent(recoveryMatch[1]!);
         rc.workspaceId = workspaceId;
         rc.targetHash = sha256Hex(workspaceId);
-        await runMutation(req, res, rc, "workspace.owner.recovery", (body) => {
+        await runMutation(req, res, rc, "workspace.owner.recovery", async (body) => {
           const reason = requiredReason(body);
-          const result = initiateOwnerRecovery(db, workspaceId, reason);
+          const result = await initiateOwnerRecovery(store, workspaceId, reason);
           return {
             // 202: the recovery event is durably queued once the transaction
             // (outbox row + receipt + audits) commits.
@@ -421,16 +438,16 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
             reason,
             resultCode: "initiated",
             oneTimeFields: ["code"],
-            afterCommit: attemptDelivery(result.setup),
+            afterCommit: attemptDelivery(workspaceId, result.setup),
           };
         });
       } else if (method === "PUT" && accessMatch) {
         const workspaceId = decodeURIComponent(accessMatch[1]!);
         rc.workspaceId = workspaceId;
         rc.targetHash = sha256Hex(workspaceId);
-        await runMutation(req, res, rc, "workspace.access.set", (body) => {
+        await runMutation(req, res, rc, "workspace.access.set", async (body) => {
           const input = parseAccessBody(body);
-          const state = setWorkspaceAccess(db, workspaceId, input);
+          const state = await setWorkspaceAccess(store, workspaceId, input);
           return {
             status: 200,
             data: {
@@ -447,9 +464,9 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
       } else if (method === "DELETE" && workspaceMatch) {
         const workspaceId = decodeURIComponent(workspaceMatch[1]!);
         rc.targetHash = sha256Hex(workspaceId);
-        await runMutation(req, res, rc, "workspace.delete", (body) => {
+        await runMutation(req, res, rc, "workspace.delete", async (body) => {
           const reason = optionalString(body, "reason", 500);
-          const { existed } = deleteWorkspacePermanently(db, workspaceId);
+          const { existed } = await deleteWorkspacePermanently(store, workspaceId);
           return {
             // After deletion only the one-way hash may remain in the receipt.
             status: 204,
@@ -462,12 +479,12 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
       } else if (method === "GET" && workspaceMatch) {
         rc.action = "workspace.read";
         const workspaceId = decodeURIComponent(workspaceMatch[1]!);
-        const state = getWorkspaceControlState(db, workspaceId);
+        const state = await getWorkspaceControlState(store, workspaceId);
         // Deleted and never-existed answer identically.
         if (!state) throw new HcError(404, "not_found", "Unknown workspace");
         rc.workspaceId = workspaceId;
         rc.targetHash = sha256Hex(workspaceId);
-        finishAudit(rc, "ok", 200, false);
+        await finishAudit(rc, "ok", 200, false);
         sendJson(res, 200, { data: state, requestId });
       } else {
         throw new HcError(404, "not_found", "Unknown route");
@@ -481,7 +498,7 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
         console.error("[hosting-control] unexpected failure:", err);
         e = new HcError(500, "internal_error", "Unexpected internal failure", undefined, true);
       }
-      finishAudit(rc, e.code, e.status, e.retryable);
+      await finishAudit(rc, e.code, e.status, e.retryable);
       sendError(res, requestId, e);
     }
   }
@@ -500,7 +517,8 @@ export function createHostingControlServer(opts: HostingControlOptions): Hosting
           const actualPort = addr && typeof addr === "object" ? addr.port : port;
           // Deliver auth codes whose 202/201 was acknowledged before a crash
           // (committed outbox rows). Never throws; sweeps before serving.
-          void retryPendingAuthDeliveries(db)
+          void ready
+            .then(() => retryPendingAuthDeliveries(store))
             .catch((err) => console.error("[hosting-control] outbox sweep failed:", err))
             .finally(() => resolveListen({ host, port: actualPort }));
         });

@@ -16,10 +16,9 @@
  * string comparison. The CRM knows nothing beyond this generic state — no
  * plans, trials, or billing concepts.
  *
- * @mcpsuite/hosting-control re-exports `resolveWorkspaceAccess`; the
- * implementation lives here so every CRM surface (web server functions,
- * /api routes, MCP transports) can consult it through their existing
- * @mcpsuite/db dependency.
+ * CRM surfaces reach it through the identity interface
+ * (`runtime.identity.workspaceAccess`, ./sqlite-identity.ts); the PostgreSQL
+ * adapter implements the same contract in ./pg/identity.ts.
  */
 import { nowIso, type OpResult } from "@mcpsuite/core";
 import type { Db } from "./connection.ts";

@@ -198,16 +198,16 @@ async function createHostedRuntime(databaseUrl: string, pingTimeoutMs: number): 
   };
 }
 
-function isPostgresUrl(url: string): boolean {
+export function isPostgresUrl(url: string): boolean {
   const lower = url.toLowerCase();
   return lower.startsWith("postgresql://") || lower.startsWith("postgres://");
 }
 
-function isSqliteFileUrl(url: string): boolean {
+export function isSqliteFileUrl(url: string): boolean {
   return url.toLowerCase().startsWith("file:");
 }
 
-function unsupportedDatabaseUrl(url: string): Error {
+export function unsupportedDatabaseUrl(url: string): Error {
   return new Error(
     `Unsupported DATABASE_URL "${redactDatabaseUrl(url)}": expected postgresql:// (or postgres://) for the ` +
       "PostgreSQL adapter, file:<path> for SQLite, or unset for the default SQLite database.",
@@ -215,7 +215,7 @@ function unsupportedDatabaseUrl(url: string): Error {
 }
 
 /** Mask the password portion of a connection URL for error messages. */
-function redactDatabaseUrl(url: string): string {
+export function redactDatabaseUrl(url: string): string {
   return url.replace(/:\/\/([^/@:]+):[^@/]*@/, "://$1:***@");
 }
 
