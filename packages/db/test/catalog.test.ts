@@ -419,6 +419,25 @@ describe("contact lists", () => {
     expect(mixed.entityType).toBe("person");
   });
 
+  it("hard-deleting a listed company or person clears list membership counts", async () => {
+    const list = await ok(run(owner, "list.create", { name: "Delete contacts" }));
+    const company = await ok(run(owner, "company.create", { name: "Temporary company" }));
+    const person = await ok(run(owner, "person.create", { name: "Temporary person" }));
+    await ok(run(owner, "list.addMembers", { listId: list.id, entityType: "company", entityIds: [company.id] }));
+    await ok(run(owner, "list.addMembers", { listId: list.id, entityType: "person", entityIds: [person.id] }));
+
+    const before = (await ok(run(owner, "list.list", {}))).find((entry: any) => entry.id === list.id);
+    expect(before.companies).toBe(1);
+    expect(before.people).toBe(1);
+
+    await ok(run(owner, "company.delete", { id: company.id }));
+    await ok(run(owner, "person.delete", { id: person.id }));
+
+    const after = (await ok(run(owner, "list.list", {}))).find((entry: any) => entry.id === list.id);
+    expect(after.companies).toBe(0);
+    expect(after.people).toBe(0);
+  });
+
   it("hard-deleting a listed lead clears list membership counts", async () => {
     const list = await ok(run(owner, "list.create", { name: "Delete cleanup", entityType: "engagement" }));
     const lead = await ok(run(owner, "engagement.create", { title: "Gone" }));
