@@ -684,6 +684,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
     },
     async hardDelete(id) {
       db.delete(t.companyPeople).where(and(eq(t.companyPeople.workspaceId, ws), eq(t.companyPeople.companyId, id))).run();
+      db.delete(t.listMembers).where(and(eq(t.listMembers.workspaceId, ws), eq(t.listMembers.entityType, "company"), eq(t.listMembers.entityId, id))).run();
       db.delete(t.taggings).where(and(eq(t.taggings.workspaceId, ws), eq(t.taggings.entityType, "company"), eq(t.taggings.entityId, id))).run();
       db.delete(t.customFieldValues)
         .where(and(eq(t.customFieldValues.workspaceId, ws), eq(t.customFieldValues.entityType, "company"), eq(t.customFieldValues.entityId, id)))
@@ -832,6 +833,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
     },
     async hardDelete(id) {
       db.delete(t.companyPeople).where(and(eq(t.companyPeople.workspaceId, ws), eq(t.companyPeople.personId, id))).run();
+      db.delete(t.listMembers).where(and(eq(t.listMembers.workspaceId, ws), eq(t.listMembers.entityType, "person"), eq(t.listMembers.entityId, id))).run();
       db.delete(t.taggings).where(and(eq(t.taggings.workspaceId, ws), eq(t.taggings.entityType, "person"), eq(t.taggings.entityId, id))).run();
       db.delete(t.customFieldValues)
         .where(and(eq(t.customFieldValues.workspaceId, ws), eq(t.customFieldValues.entityType, "person"), eq(t.customFieldValues.entityId, id)))
