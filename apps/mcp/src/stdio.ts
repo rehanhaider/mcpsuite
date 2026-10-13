@@ -5,6 +5,10 @@
  * exactly like the HTTP transport. Scopes + trust profile come from the client
  * record.
  *
+ * The process outlives any one request, so the key is resolved again before
+ * every tool call and resource read: revoking the key, or disabling, removing
+ * or demoting its creator, takes effect on the next call without a restart.
+ *
  * NOTE: stdout is the protocol channel; log only to stderr.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -17,6 +21,8 @@ import { createMcpServer } from "./server.ts";
 const runtime = await getRuntimeAsync();
 
 const apiKey = process.env.MCPSUITE_API_KEY?.trim();
+// Resolved once here only to refuse a bad key at startup; createMcpServer
+// resolves it again per call.
 const client = apiKey ? await runtime.identity.resolveMcpToken(apiKey) : null;
 if (!client) {
   console.error(
@@ -28,7 +34,10 @@ if (!client) {
 }
 
 const ctx = mcpContext(client, "mcp_stdio");
-const server = createMcpServer(runtime, ctx);
+const server = createMcpServer(runtime, async () => {
+  const current = await runtime.identity.resolveMcpToken(apiKey);
+  return current ? mcpContext(current, "mcp_stdio") : null;
+});
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

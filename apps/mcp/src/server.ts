@@ -2,8 +2,10 @@
  * Transport-agnostic MCP server: every catalog operation with `mcpExpose`
  * becomes a tool (dots → underscores). Results come back as JSON text.
  *
- * The RequestContext is resolved by the transport (stdio = local owner-agent,
- * HTTP = Bearer API key) and injected per server instance.
+ * The transport supplies the caller: HTTP resolves the Bearer API key per
+ * request and passes a fixed RequestContext; stdio is long-lived and passes a
+ * resolver that re-checks its API key before every tool call and resource
+ * read.
  */
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
@@ -13,6 +15,24 @@ import type { OperationDef, OpResult, RequestContext } from "@mcpsuite/core";
 import { WORKSPACE_LOCKED_MESSAGE, workspaceLockedResult, type AnyRuntime } from "@mcpsuite/db";
 
 export const SERVER_INFO = { name: "mcpsuite-crm", version: "0.1.0" } as const;
+
+/**
+ * Who the server acts as. A function is called before every tool call and
+ * resource read; null means the API key no longer authenticates (revoked, or
+ * its creator was disabled or removed).
+ */
+export type ContextSource = RequestContext | (() => Promise<RequestContext | null>);
+
+/** JSON-RPC error code for an API key that no longer authenticates. */
+export const UNAUTHORIZED_RPC_CODE = -32002;
+
+const UNAUTHORIZED_MESSAGE =
+  "This API key is no longer valid: it was revoked, or its creator was disabled or removed. " +
+  "Create a new key in the web UI under Admin → Agents.";
+
+function unauthorizedResult(): OpResult {
+  return { status: "error", error: { code: "unauthorized", message: UNAUTHORIZED_MESSAGE } };
+}
 
 // ---------------------------------------------------------------------------
 // Hosted access gate (packages/hosting-control/README.md read contract).
@@ -112,9 +132,10 @@ export function toolName(operationName: string): string {
 
 export function createMcpServer(
   runtime: AnyRuntime,
-  ctx: RequestContext,
+  source: ContextSource,
   onPendingApproval?: (requestId: string | number, result: Extract<OpResult, { status: "pending_approval" }>) => void,
 ): McpServer {
+  const resolveContext = typeof source === "function" ? source : async () => source;
   const server = new McpServer(SERVER_INFO, {
     ...(onPendingApproval ? { capabilities: { extensions: { "io.modelcontextprotocol/tasks": {} } } } : {}),
     instructions:
@@ -127,9 +148,9 @@ export function createMcpServer(
 
   for (const op of runtime.catalog.values()) {
     if (!op.mcpExpose) continue;
-    registerTool(server, runtime, ctx, op, onPendingApproval);
+    registerTool(server, runtime, resolveContext, op, onPendingApproval);
   }
-  registerResources(server, runtime, ctx);
+  registerResources(server, runtime, resolveContext);
   return server;
 }
 
@@ -138,12 +159,26 @@ export function createMcpServer(
  * pipeline/stage config, saved views, pending approvals, and per-record
  * context bundles. Reads go through the catalog so scopes still apply.
  */
-function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestContext): void {
+function registerResources(
+  server: McpServer,
+  runtime: AnyRuntime,
+  resolveContext: () => Promise<RequestContext | null>,
+): void {
   const json = (uri: string, data: unknown) => ({
     contents: [{ uri, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
   });
-  const runOrThrow = async (name: string, input: Record<string, unknown> = {}): Promise<unknown> => {
+  /** The caller for this read, or a JSON-RPC error when it may not read. */
+  const readContext = async (): Promise<RequestContext> => {
+    const ctx = await resolveContext();
+    if (!ctx) throw new McpError(UNAUTHORIZED_RPC_CODE, `unauthorized: ${UNAUTHORIZED_MESSAGE}`);
     if (await workspaceLocked(runtime, ctx)) throw lockedMcpError();
+    return ctx;
+  };
+  const runOrThrow = async (
+    ctx: RequestContext,
+    name: string,
+    input: Record<string, unknown> = {},
+  ): Promise<unknown> => {
     const result = await runtime.run(ctx, name, input);
     if (result.status !== "ok") {
       throw new Error(result.status === "error" ? `${result.error.code}: ${result.error.message}` : result.message);
@@ -160,7 +195,7 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
       mimeType: "application/json",
     },
     async (uri) => {
-      if (await workspaceLocked(runtime, ctx)) throw lockedMcpError();
+      await readContext();
       return json(
         uri.href,
         [...runtime.catalog.values()].map((op) => ({
@@ -185,7 +220,7 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
       description: "Engagement + deal pipelines with their ordered stages (ids needed for stage updates).",
       mimeType: "application/json",
     },
-    async (uri) => json(uri.href, await runOrThrow("pipeline.list", {})),
+    async (uri) => json(uri.href, await runOrThrow(await readContext(), "pipeline.list", {})),
   );
 
   server.registerResource(
@@ -196,7 +231,7 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
       description: "Saved filters; run one with saved_view_run.",
       mimeType: "application/json",
     },
-    async (uri) => json(uri.href, await runOrThrow("savedView.list", {})),
+    async (uri) => json(uri.href, await runOrThrow(await readContext(), "savedView.list", {})),
   );
 
   server.registerResource(
@@ -207,7 +242,7 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
       description: "Actions waiting for human review.",
       mimeType: "application/json",
     },
-    async (uri) => json(uri.href, await runOrThrow("pendingAction.list", { status: "pending" })),
+    async (uri) => json(uri.href, await runOrThrow(await readContext(), "pendingAction.list", { status: "pending" })),
   );
 
   const CONTEXT_OPS: Record<string, string> = {
@@ -225,11 +260,11 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
       mimeType: "application/json",
     },
     async (uri, variables) => {
-      if (await workspaceLocked(runtime, ctx)) throw lockedMcpError();
+      const ctx = await readContext();
       const type = String(variables.type ?? "");
       const opName = CONTEXT_OPS[type];
       if (!opName) throw new Error(`Unknown context type "${type}" (use company|person|engagement|deal)`);
-      return json(uri.href, await runOrThrow(opName, { id: String(variables.id ?? "") }));
+      return json(uri.href, await runOrThrow(ctx, opName, { id: String(variables.id ?? "") }));
     },
   );
 }
@@ -237,7 +272,7 @@ function registerResources(server: McpServer, runtime: AnyRuntime, ctx: RequestC
 function registerTool(
   server: McpServer,
   runtime: AnyRuntime,
-  ctx: RequestContext,
+  resolveContext: () => Promise<RequestContext | null>,
   op: OperationDef,
   onPendingApproval?: (requestId: string | number, result: Extract<OpResult, { status: "pending_approval" }>) => void,
 ): void {
@@ -251,6 +286,8 @@ function registerTool(
       inputSchema: shape,
     },
     async (args: Record<string, unknown>, extra) => {
+      const ctx = await resolveContext();
+      if (!ctx) return toText(unauthorizedResult());
       // Locked workspaces answer with the same catalog error envelope agents
       // already understand; the operation is never executed.
       if (await workspaceLocked(runtime, ctx)) return toText(workspaceLockedResult());
