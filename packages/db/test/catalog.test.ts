@@ -838,6 +838,18 @@ describe("agent authority mirrors the owning user", () => {
     expect(selfApprove.status).toBe("error");
     expect((selfApprove as any).error.code).toBe("forbidden");
 
+    // The refusal is a security event: recorded against the action, as the agent (issue #32).
+    const events = await ok(run(owner, "audit.list", { entityType: "pending_action", entityId: paId }));
+    const refused = events.items.filter((e: any) => e.operation === "pendingAction.approve");
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({
+      actorType: "agent",
+      actorClientId: "client-self",
+      summary: "Refused an agent's approval of its own company.delete",
+      meta: { refused: "self_approval", requestedBy: "client-self" },
+    });
+    expect((await ports.pendingActions.get(paId))!.status).toBe("pending");
+
     expect((await run(owner, "pendingAction.approve", { id: paId })).status).toBe("ok");
   });
 });

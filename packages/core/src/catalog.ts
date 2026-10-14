@@ -9,7 +9,7 @@ import { z } from "zod";
 import { OpError, toErrorPayload } from "./errors.ts";
 import { nowIso } from "./ids.ts";
 import { actorStamp, type RequestContext } from "./context.ts";
-import type { Ports } from "./ports.ts";
+import type { AuditInput, Ports } from "./ports.ts";
 import { roleAtLeast, trustAllows } from "./policy.ts";
 import { defineOperation, type OpCtx, type OperationDef, type OpResult } from "./operations/define.ts";
 import { companyOps } from "./operations/company-ops.ts";
@@ -35,6 +35,20 @@ export interface CatalogDeps {
 export type Catalog = Map<string, OperationDef>;
 
 const PENDING_ACTION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/**
+ * A refusal that is itself a security event. The operation's transaction
+ * rolls back when it throws, so runOperation records `event` afterwards in a
+ * transaction of its own.
+ */
+class AuditedRefusal extends OpError {
+  constructor(
+    message: string,
+    readonly event: AuditInput,
+  ) {
+    super("forbidden", message);
+  }
+}
 
 export function buildCatalog(deps: CatalogDeps): Catalog {
   const ops: OperationDef[] = [
@@ -74,7 +88,13 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
       const pa = found(await op.ports.pendingActions.get(id), "pending action", id);
       if (pa.status !== "pending") throw OpError.validation(`Action is already ${pa.status}`);
       if (op.ctx.actorType === "agent" && pa.requestedByClientId && pa.requestedByClientId === op.ctx.clientId) {
-        throw OpError.forbidden("An agent cannot approve its own pending actions");
+        throw new AuditedRefusal("An agent cannot approve its own pending actions", {
+          operation: "pendingAction.approve",
+          entityType: "pending_action",
+          entityId: id,
+          summary: `Refused an agent's approval of its own ${pa.operation}`,
+          meta: { refused: "self_approval", requestedBy: pa.requestedByClientId },
+        });
       }
       if (pa.expiresAt < nowIso()) {
         await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewNote: "expired" });
@@ -234,6 +254,13 @@ export async function runOperation(
     const data = await ports.tx(() => op.handler(opCtx, input));
     return { status: "ok", data };
   } catch (e) {
+    if (e instanceof AuditedRefusal) {
+      try {
+        await ports.tx(() => ports.audit.record(e.event, actorStamp(ctx)));
+      } catch (auditError) {
+        return { status: "error", error: toErrorPayload(auditError) };
+      }
+    }
     return { status: "error", error: toErrorPayload(e) };
   }
 }
