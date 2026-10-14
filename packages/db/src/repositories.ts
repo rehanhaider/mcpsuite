@@ -7,7 +7,7 @@
  * helper at the bottom of this file relies on every port call completing its
  * database work synchronously.
  */
-import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -36,6 +36,7 @@ import {
   type Engagement,
   type EngagementFilter,
   type EngagementListItem,
+  type ExactFields,
   type ListableType,
   type McpClient,
   type McpScope,
@@ -297,6 +298,22 @@ const mapUser = (r: Row<typeof t.users>, role: Role): User => ({
   disabledAt: r.disabledAt,
   createdAt: r.createdAt,
 });
+
+/**
+ * WHERE terms for an exact-data import lookup (core `ExactFields`, issue #23):
+ * each present field equals the stored value after trimming, blank (null or
+ * empty) equals blank, and emails compare case-insensitively.
+ */
+function exactTerms<K extends string>(columns: { [P in K]: SQLWrapper }, fields: ExactFields<K>): SQL[] {
+  const terms: SQL[] = [];
+  for (const [field, value] of Object.entries(fields) as Array<[K, string | null | undefined]>) {
+    if (value === undefined) continue;
+    const stored = sql`trim(coalesce(${columns[field]}, ''))`;
+    const wanted = (value ?? "").trim();
+    terms.push(field === "email" ? sql`lower(${stored}) = ${wanted.toLowerCase()}` : sql`${stored} = ${wanted}`);
+  }
+  return terms;
+}
 
 // ---------------------------------------------------------------------------
 
@@ -635,11 +652,12 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapCompany(row) : null;
     },
-    async getByName(name) {
+    async findExact(fields) {
       const row = db
         .select()
         .from(t.companies)
-        .where(and(eq(t.companies.workspaceId, ws), sql`lower(${t.companies.name}) = ${name.trim().toLowerCase()}`))
+        .where(and(eq(t.companies.workspaceId, ws), ...exactTerms(t.companies, fields)))
+        .orderBy(asc(t.companies.createdAt), asc(t.companies.id))
         .get();
       return row ? mapCompany(row) : null;
     },
@@ -787,11 +805,22 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapPerson(row) : null;
     },
-    async getByEmail(email) {
+    async findExact(fields, companyId) {
+      const links = sql`SELECT 1 FROM ${t.companyPeople} WHERE ${t.companyPeople.personId} = ${t.people.id}`;
       const row = db
         .select()
         .from(t.people)
-        .where(and(eq(t.people.workspaceId, ws), sql`lower(${t.people.email}) = ${email.trim().toLowerCase()}`))
+        .where(
+          and(
+            eq(t.people.workspaceId, ws),
+            ...exactTerms(t.people, fields),
+            companyId === undefined
+              ? undefined
+              : companyId === null
+                ? sql`NOT EXISTS (${links})`
+                : sql`EXISTS (${links} AND ${t.companyPeople.companyId} = ${companyId})`,
+          ),
+        )
         .orderBy(asc(t.people.createdAt), asc(t.people.id))
         .get();
       return row ? mapPerson(row) : null;
@@ -1147,7 +1176,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .get();
       return row ? mapEngagement(row) : null;
     },
-    async findTagged({ tagId, companyId, personId }) {
+    async findExact({ companyId, personId, fields }) {
       const row = db
         .select()
         .from(t.engagements)
@@ -1156,7 +1185,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
             eq(t.engagements.workspaceId, ws),
             companyId ? eq(t.engagements.companyId, companyId) : isNull(t.engagements.companyId),
             personId ? eq(t.engagements.personId, personId) : isNull(t.engagements.personId),
-            tagCondition("engagement", sql`${t.engagements.id}`, [tagId]),
+            ...exactTerms(t.engagements, fields),
           ),
         )
         .orderBy(asc(t.engagements.createdAt), asc(t.engagements.id))

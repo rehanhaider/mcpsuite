@@ -60,6 +60,15 @@ export interface AuditInput {
   meta?: Record<string, unknown> | null;
 }
 
+/**
+ * Exact-data lookup used by CSV import (issue #23). Only the fields present
+ * are compared; each must equal the stored value after trimming, with blank
+ * (null or empty) equal to blank. Emails compare case-insensitively; every
+ * other field is case-sensitive. Archived records are included, and the
+ * oldest record wins when several match.
+ */
+export type ExactFields<K extends string> = Partial<Record<K, string | null>>;
+
 export interface ActorStamp {
   actorType: ActorType;
   actorUserId: string | null;
@@ -105,7 +114,8 @@ export interface UserPort {
 export interface CompanyPort {
   list(filter: CompanyFilter): Promise<Page<CompanyListItem>>;
   get(id: string): Promise<Company | null>;
-  getByName(name: string): Promise<Company | null>;
+  /** See {@link ExactFields}. */
+  findExact(fields: ExactFields<"name" | "industry" | "hq" | "country" | "website" | "linkedin">): Promise<Company | null>;
   create(input: Partial<Company> & { name: string }): Promise<Company>;
   update(id: string, patch: Partial<Company>): Promise<Company>;
   setArchived(id: string, archived: boolean): Promise<Company>;
@@ -116,8 +126,12 @@ export interface CompanyPort {
 export interface PersonPort {
   list(filter: PersonFilter): Promise<Page<PersonListItem>>;
   get(id: string): Promise<Person | null>;
-  /** Case-insensitive email match, archived included; the oldest person when several share it. */
-  getByEmail(email: string): Promise<Person | null>;
+  /**
+   * See {@link ExactFields}. `companyId` compares the person's company links:
+   * omitted ignores them, null requires a person with no company, and an id
+   * requires a person linked to that company.
+   */
+  findExact(fields: ExactFields<"name" | "title" | "email" | "linkedin">, companyId?: string | null): Promise<Person | null>;
   create(input: Partial<Person> & { name: string }): Promise<Person>;
   update(id: string, patch: Partial<Person>): Promise<Person>;
   setArchived(id: string, archived: boolean): Promise<Person>;
@@ -164,11 +178,12 @@ export interface PipelinePort {
 export interface EngagementPort {
   list(filter: EngagementFilter): Promise<Page<EngagementListItem>>;
   get(id: string): Promise<Engagement | null>;
-  /**
-   * An engagement carrying the tag with exactly this company and person (null
-   * matches null), archived included: how a re-run import finds its own leads.
-   */
-  findTagged(input: { tagId: string; companyId: string | null; personId: string | null }): Promise<Engagement | null>;
+  /** See {@link ExactFields}; company and person always compare, null matching only null. */
+  findExact(input: {
+    companyId: string | null;
+    personId: string | null;
+    fields: ExactFields<"channel" | "source" | "nextAction">;
+  }): Promise<Engagement | null>;
   create(input: Partial<Engagement> & { title: string; pipelineId: string; stageId: string }): Promise<Engagement>;
   update(id: string, patch: Partial<Engagement>): Promise<Engagement>;
   setArchived(id: string, archived: boolean): Promise<Engagement>;
