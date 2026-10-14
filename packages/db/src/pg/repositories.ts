@@ -46,7 +46,7 @@
  *   policies limit a bound transaction to its own users' rows.
  */
 import { randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import {
   newId,
@@ -74,6 +74,7 @@ import {
   type Engagement,
   type EngagementFilter,
   type EngagementListItem,
+  type ExactFields,
   type ListableType,
   type McpClient,
   type McpScope,
@@ -307,6 +308,21 @@ const pgErrorCode = (e: unknown): string | undefined => {
   return undefined;
 };
 
+/**
+ * WHERE terms for an exact-data import lookup (core `ExactFields`, issue #23):
+ * each present field equals the stored value after trimming, blank (null or
+ * empty) equals blank, and emails compare case-insensitively.
+ */
+function exactTerms<K extends string>(columns: { [P in K]: SQLWrapper }, fields: ExactFields<K>): SQL[] {
+  const terms: SQL[] = [];
+  for (const [field, value] of Object.entries(fields) as Array<[K, string | null | undefined]>) {
+    if (value === undefined) continue;
+    const stored = sql`trim(coalesce(${columns[field]}, ''))`;
+    const wanted = (value ?? "").trim();
+    terms.push(field === "email" ? sql`lower(${stored}) = ${wanted.toLowerCase()}` : sql`${stored} = ${wanted}`);
+  }
+  return terms;
+}
 
 // ---------------------------------------------------------------------------
 // Row mappers (Date -> ISO string, jsonb passes through)
@@ -1022,12 +1038,13 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         return row ? mapCompany(row) : null;
       });
     },
-    async getByName(name) {
+    async findExact(fields) {
       return run(async (x) => {
         const [row] = await x
           .select()
           .from(t.companies)
-          .where(and(eq(t.companies.workspaceId, ws), sql`lower(${t.companies.name}) = ${name.trim().toLowerCase()}`))
+          .where(and(eq(t.companies.workspaceId, ws), ...exactTerms(t.companies, fields)))
+          .orderBy(asc(t.companies.createdAt), asc(t.companies.id))
           .limit(1);
         return row ? mapCompany(row) : null;
       });
@@ -1179,12 +1196,23 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         return row ? mapPerson(row) : null;
       });
     },
-    async getByEmail(email) {
+    async findExact(fields, companyId) {
+      const links = sql`SELECT 1 FROM ${t.companyPeople} WHERE ${t.companyPeople.personId} = ${t.people.id}`;
       return run(async (x) => {
         const [row] = await x
           .select()
           .from(t.people)
-          .where(and(eq(t.people.workspaceId, ws), sql`lower(${t.people.email}) = ${email.trim().toLowerCase()}`))
+          .where(
+            and(
+              eq(t.people.workspaceId, ws),
+              ...exactTerms(t.people, fields),
+              companyId === undefined
+                ? undefined
+                : companyId === null
+                  ? sql`NOT EXISTS (${links})`
+                  : sql`EXISTS (${links} AND ${t.companyPeople.companyId} = ${uid(companyId)})`,
+            ),
+          )
           .orderBy(asc(t.people.createdAt), asc(t.people.id))
           .limit(1);
         return row ? mapPerson(row) : null;
@@ -1596,7 +1624,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         return row ? mapEngagement(row) : null;
       });
     },
-    async findTagged({ tagId, companyId, personId }) {
+    async findExact({ companyId, personId, fields }) {
       return run(async (x) => {
         const [row] = await x
           .select()
@@ -1606,7 +1634,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
               eq(t.engagements.workspaceId, ws),
               companyId ? eq(t.engagements.companyId, uid(companyId)) : isNull(t.engagements.companyId),
               personId ? eq(t.engagements.personId, uid(personId)) : isNull(t.engagements.personId),
-              tagCondition("engagement", sql`${t.engagements.id}`, [tagId]),
+              ...exactTerms(t.engagements, fields),
             ),
           )
           .orderBy(asc(t.engagements.createdAt), asc(t.engagements.id))

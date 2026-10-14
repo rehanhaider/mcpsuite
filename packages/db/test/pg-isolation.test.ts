@@ -28,7 +28,7 @@
  * default `make test` suite ignores it (and never needs the pg driver).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { OpError, type ActorStamp } from "@mcpsuite/core";
+import { OpError, buildCatalog, runOperation, systemContext, type ActorStamp, type RequestContext } from "@mcpsuite/core";
 import {
   connectPg,
   createPgPorts,
@@ -39,6 +39,7 @@ import {
 } from "../src/pg/repositories.ts";
 import { initPgSchema } from "../src/pg/init.ts";
 import { setTestRolePassword } from "./pg-test-support.ts";
+import { authServices, csvServices } from "../src/services.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
 
@@ -682,7 +683,9 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     const all = await portsA.companies.list({ includeArchived: true, sort: "name", dir: "asc", limit: 100, offset: 0 });
     expect(all.items.some((x) => x.id === c.id)).toBe(true);
 
-    expect((await portsA.companies.getByName("  parity CO "))?.id).toBe(c.id);
+    expect((await portsA.companies.findExact({ name: "  Parity Co ", hq: "London" }))?.id).toBe(c.id);
+    expect(await portsA.companies.findExact({ name: "parity co" })).toBeNull();
+    expect(await portsA.companies.findExact({ name: "Parity Co", hq: null })).toBeNull();
     await portsA.companies.hardDelete(c.id);
     expect(await portsA.companies.get(c.id)).toBeNull();
   });
@@ -853,19 +856,38 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     }
   });
 
-  // Import matching lookups (issue #12). Last in the suite: it tags A's engagement.
-  it("import lookups: email match is case-insensitive and never crosses workspaces", async () => {
-    expect((await portsA.people.getByEmail(" ALPHA@People.Test "))?.id).toBe(A.personId);
-    expect(await portsB.people.getByEmail("alpha@people.test")).toBeNull();
-    expect(await portsA.people.getByEmail("nobody@people.test")).toBeNull();
+  // Import exact-data lookups (issue #23).
+  it("import lookups: exact data only, emails ignore case, never across workspaces", async () => {
+    const alpha = { name: "Alpha Person", email: " ALPHA@People.Test " };
+    expect((await portsA.people.findExact(alpha))?.id).toBe(A.personId);
+    expect((await portsA.people.findExact({ ...alpha, title: null }))?.id).toBe(A.personId);
+    expect(await portsA.people.findExact({ ...alpha, name: "alpha person" })).toBeNull();
+    expect(await portsA.people.findExact({ ...alpha, linkedin: "x" })).toBeNull();
+    expect(await portsB.people.findExact(alpha)).toBeNull();
+    // Company links: an id requires that link, null requires none.
+    expect((await portsA.people.findExact(alpha, A.companyId))?.id).toBe(A.personId);
+    expect(await portsA.people.findExact(alpha, null)).toBeNull();
+    expect(await portsA.people.findExact(alpha, B.companyId)).toBeNull();
 
-    await portsA.tags.apply(A.tagId, "engagement", A.engagementId);
-    const exact = { tagId: A.tagId, companyId: A.companyId, personId: A.personId };
-    expect((await portsA.engagements.findTagged(exact))?.id).toBe(A.engagementId);
-    // null matches only null: the same tag and company without the person is a different lead.
-    expect(await portsA.engagements.findTagged({ ...exact, personId: null })).toBeNull();
-    expect(await portsA.engagements.findTagged({ ...exact, tagId: B.tagId })).toBeNull();
-    expect(await portsB.engagements.findTagged(exact)).toBeNull();
+    const exact = { companyId: A.companyId, personId: A.personId, fields: { channel: "Email", source: null } };
+    expect((await portsA.engagements.findExact(exact))?.id).toBe(A.engagementId);
+    // null matches only null: the same company without the person is a different lead.
+    expect(await portsA.engagements.findExact({ ...exact, personId: null })).toBeNull();
+    expect(await portsA.engagements.findExact({ ...exact, fields: { channel: "Phone" } })).toBeNull();
+    expect(await portsB.engagements.findExact(exact)).toBeNull();
+  });
+
+  it("import.run re-run creates nothing for exactly the same rows, and keeps same-name people apart", async () => {
+    const catalog = buildCatalog({ auth: authServices, csv: csvServices });
+    const owner: RequestContext = { ...systemContext(wsA), actorType: "human", userId: A.userId, surface: "web" };
+    const csv = "Company,Contact,Title\n,Solo Person,\n,Alex Kim,\n,Alex Kim,Sales\nAlpha Co,Alex Kim,\n";
+    const importRun = async () => {
+      const r = await runOperation(catalog, portsA, owner, "import.run", { csv, sourceLabel: "pg-23" });
+      expect(r.status, JSON.stringify(r)).toBe("ok");
+      return (r as { data: Record<string, number> }).data;
+    };
+    expect(await importRun()).toMatchObject({ peopleCreated: 4, engagementsCreated: 4 });
+    expect(await importRun()).toMatchObject({ peopleCreated: 0, peopleMatched: 4, engagementsCreated: 0, engagementsSkipped: 4 });
   });
 });
 

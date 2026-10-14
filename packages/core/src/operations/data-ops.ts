@@ -11,6 +11,7 @@ import {
   type ImportTargetField,
 } from "../domain.ts";
 import { actorStamp } from "../context.ts";
+import type { ExactFields } from "../ports.ts";
 import { defineOperation, type OpCtx } from "./define.ts";
 import { audit } from "./helpers.ts";
 
@@ -95,62 +96,79 @@ interface ImportRowPlan {
   person: ImportRef | null;
 }
 
-const importKey = (value: string): string => value.trim().toLowerCase();
+const COMPANY_FIELDS = ["name", "industry", "hq", "country", "website", "linkedin"] as const;
+const PERSON_FIELDS = ["name", "title", "email", "linkedin"] as const;
+const LEAD_FIELDS = ["channel", "nextAction"] as const;
+
+/** The target fields at least one CSV column maps to; a field no column maps to is unknown, not blank. */
+function suppliedFields(mapping: Record<string, ImportTargetField>): Set<ImportTargetField> {
+  return new Set(Object.values(mapping).filter((target) => target !== "skip"));
+}
+
+/** The values a row supplies for one entity: every mapped field, blank as null. */
+function exactFields<K extends string>(
+  supplied: Set<ImportTargetField>,
+  entity: string,
+  values: Partial<Record<K, string>>,
+  fields: readonly K[],
+): ExactFields<K> {
+  const out: ExactFields<K> = {};
+  for (const field of fields) if (supplied.has(`${entity}.${field}` as ImportTargetField)) out[field] = values[field] ?? null;
+  return out;
+}
+
+/** Rows with the same exact data share one key, so a repeat inside the CSV reuses what the first row creates. */
+const sameDataKey = (fields: ExactFields<string>): string =>
+  JSON.stringify(Object.entries(fields).map(([field, value]) => [field, field === "email" ? value?.toLowerCase() : value]));
 
 /**
  * Decide, before anything is written, which existing company and person each
  * row reuses and which records the import creates. Preview and run both use
  * this, so the approver sees exactly what the import will do.
  *
- * Companies match by name. People match by email when the row has one;
- * otherwise by name among the people linked to the row's company. Rows that
- * repeat a record this import creates share it (same keys, same rules).
+ * A row reuses a record only when every field the CSV supplies equals it
+ * exactly (issue #23): blank equals blank, emails ignore case, and a field no
+ * column maps to is not compared. When the CSV has a company column, the
+ * person's company is part of their data. Anything less than an exact match
+ * is a new record; the import never decides that two different-looking rows
+ * are the same person.
  */
-async function planImport(op: OpCtx, rows: NormalizedRow[]): Promise<ImportRowPlan[]> {
-  const companies = new Map<string, ImportRef>(); // lowercased name -> ref
-  const peopleByEmail = new Map<string, ImportRef>(); // lowercased email -> ref
-  const peopleByNameAt = new Map<string, ImportRef>(); // lowercased name | company ref -> ref
-  const refKey = (ref: ImportRef): string => (ref.kind === "existing" ? `id:${ref.id}` : `new:${ref.key}`);
-  const linkedPeople = new Map<string, Promise<Array<{ person: { id: string; name: string } }>>>(); // company id -> links
+async function planImport(op: OpCtx, rows: NormalizedRow[], supplied: Set<ImportTargetField>): Promise<ImportRowPlan[]> {
+  const companies = new Map<string, ImportRef>(); // same-data key -> ref
+  const people = new Map<string, ImportRef>(); // same-data key (+ company ref) -> ref
+  const refKey = (ref: ImportRef | null): string => (!ref ? "none" : ref.kind === "existing" ? `id:${ref.id}` : `new:${ref.key}`);
+  const companyColumn = supplied.has("company.name");
+  let newCompanies = 0;
   let newPeople = 0;
 
   const plans: ImportRowPlan[] = [];
   for (const row of rows) {
     let company: ImportRef | null = null;
     if (row.company.name) {
-      const key = importKey(row.company.name);
+      const fields = exactFields(supplied, "company", row.company, COMPANY_FIELDS);
+      const key = sameDataKey(fields);
       company = companies.get(key) ?? null;
       if (!company) {
-        const existing = await op.ports.companies.getByName(row.company.name);
-        company = existing ? { kind: "existing", id: existing.id } : { kind: "new", key: `company:${key}` };
+        const existing = await op.ports.companies.findExact(fields);
+        company = existing ? { kind: "existing", id: existing.id } : { kind: "new", key: `company:${++newCompanies}` };
         companies.set(key, company);
       }
     }
 
     let person: ImportRef | null = null;
     if (row.person.name) {
-      const name = importKey(row.person.name);
-      const nameAt = company ? `${name}|${refKey(company)}` : null;
-      if (row.person.email) {
-        const email = importKey(row.person.email);
-        person = peopleByEmail.get(email) ?? null;
-        if (!person) {
-          const existing = await op.ports.people.getByEmail(row.person.email);
-          person = existing ? { kind: "existing", id: existing.id } : { kind: "new", key: `person:${++newPeople}` };
-          peopleByEmail.set(email, person);
-        }
-      } else if (nameAt) {
-        person = peopleByNameAt.get(nameAt) ?? null;
-        if (!person && company?.kind === "existing") {
-          if (!linkedPeople.has(company.id)) linkedPeople.set(company.id, op.ports.companies.people(company.id));
-          const linked = await linkedPeople.get(company.id)!;
-          const match = linked.find((l) => importKey(l.person.name) === name);
-          if (match) person = { kind: "existing", id: match.person.id };
-        }
+      const fields = exactFields(supplied, "person", row.person, PERSON_FIELDS);
+      const key = companyColumn ? `${sameDataKey(fields)}|${refKey(company)}` : sameDataKey(fields);
+      person = people.get(key) ?? null;
+      if (!person) {
+        // Nobody is linked yet to a company this import creates, so that row's person is new too.
+        const existing =
+          company?.kind === "new"
+            ? null
+            : await op.ports.people.findExact(fields, companyColumn ? (company?.id ?? null) : undefined);
+        person = existing ? { kind: "existing", id: existing.id } : { kind: "new", key: `person:${++newPeople}` };
+        people.set(key, person);
       }
-      // No email and no company: nothing identifies the person, so always new.
-      person ??= { kind: "new", key: `person:${++newPeople}` };
-      if (nameAt && !peopleByNameAt.has(nameAt)) peopleByNameAt.set(nameAt, person);
     }
     plans.push({ company, person });
   }
@@ -163,7 +181,7 @@ async function previewImport(op: OpCtx, csvServices: CsvServices, input: z.infer
   const headers = Object.keys(rows[0] ?? {});
   const mapping = resolveMapping(headers, input.mapping);
   const normalized = normalizeRows(rows, mapping);
-  const plans = await planImport(op, normalized);
+  const plans = await planImport(op, normalized, suppliedFields(mapping));
 
   const newCompanies = new Set<string>();
   const newPeople = new Set<string>();
@@ -324,7 +342,7 @@ export function buildDataOps(csvServices: CsvServices) {
       name: "import.preview",
       title: "Preview CSV import",
       description:
-        "Inspect a CSV: detected column mapping, row counts, how many companies and people are new vs matched to existing records (the same matching import.run uses), and a normalized sample. Run before import.run.",
+        "Inspect a CSV: detected column mapping, row counts, how many companies and people are new vs matched to existing records (exact-data matching, the same rules import.run uses), and a normalized sample. Run before import.run.",
       input: zImportPreview,
       minRole: "member",
       scope: "write",
@@ -335,7 +353,7 @@ export function buildDataOps(csvServices: CsvServices) {
       name: "import.run",
       title: "Run CSV import",
       description:
-        "Import a CSV into companies/people/engagements (leads). Reuses the existing company with the same name, and the existing person with the same email (or, for a row without an email, the same name at the same company). Skips a lead already imported under the same sourceLabel for the same company and person, so re-running with the same sourceLabel does not duplicate (the default label is dated). Risky (bulk data) — agents need approval unless trusted.",
+        "Import a CSV into companies/people/engagements (leads). A row reuses an existing company, person or lead only when every field the CSV supplies matches it exactly: blank equals blank, emails ignore case, and fields with no CSV column are not compared. A person's company is part of their data when the CSV has a company column. Anything else creates a new record, so two people who share a name stay separate. A lead also matches on its source (the CSV's source, or else the sourceLabel), so re-running the same CSV with the same sourceLabel does not duplicate (the default label is dated). Risky (bulk data) — agents need approval unless trusted.",
       input: zImportRun,
       minRole: "member",
       scope: "write",
@@ -346,6 +364,7 @@ export function buildDataOps(csvServices: CsvServices) {
         const headers = Object.keys(rows[0] ?? {});
         const mapping = resolveMapping(headers, input.mapping);
         const normalized = normalizeRows(rows, mapping);
+        const supplied = suppliedFields(mapping);
         if (normalized.length === 0) throw OpError.validation("Nothing importable in this CSV");
 
         let pipelineId: string, stageId: string;
@@ -365,7 +384,7 @@ export function buildDataOps(csvServices: CsvServices) {
           (await op.ports.tags.getByName(sourceLabel)) ?? (await op.ports.tags.create({ name: sourceLabel, color: "info" }));
 
         const result = await op.ports.tx(async () => {
-          const plans = await planImport(op, normalized);
+          const plans = await planImport(op, normalized, supplied);
           const createdIds = new Map<string, string>(); // new ref key -> id created by this run
           let companiesCreated = 0,
             companiesMatched = 0,
@@ -422,22 +441,18 @@ export function buildDataOps(csvServices: CsvServices) {
                 personCreated = true;
               }
             }
-            if (personId && companyId) {
-              if (personCreated) {
-                await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary: true });
-              } else {
-                // A matched person keeps their links as they are: add this company only if missing,
-                // as primary only when they have none.
-                const links = await op.ports.people.companies(personId);
-                if (!links.some((l) => l.companyId === companyId)) {
-                  const isPrimary = !links.some((l) => l.isPrimary);
-                  await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary });
-                }
-              }
+            // A matched person is already linked to the row's company: matching requires it.
+            if (personCreated && personId && companyId) {
+              await op.ports.people.link({ companyId, personId, roleTitle: row.person.title ?? null, isPrimary: true });
             }
 
-            // A lead this label already imported for the same company and person is kept, not repeated.
-            if (await op.ports.engagements.findTagged({ tagId: tag.id, companyId, personId })) {
+            // A lead with the same company, person and data is kept, not repeated. Its source is the
+            // CSV's source or, without one, the import label, so the label scopes re-runs.
+            const leadFields = {
+              ...exactFields(supplied, "engagement", row.engagement, LEAD_FIELDS),
+              source: row.engagement.source ?? sourceLabel,
+            };
+            if (await op.ports.engagements.findExact({ companyId, personId, fields: leadFields })) {
               engagementsSkipped++;
               continue;
             }

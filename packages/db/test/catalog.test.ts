@@ -611,26 +611,21 @@ describe("search + import/export", () => {
     expect(exported.csv).toContain("Acme");
   });
 
-  describe("re-import is idempotent (issue #12)", () => {
-    // Ada and Bob match by email; Cy has no email and matches by name at Acme.
+  describe("re-import matches only exactly the same data (issues #12, #23)", () => {
+    // Ada and Bob have emails; Cy has none. Every row has a company.
     const csv =
       "Company,Contact,Title,Email,Notes\n" +
       "Acme,Ada Lovelace,CTO,ada@acme.io,met at conf\n" +
       "Beta Corp,Bob,CEO,bob@beta.co,\n" +
       "Acme,Cy Twombly,Designer,,\n";
     const counts = () => ports.maintenance.counts();
-    const primaryLinks = (personId: string): number =>
-      (
-        db.$client.prepare("SELECT COUNT(*) n FROM company_people WHERE person_id = ? AND is_primary = 1").get(personId) as {
-          n: number;
-        }
-      ).n;
+    const notes = () => (db.$client.prepare("SELECT COUNT(*) n FROM activities WHERE kind = 'note'").get() as { n: number }).n;
 
     it("importing the same CSV twice keeps companies, people, leads and notes stable", async () => {
       const first = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
       expect(first).toMatchObject({ companiesCreated: 2, peopleCreated: 3, engagementsCreated: 3, engagementsSkipped: 0 });
       const after = await counts();
-      const notes = (db.$client.prepare("SELECT COUNT(*) n FROM activities WHERE kind = 'note'").get() as { n: number }).n;
+      const notesAfter = notes();
 
       const again = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
       expect(again).toMatchObject({
@@ -642,50 +637,85 @@ describe("search + import/export", () => {
         engagementsSkipped: 3,
       });
       expect(await counts()).toEqual(after);
-      expect((db.$client.prepare("SELECT COUNT(*) n FROM activities WHERE kind = 'note'").get() as { n: number }).n).toBe(notes);
-      const ada = await ports.people.getByEmail("ada@acme.io");
-      expect(primaryLinks(ada!.id)).toBe(1);
+      expect(notes()).toBe(notesAfter);
     });
 
-    it("matches email case-insensitively and a no-email row by name at the same company", async () => {
-      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
-      const shouted = "Company,Contact,Email\nAcme,Ada L.,ADA@ACME.IO\nAcme,cy twombly,\n";
-      const result = await ok(run(owner, "import.run", { csv: shouted, sourceLabel: "batch-2" }));
-      expect(result).toMatchObject({ peopleCreated: 0, peopleMatched: 2, engagementsCreated: 2 });
-      expect((await counts()).people).toBe(3);
+    it("a row with only a person name is not duplicated on re-run (issue #23)", async () => {
+      const solo = "Company,Contact\n,Solo Person\n";
+      const first = await ok(run(owner, "import.run", { csv: solo, sourceLabel: "solo" }));
+      expect(first).toMatchObject({ peopleCreated: 1, engagementsCreated: 1 });
+      const again = await ok(run(owner, "import.run", { csv: solo, sourceLabel: "solo" }));
+      expect(again).toMatchObject({ peopleCreated: 0, peopleMatched: 1, engagementsCreated: 0, engagementsSkipped: 1 });
+      expect((await counts()).people).toBe(1);
     });
 
-    it("keeps people apart when only the name matches at a different company, or nothing identifies them", async () => {
-      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
-      const other = "Company,Contact\nGamma,Cy Twombly\n,Solo Person\n";
-      const first = await ok(run(owner, "import.run", { csv: other, sourceLabel: "batch-3" }));
-      expect(first).toMatchObject({ peopleCreated: 2, peopleMatched: 0 });
-      // A person with neither email nor company has nothing to match on.
-      const second = await ok(run(owner, "import.run", { csv: other, sourceLabel: "batch-3" }));
-      expect(second).toMatchObject({ peopleCreated: 1, peopleMatched: 1 });
+    it("people who share a name stay separate when any supplied field differs", async () => {
+      const alexes = "Contact,Title,Email\nAlex Kim,,\nAlex Kim,Sales,\nAlex Kim,Sales,alex@x.com\n";
+      const first = await ok(run(owner, "import.run", { csv: alexes, sourceLabel: "alexes" }));
+      expect(first).toMatchObject({ peopleCreated: 3, engagementsCreated: 3 });
+      const again = await ok(run(owner, "import.run", { csv: alexes, sourceLabel: "alexes" }));
+      expect(again).toMatchObject({ peopleCreated: 0, peopleMatched: 3, engagementsCreated: 0, engagementsSkipped: 3 });
     });
 
-    it("a matched person keeps their primary company and role; a new company is added as secondary", async () => {
+    it("emails ignore case; names and other fields must match exactly", async () => {
       await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
-      const ada = (await ports.people.getByEmail("ada@acme.io"))!;
-      const beta = (await ports.companies.getByName("Beta Corp"))!;
+      const variants = "Company,Contact,Title,Email\nAcme,Ada Lovelace,CTO,ADA@ACME.IO\nAcme,ada lovelace,CTO,ada@acme.io\nACME,Ada Lovelace,CTO,ada@acme.io\n";
+      const result = await ok(run(owner, "import.run", { csv: variants, sourceLabel: "batch-1" }));
+      // Row 1 is Ada; row 2 differs in name case; row 3 names a different company, so a different person.
+      expect(result).toMatchObject({ companiesCreated: 1, peopleCreated: 2, peopleMatched: 1 });
+    });
+
+    it("a field with no CSV column is not compared, but a blank cell in a supplied column must be blank", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      // No Title column: Ada (CTO) still matches.
+      const noTitle = await ok(run(owner, "import.run", { csv: "Company,Contact,Email\nAcme,Ada Lovelace,ada@acme.io\n", sourceLabel: "batch-1" }));
+      expect(noTitle).toMatchObject({ peopleCreated: 0, peopleMatched: 1 });
+      // A Title column left blank: Ada has a title, so this is someone else.
+      const blankTitle = await ok(
+        run(owner, "import.run", { csv: "Company,Contact,Title,Email\nAcme,Ada Lovelace,,ada@acme.io\n", sourceLabel: "batch-1" }),
+      );
+      expect(blankTitle).toMatchObject({ peopleCreated: 1, peopleMatched: 0 });
+    });
+
+    it("with a company column, a person's company is part of their data", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      const cys = "Company,Contact\nAcme,Cy Twombly\nGamma,Cy Twombly\n,Cy Twombly\n";
+      const result = await ok(run(owner, "import.run", { csv: cys, sourceLabel: "batch-1" }));
+      // Cy at Acme matches; Cy at a new company and Cy with no company are different people.
+      expect(result).toMatchObject({ peopleCreated: 2, peopleMatched: 1 });
+    });
+
+    it("a matched person's company links are left as they are", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      const ada = (await ports.people.findExact({ email: "ada@acme.io" }))!;
+      const beta = (await ports.companies.findExact({ name: "Beta Corp" }))!;
       await ports.people.link({ companyId: beta.id, personId: ada.id, isPrimary: true, roleTitle: "Advisor" });
 
-      const moved = "Company,Contact,Title,Email\nAcme,Ada Lovelace,CEO,ada@acme.io\nGamma,Ada Lovelace,Chair,ada@acme.io\n";
-      await ok(run(owner, "import.run", { csv: moved, sourceLabel: "batch-2" }));
-      const links = await ports.people.companies(ada.id);
-      const byName = Object.fromEntries(links.map((l) => [l.company.name, l]));
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-2" }));
+      const byName = Object.fromEntries((await ports.people.companies(ada.id)).map((l) => [l.company.name, l]));
       expect(byName["Beta Corp"]).toMatchObject({ isPrimary: true, roleTitle: "Advisor" });
       expect(byName["Acme"]).toMatchObject({ isPrimary: false, roleTitle: "CTO" });
-      expect(byName["Gamma"]).toMatchObject({ isPrimary: false, roleTitle: "Chair" });
     });
 
-    it("a repeated row inside one CSV creates one person and one lead", async () => {
+    it("a lead still matches after its stage changes or it is archived; a new label is a new lead", async () => {
+      await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      const pipeline = (await ports.pipelines.getDefault("engagement"))!;
+      const leads = await ports.engagements.list({ includeArchived: true, sort: "createdAt", dir: "asc", limit: 10, offset: 0 });
+      await ports.engagements.update(leads.items[0]!.id, { stageId: pipeline.stages[1]!.id });
+      await ports.engagements.setArchived(leads.items[1]!.id, true);
+
+      const again = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
+      expect(again).toMatchObject({ engagementsCreated: 0, engagementsSkipped: 3 });
+      const relabelled = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-2" }));
+      expect(relabelled).toMatchObject({ peopleCreated: 0, engagementsCreated: 3 });
+    });
+
+    it("a repeated row inside one CSV creates one person and one lead; a differing row does not share them", async () => {
       const dup = "Company,Contact,Email\nAcme,Ada,ada@acme.io\nAcme,Ada,ada@acme.io\nAcme,Ada,\n";
       const preview = await ok(run(owner, "import.preview", { csv: dup }));
-      expect(preview).toMatchObject({ newCompanies: 1, newPeople: 1, existingPeopleMatches: 0 });
+      expect(preview).toMatchObject({ newCompanies: 1, newPeople: 2, existingPeopleMatches: 0 });
       const result = await ok(run(owner, "import.run", { csv: dup, sourceLabel: "dup" }));
-      expect(result).toMatchObject({ companiesCreated: 1, peopleCreated: 1, peopleMatched: 2, engagementsCreated: 1, engagementsSkipped: 2 });
+      expect(result).toMatchObject({ companiesCreated: 1, peopleCreated: 2, peopleMatched: 1, engagementsCreated: 2, engagementsSkipped: 1 });
     });
 
     it("preview reports people and agrees with what the run then does", async () => {
