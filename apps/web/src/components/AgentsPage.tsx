@@ -65,13 +65,16 @@ function Snippet({ code }: { code: string }) {
 /** Readable stand-in shown in the on-page guide, replaced by the real key in the post-create modal. */
 const KEY_PLACEHOLDER = "mcpsuite_YOUR_API_KEY";
 
-const DEFAULT_MCP_URL = "http://localhost:8765/mcp";
+const DEFAULT_MCP_URL = "http://localhost:2222/mcp";
 
-/** MCP HTTP endpoint for the snippets, derived from the current host (SSR-safe). */
+/**
+ * MCP HTTP endpoint for the snippets (SSR-safe). The web process serves `POST /mcp` itself, so
+ * the page's own origin is the address the admin already reaches — scheme, host, and port intact.
+ */
 function useMcpUrl() {
   return useMemo(() => {
     if (typeof window === "undefined") return DEFAULT_MCP_URL;
-    return `http://${window.location.hostname}:8765/mcp`;
+    return `${window.location.origin}/mcp`;
   }, []);
 }
 
