@@ -248,6 +248,14 @@ const EXPORTABLE = [
   "activity",
 ] as const;
 
+const EXPORT_LABELS: Record<(typeof EXPORTABLE)[number], string> = {
+  company: "companies",
+  person: "people",
+  engagement: "leads",
+  deal: "deals",
+  activity: "activities",
+};
+
 function ExportCard() {
   const [entity, setEntity] =
     useState<(typeof EXPORTABLE)[number]>("engagement");
@@ -281,7 +289,7 @@ function ExportCard() {
               className="capitalize"
               onClick={() => setEntity(e)}
             >
-              {e === "engagement" ? "leads" : `${e}s`}
+              {EXPORT_LABELS[e]}
             </Button>
           ))}
         </div>
