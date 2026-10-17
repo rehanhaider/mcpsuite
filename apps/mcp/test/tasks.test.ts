@@ -242,7 +242,7 @@ describe("MCP approval tasks over HTTP", () => {
     }));
     const taskId = called.result.taskId;
     expect(called.result.status).toBe("input_required");
-    const error = { code: "internal", message: "forced failure after write" };
+    const error = { code: "internal", message: "An internal error occurred" };
     expect(await runtime.run(human, "pendingAction.approve", { id: taskId })).toMatchObject({
       status: "error", error,
     });
