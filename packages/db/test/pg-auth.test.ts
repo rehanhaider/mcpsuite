@@ -164,7 +164,7 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     }
   });
 
-  it("runtime ping succeeds as crm_app with no visible workspaces and fails after pool shutdown", async () => {
+  it("runtime ping shares overlapping calls, succeeds with no visible workspaces and fails after pool shutdown", async () => {
     // This pool has no tenant context, so RLS hides even the seeded rows.
     expect((await app.pool.query("SELECT 1 FROM crm.workspaces LIMIT 1")).rows).toHaveLength(0);
     const appUrl = new URL(process.env.DATABASE_URL!);
@@ -174,11 +174,22 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
     const runtime = await createRuntimeFromEnv({ DATABASE_URL: appUrl.toString() });
     if (runtime.adapter !== "postgres") throw new Error("expected the PostgreSQL adapter");
     try {
-      await expect(runtime.ping()).resolves.toBeUndefined();
+      const firstPing = runtime.ping();
+      expect(runtime.ping()).toBe(firstPing);
+      await expect(firstPing).resolves.toBeUndefined();
+      const nextPing = runtime.ping();
+      expect(nextPing).not.toBe(firstPing);
+      await expect(nextPing).resolves.toBeUndefined();
       await expect(checkDatabaseHealth(async () => runtime)).resolves.toBe(true);
     } finally {
       await runtime.close();
     }
+    const failedPing = runtime.ping();
+    expect(runtime.ping()).toBe(failedPing);
+    await expect(failedPing).rejects.toThrow();
+    const nextFailedPing = runtime.ping();
+    expect(nextFailedPing).not.toBe(failedPing);
+    await expect(nextFailedPing).rejects.toThrow();
     await expect(checkDatabaseHealth(async () => runtime)).resolves.toBe(false);
   });
 

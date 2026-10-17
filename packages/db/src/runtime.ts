@@ -177,6 +177,7 @@ export async function createRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env)
 // ---------------------------------------------------------------------------
 
 const PG_STARTUP_PING_TIMEOUT_MS = 10_000;
+const READINESS_PING_TIMEOUT_MS = 2_000;
 
 /** Startup ping budget; override with MCPSUITE_PG_STARTUP_TIMEOUT_MS. */
 function pgStartupTimeoutMs(env: NodeJS.ProcessEnv): number {
@@ -204,16 +205,23 @@ async function createHostedRuntime(databaseUrl: string, pingTimeoutMs: number): 
       { cause },
     );
   }
+  let inFlightPing: Promise<void> | null = null;
   return {
     adapter: "postgres",
-    ping: async () => {
-      // crm_app can SELECT this table. With no workspace context, forced
-      // RLS returns zero rows; successful execution is all readiness needs.
-      await withTimeout(
-        pg.handle.pool.query("SELECT 1 FROM crm.workspaces LIMIT 1"),
-        pingTimeoutMs,
-        "PostgreSQL readiness check",
-      );
+    ping: () => {
+      if (!inFlightPing) {
+        // crm_app can SELECT this table. With no workspace context, forced
+        // RLS returns zero rows; successful execution is all readiness needs.
+        const query = pg.handle.pool.query("SELECT 1 FROM crm.workspaces LIMIT 1")
+          .then(() => {})
+          .finally(() => {
+            // A caller timeout does not cancel the query. Keep sharing the
+            // same ping until the query settles so probes cannot fill the pool.
+            inFlightPing = null;
+          });
+        inFlightPing = withTimeout(query, READINESS_PING_TIMEOUT_MS, "PostgreSQL readiness check");
+      }
+      return inFlightPing;
     },
     catalog: pg.catalog,
     portsFor: pg.portsFor,
