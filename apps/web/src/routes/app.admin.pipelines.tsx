@@ -121,7 +121,11 @@ function PipelineCard({ pipeline }: { pipeline: Pipeline }) {
           <Button
             variant="ghost"
             size="icon-xs"
-            aria-label={`Rename ${pipeline.name}`}
+            aria-label={
+              renaming
+                ? `Cancel renaming ${pipeline.name}`
+                : `Rename ${pipeline.name}`
+            }
             onClick={() => setRenaming((r) => !r)}
           >
             <Pencil className="size-3.5" />
