@@ -12,9 +12,9 @@
  *      A's BEGIN.
  *   2. Nesting is scoped to the request's async call chain through one
  *      AsyncLocalStorage per connection — not to an object (a nested call
- *      through a different object must join, not wait on the lock it already
- *      holds) and not to the connection (a counter shared by the connection
- *      would let request B join request A's open transaction).
+ *      through a different object must reuse the connection, not wait on the
+ *      lock it already holds) and not to the connection (a counter shared by
+ *      the connection would let request B join request A's open transaction).
  *
  * Callers inside a transaction must await only microtasks, never real I/O
  * (network, timers): the lock is held for the whole unit, so real I/O would
@@ -27,6 +27,8 @@ import type Database from "better-sqlite3";
 interface Scope {
   /** True once this call chain has issued BEGIN on the connection. */
   inTransaction: boolean;
+  /** Unique savepoint names within this call chain's transaction. */
+  savepointCounter: number;
 }
 
 const txLock = new WeakMap<object, Promise<void>>();
@@ -72,14 +74,14 @@ export function holdsConnection(sqlite: Database.Database): boolean {
 export function withConnection<T>(sqlite: Database.Database, fn: () => Promise<T> | T): Promise<T> {
   const store = scopeStore(sqlite);
   if (store.getStore()) return Promise.resolve().then(fn);
-  return acquire(sqlite, () => store.run({ inTransaction: false }, async () => fn()));
+  return acquire(sqlite, () => store.run({ inTransaction: false, savepointCounter: 0 }, async () => fn()));
 }
 
 /**
  * Run fn atomically: it commits only after fn fully resolves and rolls back
- * when it rejects. A nested call from the same call chain joins the open
- * transaction; a chain that holds the connection without a transaction
- * (withConnection) opens one here.
+ * when it rejects. A nested call from the same call chain uses a savepoint
+ * so its failure rolls back only its own writes; a chain that holds the
+ * connection without a transaction (withConnection) opens one here.
  *
  * `immediate` opens with BEGIN IMMEDIATE: the write lock is taken up front.
  * Use it for transactions that read and then write. In WAL mode a deferred
@@ -94,7 +96,23 @@ export function withTransaction<T>(
 ): Promise<T> {
   const store = scopeStore(sqlite);
   const current = store.getStore();
-  if (current?.inTransaction) return fn();
+  if (current?.inTransaction) {
+    return (async () => {
+      const savepoint = `sp_${++current.savepointCounter}`;
+      sqlite.exec(`SAVEPOINT ${savepoint}`);
+      try {
+        const result = await fn();
+        sqlite.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        return result;
+      } catch (e) {
+        if (sqlite.inTransaction) {
+          sqlite.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+          sqlite.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        }
+        throw e;
+      }
+    })();
+  }
   const body = async (): Promise<T> => {
     sqlite.exec(options.immediate ? "BEGIN IMMEDIATE" : "BEGIN");
     try {
@@ -112,5 +130,5 @@ export function withTransaction<T>(
       current.inTransaction = false;
     });
   }
-  return acquire(sqlite, () => store.run({ inTransaction: true }, body));
+  return acquire(sqlite, () => store.run({ inTransaction: true, savepointCounter: 0 }, body));
 }

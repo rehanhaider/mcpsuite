@@ -855,6 +855,36 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     expect(audit.items.some((e) => e.summary === "doomed")).toBe(false);
   });
 
+  it("persists failed approval and audit while rolling back the stored operation's partial write", async () => {
+    const catalog = buildCatalog({ auth: authServices, csv: csvServices });
+    const owner: RequestContext = { ...systemContext(wsA), actorType: "human", userId: A.userId, surface: "web" };
+    const field = await portsA.customFields.createDef({
+      entityType: "company", key: "a", label: "A", type: "text", options: [], required: false,
+    });
+    await portsA.customFields.setValue(field.id, "company", A.companyId, "Before");
+    // Use the real handler. `a` also sorts before `unknown` when PostgreSQL
+    // round-trips the stored input through jsonb.
+    const pending = await portsA.pendingActions.create({
+      operation: "customField.setValues",
+      input: { entityType: "company", entityId: A.companyId, values: { a: "Partial write", unknown: "Invalid" } },
+      preview: null, riskCategory: "config", actor: actor(A.userId),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const error = { code: "validation", message: 'No company custom field with key "unknown"' };
+    const approval = await runOperation(catalog, portsA, owner, "pendingAction.approve", { id: pending.id, note: "Reviewed" });
+    expect(approval).toMatchObject({ status: "ok", data: {
+      pendingAction: { status: "failed", result: { error }, reviewedByUserId: A.userId, reviewNote: "Reviewed" }, error,
+    } });
+    const persisted = createPgPorts(app.db, wsA);
+    expect(await persisted.pendingActions.get(pending.id)).toMatchObject({ status: "failed", result: { error } });
+    expect((await persisted.customFields.values("company", A.companyId))[field.key]).toBe("Before");
+    const audit = await persisted.audit.list({ operation: "pendingAction.approve", entityId: pending.id, limit: 10, offset: 0 });
+    expect(audit.items).toHaveLength(1);
+    expect(audit.items[0]).toMatchObject({
+      summary: "Approved customField.setValues but execution FAILED", meta: { error },
+    });
+  });
+
   // ── 5. Pool reuse across workspaces ───────────────────────────────────────
 
   it("a max-1 pool serving A then B transactions never leaks context", async () => {

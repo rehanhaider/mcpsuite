@@ -109,20 +109,23 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
         const parsed = target.input.parse(pa.input);
         result = await op.ports.tx(() => target.handler(op, parsed));
       } catch (e) {
-        await op.ports.pendingActions.setStatus(id, {
+        const error = toErrorPayload(e);
+        const failed = await op.ports.pendingActions.setStatus(id, {
           status: "failed",
           reviewedByUserId: op.ctx.userId,
           reviewNote: note ?? null,
-          result: { error: toErrorPayload(e) as unknown as Record<string, unknown> },
+          result: { error },
         });
         await audit(op, {
           operation: "pendingAction.approve",
           entityType: "pending_action",
           entityId: id,
           summary: `Approved ${pa.operation} but execution FAILED`,
-          meta: { error: toErrorPayload(e) },
+          meta: { error },
         });
-        throw e;
+        // Return so the outer transaction commits the failure and its audit.
+        // The target's nested transaction has already rolled back its writes.
+        return { pendingAction: failed, error };
       }
       const updated = await op.ports.pendingActions.setStatus(id, {
         status: "approved",

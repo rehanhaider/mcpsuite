@@ -189,7 +189,7 @@ describe("MCP approval tasks over HTTP", () => {
     expect(failed.result.content[0].text).toContain("Stored execution failure");
   });
 
-  it("keeps a failed SQLite approval pending and rolls back the target's partial write", async () => {
+  it("returns a completed tool error for a failed approval and rolls back the target's partial write", async () => {
     runtime.catalog.set("test.partialWrite", {
       name: "test.partialWrite", title: "Partial write test", description: "Test approval rollback",
       input: z.object({ id: z.string() }), minRole: "admin", scope: "write",
@@ -205,9 +205,16 @@ describe("MCP approval tasks over HTTP", () => {
     }));
     const taskId = called.result.taskId;
     expect(called.result.status).toBe("input_required");
-    expect((await runtime.run(human, "pendingAction.approve", { id: taskId })).status).toBe("error");
-    expect((await runtime.portsFor(human.workspaceId).pendingActions.get(taskId))?.status).toBe("pending");
-    expect((await send(rpc("tasks/get", { taskId }))).result.status).toBe("input_required");
+    const error = { code: "internal", message: "forced failure after write" };
+    expect(await runtime.run(human, "pendingAction.approve", { id: taskId })).toMatchObject({
+      status: "ok", data: { pendingAction: { status: "failed", result: { error } }, error },
+    });
+    expect(await runtime.portsFor(human.workspaceId).pendingActions.get(taskId)).toMatchObject({
+      status: "failed", result: { error },
+    });
+    const state = (await send(rpc("tasks/get", { taskId }))).result;
+    expect(state).toMatchObject({ resultType: "complete", status: "completed", result: { isError: true } });
+    expect(JSON.parse(state.result.content[0].text)).toEqual({ error });
     expect((await runtime.portsFor(human.workspaceId).companies.get(target))?.name).toBe("Task test company");
   });
 

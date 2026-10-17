@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Check, ChevronDown, ShieldCheck, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
+import { toast } from "sonner";
 import { PENDING_STATUSES, type McpClient, type PendingAction, type User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, type Tone } from "~/lib/colors.ts";
@@ -112,7 +113,12 @@ function PendingCard({
 }) {
   const [detailsOpen, setDetailsOpen] = useState(linked);
   const [rejectOpen, setRejectOpen] = useState(false);
-  const approve = useOp("pendingAction.approve", { successToast: "Approved & executed" });
+  const approve = useOp<{ id: string }, { error?: { message: string } }>("pendingAction.approve", {
+    onSuccess: ({ error }) => {
+      if (error) toast.error(`Approved, but execution failed: ${error.message}`, { duration: 6000 });
+      else toast.success("Approved & executed");
+    },
+  });
   const cancel = useOp("pendingAction.cancel", { successToast: "Cancelled" });
   const isPending = pa.status === "pending";
   const reviewedBy = pa.reviewedByUserId ? reviewer.find((u) => u.id === pa.reviewedByUserId)?.name : null;
