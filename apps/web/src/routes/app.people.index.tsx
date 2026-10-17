@@ -5,6 +5,7 @@ import { Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { z } from "zod";
 import type { ContactListWithCounts, Page, PersonListItem, Tag, User } from "@mcpsuite/core/domain";
+import { listAccepts } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { relativeTime } from "~/lib/format.ts";
 import { BulkBar } from "~/components/BulkBar.tsx";
@@ -58,6 +59,7 @@ function PeoplePage() {
   const users = useQuery(opQuery<User[]>("user.list"));
   const tags = useQuery(opQuery<Array<Tag & { usage: number }>>("tag.list"));
   const lists = useQuery(opQuery<ContactListWithCounts[]>("list.list"));
+  const eligibleLists = (lists.data ?? []).filter((l) => listAccepts(l, "person"));
 
   const patch = (p: Partial<z.infer<typeof searchSchema>>) => navigate({ search: (prev) => ({ ...prev, page: 0, ...p }), replace: true });
 
@@ -155,11 +157,13 @@ function PeoplePage() {
         </Select>
         <Select className="w-auto" value={search.listId ?? ""} onChange={(e) => patch({ listId: e.target.value || undefined })}>
           <option value="">Any list</option>
-          {(lists.data ?? []).map((l) => (
-            <option key={l.id} value={l.id}>
-              {l.name} ({l.people})
-            </option>
-          ))}
+          {(lists.data ?? [])
+            .filter((l) => listAccepts(l, "person") || l.id === search.listId)
+            .map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name} ({l.people})
+              </option>
+            ))}
         </Select>
         <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
           <Switch checked={search.archived ?? false} onCheckedChange={(checked) => patch({ archived: checked || undefined })} />
@@ -172,7 +176,7 @@ function PeoplePage() {
           entityType="person"
           ids={selectedIds}
           tags={tags.data ?? []}
-          lists={lists.data ?? []}
+          lists={eligibleLists}
           users={users.data ?? []}
           onDone={() => setSelection({})}
         />

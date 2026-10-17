@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayRef, validateCustomFieldValue, type CustomFieldDef } from "../src/domain.ts";
+import { displayRef, listAccepts, LISTABLE_TYPES, validateCustomFieldValue, type CustomFieldDef } from "../src/domain.ts";
 import { roleAtLeast, trustAllows } from "../src/policy.ts";
 import { OpError, toErrorPayload } from "../src/errors.ts";
 import { newId, slugify } from "../src/ids.ts";
@@ -37,6 +37,18 @@ describe("displayRef", () => {
   it("uses workspace prefixes with defaults", () => {
     expect(displayRef({ engagement: "LEAD" }, "engagement", 42)).toBe("LEAD-42");
     expect(displayRef({}, "deal", 7)).toBe("DEAL-7");
+  });
+});
+
+describe("listAccepts", () => {
+  it.each(LISTABLE_TYPES)("accepts %s in an untyped list", (type) => {
+    expect(listAccepts({ entityType: null }, type)).toBe(true);
+  });
+
+  it.each(LISTABLE_TYPES)("restricts a %s list to its own kind", (entityType) => {
+    for (const type of LISTABLE_TYPES) {
+      expect(listAccepts({ entityType }, type)).toBe(type === entityType);
+    }
   });
 });
 

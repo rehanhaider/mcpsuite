@@ -58,6 +58,17 @@ export type CustomFieldEntity = (typeof CUSTOM_FIELD_TYPES_ENTITIES)[number];
 export const LISTABLE_TYPES = ["company", "person", "engagement", "deal"] as const;
 export type ListableType = (typeof LISTABLE_TYPES)[number];
 
+export const LISTABLE_LABELS: Record<ListableType, string> = {
+  person: "people",
+  company: "companies",
+  engagement: "leads",
+  deal: "deals",
+};
+
+export function listAccepts(list: { entityType: ListableType | null }, type: ListableType): boolean {
+  return list.entityType == null || list.entityType === type;
+}
+
 /** Entities that carry a human display reference. */
 export const DISPLAY_REF_DEFAULTS: Record<string, string> = {
   engagement: "LEAD",

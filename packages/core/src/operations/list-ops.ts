@@ -11,16 +11,9 @@
 import { z } from "zod";
 import { OpError } from "../errors.ts";
 import type { ListableType } from "../domain.ts";
-import { zListCreate, zListMembers, zListUpdate, zId, zLimit, zOffset, LISTABLE_TYPES } from "../domain.ts";
+import { zListCreate, zListMembers, zListUpdate, zId, zLimit, zOffset, LISTABLE_TYPES, LISTABLE_LABELS, listAccepts } from "../domain.ts";
 import { defineOperation } from "./define.ts";
 import { audit, definedOnly, found } from "./helpers.ts";
-
-const ENTITY_LABELS: Record<ListableType, string> = {
-  person: "people",
-  company: "companies",
-  engagement: "leads",
-  deal: "deals",
-};
 
 export const listOps = [
   defineOperation({
@@ -62,7 +55,7 @@ export const listOps = [
       if (existing) {
         if (existing.entityType && requested && existing.entityType !== requested) {
           throw OpError.validation(
-            `List "${existing.name}" already exists as a ${ENTITY_LABELS[existing.entityType]}-only list`,
+            `List "${existing.name}" already exists as a ${LISTABLE_LABELS[existing.entityType]}-only list`,
           );
         }
         return existing;
@@ -91,7 +84,7 @@ export const listOps = [
         const counts = await op.ports.lists.memberTypeCounts(id);
         for (const [type, n] of Object.entries(counts)) {
           if (n > 0 && type !== patch.entityType) {
-            throw OpError.validation(`List has ${n} ${ENTITY_LABELS[type as ListableType] ?? type} members; remove them before retyping`);
+            throw OpError.validation(`List has ${n} ${LISTABLE_LABELS[type as ListableType] ?? type} members; remove them before retyping`);
           }
         }
       }
@@ -132,7 +125,7 @@ export const listOps = [
     scope: "write",
     handler: async (op, { listId, entityType, entityIds }) => {
       const list = found(await op.ports.lists.get(listId), "list", listId);
-      if (list.entityType && list.entityType !== entityType) {
+      if (!listAccepts(list, entityType)) {
         throw OpError.validation(`List "${list.name}" holds ${list.entityType}s only`);
       }
       const port = {
@@ -151,7 +144,7 @@ export const listOps = [
         operation: "list.addMembers",
         entityType: "list",
         entityId: listId,
-        summary: `Added ${added} ${ENTITY_LABELS[entityType]} to list "${list.name}"`,
+        summary: `Added ${added} ${LISTABLE_LABELS[entityType]} to list "${list.name}"`,
       });
       return { added, alreadyPresent: entityIds.length - added };
     },
@@ -171,7 +164,7 @@ export const listOps = [
         operation: "list.removeMembers",
         entityType: "list",
         entityId: listId,
-        summary: `Removed ${removed} ${ENTITY_LABELS[entityType]} from list "${list.name}"`,
+        summary: `Removed ${removed} ${LISTABLE_LABELS[entityType]} from list "${list.name}"`,
       });
       return { removed };
     },

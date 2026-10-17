@@ -17,6 +17,7 @@ import type {
   Tag,
   User,
 } from "@mcpsuite/core/domain";
+import { listAccepts } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { daysUntil, formatMoneyMinor, relativeTime } from "~/lib/format.ts";
@@ -99,6 +100,7 @@ function DealsPage() {
   const users = useQuery(opQuery<User[]>("user.list"));
   const tags = useQuery(opQuery<Array<Tag & { usage: number }>>("tag.list"));
   const lists = useQuery(opQuery<ContactListWithCounts[]>("list.list"));
+  const eligibleLists = (lists.data ?? []).filter((l) => listAccepts(l, "deal"));
   const offerings = useQuery(opQuery<Offering[]>("offering.list"));
   const moveStage = useOp("deal.updateStage");
 
@@ -354,11 +356,13 @@ function DealsPage() {
           onChange={(e) => patch({ listId: e.target.value || undefined })}
         >
           <option value="">Any list</option>
-          {(lists.data ?? []).map((l) => (
-            <option key={l.id} value={l.id}>
-              {l.name} ({l.deals})
-            </option>
-          ))}
+          {(lists.data ?? [])
+            .filter((l) => listAccepts(l, "deal") || l.id === search.listId)
+            .map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name} ({l.deals})
+              </option>
+            ))}
         </Select>
         <Select
           className="w-auto"
@@ -391,7 +395,7 @@ function DealsPage() {
           ids={selectedIds}
           stages={pipeline?.stages ?? []}
           tags={tags.data ?? []}
-          lists={lists.data ?? []}
+          lists={eligibleLists}
           users={users.data ?? []}
           onDone={() => setSelection({})}
         />

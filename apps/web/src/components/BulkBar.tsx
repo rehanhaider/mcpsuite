@@ -1,6 +1,7 @@
 /** Floating action bar for selected rows: stage, owner, tag, list, archive. */
 import { Archive, ArrowRightLeft, Layers, Tags, UserRound, X } from "lucide-react";
 import type { ContactListWithCounts, ListableType, Stage, Tag, User } from "@mcpsuite/core/domain";
+import { listAccepts } from "@mcpsuite/core/domain";
 import { useOp } from "~/lib/api.ts";
 import { dotClass } from "~/lib/colors.ts";
 import { ButtonSpinner } from "./ui.tsx";
@@ -25,7 +26,7 @@ export function BulkBar(props: {
   const busy = moveStage.isPending || assignOwner.isPending || addTag.isPending || addToList.isPending || archive.isPending;
 
   const stageable = props.entityType === "engagement" || props.entityType === "deal";
-  const eligibleLists = (props.lists ?? []).filter((l) => l.entityType == null || l.entityType === props.entityType);
+  const eligibleLists = (props.lists ?? []).filter((l) => listAccepts(l, props.entityType));
 
   return (
     <div className="sticky top-14 z-20 mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-primary/30 bg-popover px-3 py-2 shadow-lg">

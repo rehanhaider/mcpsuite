@@ -23,6 +23,7 @@ import type {
   Tag,
   User,
 } from "@mcpsuite/core/domain";
+import { listAccepts, LISTABLE_LABELS } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
@@ -503,7 +504,7 @@ export function ListPanel(props: {
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (all.data ?? [])
-      .filter((l) => l.entityType == null || l.entityType === props.surfaceType)
+      .filter((l) => listAccepts(l, props.surfaceType))
       .filter((l) => l.name.toLowerCase().includes(q))
       .sort(
         (a, b) =>
@@ -543,7 +544,7 @@ export function ListPanel(props: {
           </li>
         ) : rows.length === 0 && !search.trim() ? (
           <li className="px-2.5 py-2 text-xs text-muted-foreground">
-            No lists yet — type a name to create one.
+            No {LISTABLE_LABELS[props.surfaceType]} lists yet — type a name to create one.
           </li>
         ) : (
           rows.map((l) => {
