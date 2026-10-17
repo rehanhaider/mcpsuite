@@ -10,10 +10,14 @@
  * OpenAuth subject. Everything here takes an `IdentityStore`, never a
  * database handle, so it runs on every database adapter.
  */
+import { createHash } from "node:crypto";
 import { issuer } from "@openauthjs/openauth";
-import { PasswordProvider } from "@openauthjs/openauth/provider/password";
+import { PasswordProvider, type PasswordRegisterState, type PasswordChangeState } from "@openauthjs/openauth/provider/password";
 import type { StorageAdapter } from "@openauthjs/openauth/storage/storage";
 import {
+  AUTH_CODE_MAX_ATTEMPTS,
+  AUTH_CODE_ISSUE_MAX,
+  AUTH_CODE_ISSUE_WINDOW_MS,
   createOpenAuthStorage,
   deliverAuthCode,
   joinAuthKey,
@@ -31,6 +35,8 @@ const MOUNT = "/api/auth";
 
 const MIN_PASSWORD = 10;
 const MAX_PASSWORD = 200;
+// PasswordProvider 0.4.3 renews its provider cookie for 24 hours on transition.
+const PROVIDER_STATE_TTL_SECONDS = 60 * 60 * 24;
 
 // ---------------------------------------------------------------------------
 // Subjects (hand-rolled standard-schema — no extra validator dependency)
@@ -125,30 +131,78 @@ let cached: { identity: IdentityStore; app: FetchApp } | null = null;
 export function getAuthApp(identity: IdentityStore): FetchApp {
   if (cached && cached.identity === identity) return cached.app;
   const storage = createOpenAuthStorage(identity.authKv) as StorageAdapter;
+  const sendKey = (email: string) => ["mcpsuite", "code-send", normalizeEmail(email)];
+  async function recentSends(email: string): Promise<number[]> {
+    const record = await storage.get(sendKey(email)) as { timestamps: number[] } | undefined;
+    return (record?.timestamps ?? []).filter((time) => time > Date.now() - AUTH_CODE_ISSUE_WINDOW_MS);
+  }
+  const password = PasswordProvider({
+    login: loginUi,
+    register: registerUi,
+    change: changeUi,
+    validatePassword: (password) =>
+      password.length < MIN_PASSWORD
+        ? `Password must be at least ${MIN_PASSWORD} characters`
+        : password.length > MAX_PASSWORD
+          ? `Password must be at most ${MAX_PASSWORD} characters`
+          : undefined,
+    async sendCode(email, code) {
+      // Record only successful delivery, including the self-host display channel.
+      const delivery = await deliverAuthCode({ email, code, purpose: "verify" });
+      const now = Date.now();
+      await storage.set(sendKey(email), { timestamps: [...await recentSends(email), now] }, new Date(now + AUTH_CODE_ISSUE_WINDOW_MS));
+      if (delivery.mode === "display") {
+        console.log(`[mcpsuite] verification code for ${email}: ${code}`);
+      }
+    },
+  });
+  const initPassword = password.init;
+  password.init = (routes, ctx) => {
+    for (const flow of ["register", "change"] as const) {
+      // Register before the provider's POST handlers. Hono caches formData,
+      // so the original handler can read the same form after this middleware.
+      routes.use(`/${flow}`, async (c, next) => {
+        if (c.req.method !== "POST") return next();
+        const form = await c.req.formData();
+        const action = form.get("action")?.toString();
+        const state = await ctx.get<PasswordRegisterState | PasswordChangeState | undefined>(c, "provider");
+        if (!state) return next();
+        const ui = flow === "register" ? registerUi : changeUi;
+        if (action === "verify" && state.type === "code") {
+          const digest = createHash("sha256").update(`${normalizeEmail(state.email)}:${flow}:${state.code}`).digest("hex");
+          const key = ["mcpsuite", "code-attempts", digest];
+          const record = await storage.get(key) as { count: number } | undefined;
+          const count = record?.count ?? 0;
+          if (count >= AUTH_CODE_MAX_ATTEMPTS) {
+            const start = { type: "start", ...("redirect" in state ? { redirect: state.redirect } : {}) };
+            await ctx.set(c, "provider", PROVIDER_STATE_TTL_SECONDS, start);
+            return ctx.forward(c, await ui(c.req.raw, start, form, { type: "too_many_attempts" }));
+          }
+          await next();
+          if (form.get("code")?.toString() !== state.code) {
+            // Outlive every cookie issued for this code, including the failure
+            // response above. Replaying an older cookie retains this count.
+            await storage.set(key, { count: count + 1 }, new Date(Date.now() + PROVIDER_STATE_TTL_SECONDS * 1000));
+          }
+          return;
+        }
+        // 0.4.3 sends on register/start, register/code, and change/code.
+        const email = flow === "register" && action === "register"
+          ? state.type === "code" ? state.email : state.type === "start" ? form.get("email")?.toString() : undefined
+          : flow === "change" && action === "code" ? form.get("email")?.toString() : undefined;
+        if (email && (await recentSends(email)).length >= AUTH_CODE_ISSUE_MAX) {
+          return ctx.forward(c, await ui(c.req.raw, state, form, { type: "too_many_codes" }));
+        }
+        return next();
+      });
+    }
+    initPassword(routes, ctx);
+  };
   const app = issuer({
     storage,
     subjects,
     providers: {
-      password: PasswordProvider({
-        login: loginUi,
-        register: registerUi,
-        change: changeUi,
-        validatePassword: (password) =>
-          password.length < MIN_PASSWORD
-            ? `Password must be at least ${MIN_PASSWORD} characters`
-            : password.length > MAX_PASSWORD
-              ? `Password must be at most ${MAX_PASSWORD} characters`
-              : undefined,
-        async sendCode(email, code) {
-          // OpenAuth's own register/change verification codes go through the
-          // same delivery seam as CRM-issued codes (docs/auth-api.md).
-          const delivery = await deliverAuthCode({ email, code, purpose: "verify" });
-          if (delivery.mode === "display") {
-            // Display mode (self-host): the terminal IS the delivery channel.
-            console.log(`[mcpsuite] verification code for ${email}: ${code}`);
-          }
-        },
-      }),
+      password,
     },
     async success(ctx, value) {
       const linked = await identity.resolveAuthSuccess(value.email, {

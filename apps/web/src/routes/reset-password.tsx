@@ -19,6 +19,8 @@ interface ResetPasswordSearch {
 const CHANGE_FLOW_ERRORS: Record<string, string> = {
   invalid_email: "Enter a valid email address",
   invalid_code: "That code is not valid",
+  too_many_attempts: "Too many attempts. Request a new code.",
+  too_many_codes: "Too many codes. Try again in 15 minutes.",
   invalid_password: "Enter a valid password (10+ characters)",
   password_mismatch: "Passwords do not match",
 };
