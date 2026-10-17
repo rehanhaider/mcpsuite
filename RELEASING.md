@@ -1,28 +1,30 @@
 # Releasing
 
 Releases are **tag-driven**: pushing a `vX.Y.Z` tag runs
-`.github/workflows/release.yml`, which publishes container images, builds
-per-arch tarballs, and creates a GitHub Release. `package.json` at the repo
-root is the single version source — the tag must match it.
+`.github/workflows/release.yml`, which publishes the container image and
+creates a GitHub Release with the source archive and its SHA256 checksums.
+`package.json` at the repo root is the single version source — the tag must
+match it.
 
 ## Cutting a release
 
 1. Bump `version` in `package.json`, commit.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-3. Watch the **Release** workflow. Four jobs:
+3. Watch the **Release** workflow. Three jobs:
    - **preflight** — tag ↔ `package.json` version match, secrets audit.
      Fails early and loudly on any mismatch; nothing gets half-published.
    - **image** — one multi-arch build (`linux/amd64` + `linux/arm64`, buildx +
      QEMU) pushed to GHCR always, and to Docker Hub when its secrets exist.
-   - **tarball** (×2, `x86_64` / `arm64`) — runs
-     `.scripts/release/build-tarball.sh --arch <arch>`, then smoke-tests the
-     artifact: executes the bundled `node` natively (each arch builds on a matching
-     runner: `ubuntu-latest` / `ubuntu-24.04-arm`), verifies
-     the ELF arch of both `node` and `better_sqlite3.node` (a **native**
-     module), and opens a real in-memory database through it. A wrong-arch or
-     broken artifact fails the job — it is never attached to a release.
-   - **publish** — GitHub Release for the tag with both tarballs +
-     `SHA256SUMS` (`sha256sum -c SHA256SUMS` verifies downloads).
+   - **publish** — runs after preflight and image. Creates the GitHub Release
+     for the tag with the source archive `mcpsuite-crm-X.Y.Z-source.tar.gz`
+     (`git archive` of the tagged commit) and `SHA256SUMS` for it
+     (`sha256sum -c SHA256SUMS` verifies the download). The job summary lists
+     the image's `sha256:` digest, which is the same for every tag on both
+     registries.
+
+`SHA256SUMS` covers the attached source archive only. GitHub's automatic
+"Source code (zip / tar.gz)" links are not release assets and have no
+published checksum.
 
 A version with a `-` (e.g. `v0.5.0-rc.1`) is marked prerelease and does not
 move the `latest` image tags.
@@ -76,8 +78,8 @@ Change visibility → Public. One-time.
 
 - **Re-runs are idempotent**: image tags are overwritten in place; if the
   GitHub Release already exists, assets are re-uploaded with `--clobber`.
-- **Images push before the Release is created.** If a tarball job fails, the
-  images for that version are already live but no GitHub Release exists —
+- **Images push before the Release is created.** If the publish job fails,
+  the images for that version are already live but no GitHub Release exists —
   fix, then re-run the workflow for the same tag.
 - **`latest` follows the most recently pushed tag**, not the highest version.
   After tagging a backport (e.g. `v0.1.1` after `v0.2.0`), re-run the newest
@@ -86,18 +88,9 @@ Change visibility → Public. One-time.
   minutes). If this becomes painful, split the image job onto a native
   `ubuntu-24.04-arm` runner (free for public repos).
 
-## Contract with `.scripts/release/build-tarball.sh`
+## CI
 
-The workflow assumes: invoked as `build-tarball.sh --arch x86_64` or
-`--arch arm64` from an installed workspace; produces exactly **one** `.tar.gz`
-per invocation, either in `dist-release/` (preferred) or anywhere outside
-`node_modules/` (discovered by mtime, `node-*.tar.gz` runtime downloads
-excluded); the tarball is self-contained — bundled `node` binary plus
-`better-sqlite3` (including its `better_sqlite3.node` binding) for the target
-arch. If any of that changes, update the `Locate tarball` and smoke steps in
-`release.yml`.
-
-CI note (`ci.yml`): PRs and pushes to `main` run install → build → test →
+`ci.yml`: PRs and pushes to `main` run install → build → test →
 typecheck with plain `actions/setup-node` + corepack pnpm 10 (no mise). Build
 precedes typecheck because `apps/web/src/routeTree.gen.ts` is generated and
 gitignored. No secrets are used, so fork PRs are safe.

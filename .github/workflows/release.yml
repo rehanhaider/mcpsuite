@@ -6,8 +6,7 @@
 #   Jobs:
 #     preflight  version/tag match + secrets audit (fails loud, early)
 #     image      multi-arch container -> GHCR always, Docker Hub when secrets exist
-#     tarball    per-arch self-contained tarballs + native smoke test (matrix)
-#     publish    GitHub Release with tarballs + SHA256SUMS
+#     publish    GitHub Release with the source archive + SHA256SUMS
 #
 #   Dormancy: this repo may have ZERO secrets configured. GHCR publishing uses
 #   the always-present GITHUB_TOKEN, so a tag push always produces images.
@@ -49,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate tag, version source, build script, and secrets
+      - name: Validate tag, version source, and secrets
         id: checks
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -71,11 +70,6 @@ jobs:
           PKG_VERSION="$(node -p "require('./package.json').version")"
           if [[ "$VERSION" != "$PKG_VERSION" ]]; then
             echo "::error title=Tag/version mismatch::Tag $TAG says version '$VERSION' but package.json says '$PKG_VERSION'. Bump package.json, commit, delete the tag, re-tag."
-            exit 1
-          fi
-
-          if [[ ! -f .scripts/release/build-tarball.sh ]]; then
-            echo "::error title=Missing build script::.scripts/release/build-tarball.sh not found — the tarball jobs would fail. Add the script before tagging releases."
             exit 1
           fi
 
@@ -128,6 +122,10 @@ jobs:
     # which is slow. Native arm runners are the upgrade path — see RELEASING.md.
     timeout-minutes: 120
     needs: preflight
+    outputs:
+      # One manifest list is pushed under every tag, so the digest is the same
+      # on GHCR and Docker Hub.
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write # push to GHCR
@@ -178,6 +176,7 @@ jobs:
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
       - name: Build and push (linux/amd64, linux/arm64)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -194,172 +193,30 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ---------------------------------------------------------------------------
-  tarball:
-    name: Tarball (${{ matrix.arch }})
-    # Native runner per arch: better-sqlite3 is a native module and
-    # build-tarball.sh refuses cross-arch builds (a cross-built binding would
-    # crash on load), so the arm64 leg runs on GitHub's free-for-public-repos
-    # arm64 runner and everything — install, build, smoke — is native.
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    needs: preflight
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      # After setup-node on purpose: node 22 bundles corepack, newer runner
-      # system nodes may not.
-      - name: Set up pnpm 10 (corepack)
-        run: |
-          corepack enable
-          corepack prepare pnpm@latest-10 --activate
-
-      - name: Install workspace
-        run: pnpm install --frozen-lockfile
-
-      - name: Build tarball
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          touch .tarball-marker
-          bash .scripts/release/build-tarball.sh --arch "$ARCH"
-
-      - name: Locate tarball
-        id: locate
-        run: |
-          set -euo pipefail
-          # build-tarball.sh writes dist-release/; the mtime fallback below
-          # only exists to catch the script moving without this step keeping
-          # up (it excludes node runtime downloads and dependency dirs).
-          FOUND=()
-          if [[ -d dist-release ]]; then
-            mapfile -t FOUND < <(find dist-release -maxdepth 1 -name '*.tar.gz' | sort)
-          fi
-          if [[ ${#FOUND[@]} -eq 0 ]]; then
-            mapfile -t FOUND < <(find . -name '*.tar.gz' -newer .tarball-marker \
-              -not -path './node_modules/*' -not -path './.git/*' \
-              -not -name 'node-*' | sort)
-          fi
-          if [[ ${#FOUND[@]} -eq 0 ]]; then
-            echo "::error title=No tarball produced::build-tarball.sh exited 0 but no .tar.gz was found (checked dist-release/ and files newer than the build marker). If the script writes somewhere else, update the 'Locate tarball' step."
-            exit 1
-          fi
-          if [[ ${#FOUND[@]} -gt 1 ]]; then
-            echo "::error title=Ambiguous tarball::Expected exactly one artifact per arch, found ${#FOUND[@]}:"
-            printf '  %s\n' "${FOUND[@]}"
-            exit 1
-          fi
-          mkdir -p release-assets
-          cp "${FOUND[0]}" release-assets/
-          echo "Tarball: ${FOUND[0]} ($(du -h "${FOUND[0]}" | cut -f1))"
-          echo "tarball=release-assets/$(basename "${FOUND[0]}")" >> "$GITHUB_OUTPUT"
-
-      # better-sqlite3 is a NATIVE module: a wrong-arch build would ship a
-      # tarball that crashes on the user's machine. This step executes the
-      # bundled node natively (the runner matches the target arch) and opens
-      # a real database, so an arch problem fails THIS JOB, never the user.
-      - name: Smoke test (bundled node + better-sqlite3 under target arch)
-        env:
-          ARCH: ${{ matrix.arch }}
-          TARBALL: ${{ steps.locate.outputs.tarball }}
-        run: |
-          set -euo pipefail
-          case "$ARCH" in
-            x86_64) ELF_PAT='x86-64' ;;
-            arm64)  ELF_PAT='aarch64' ;;
-            *) echo "::error::Unknown arch '$ARCH'"; exit 1 ;;
-          esac
-
-          SMOKE_DIR="$(mktemp -d)"
-          tar -xzf "$TARBALL" -C "$SMOKE_DIR"
-
-          NODE_BIN="$(find "$SMOKE_DIR" -type f -name node | sort | head -n 1)"
-          if [[ -z "$NODE_BIN" ]]; then
-            echo "::error title=Not self-contained::$TARBALL contains no bundled 'node' binary."
-            exit 1
-          fi
-          echo "bundled node: $NODE_BIN"
-          file "$NODE_BIN"
-          if ! file -b "$NODE_BIN" | grep -q "$ELF_PAT"; then
-            echo "::error title=Wrong-arch runtime::Bundled node is not a $ARCH ($ELF_PAT) binary — build-tarball.sh --arch was not honored."
-            exit 1
-          fi
-          "$NODE_BIN" --version
-
-          BINDING="$(find "$SMOKE_DIR" -type f -name 'better_sqlite3.node' | sort | head -n 1)"
-          if [[ -z "$BINDING" ]]; then
-            echo "::error title=Missing native binding::No better_sqlite3.node found in the tarball — the CRM cannot open its database without it."
-            exit 1
-          fi
-          file "$BINDING"
-          if ! file -b "$BINDING" | grep -q "$ELF_PAT"; then
-            echo "::error title=Wrong-arch native module::better_sqlite3.node is '$(file -b "$BINDING")', expected $ARCH ($ELF_PAT). This artifact would crash on load."
-            exit 1
-          fi
-
-          BS3_PKG="$(find "$SMOKE_DIR" -type d -path '*node_modules/better-sqlite3' | sort | head -n 1)"
-          if [[ -z "$BS3_PKG" ]]; then
-            echo "::error title=Layout surprise::better_sqlite3.node exists but no node_modules/better-sqlite3 package dir was found, so the load test cannot run. If the layout is intentional, adjust this smoke step."
-            exit 1
-          fi
-          "$NODE_BIN" -e '
-            const Database = require(process.argv[1]);
-            const db = new Database(":memory:");
-            db.exec("CREATE TABLE smoke (n INTEGER)");
-            db.prepare("INSERT INTO smoke (n) VALUES (?)").run(42);
-            const row = db.prepare("SELECT n FROM smoke").get();
-            if (row.n !== 42) throw new Error("unexpected row: " + JSON.stringify(row));
-            db.close();
-            console.log("better-sqlite3 native binding loaded and executed OK on", process.arch);
-          ' "$BS3_PKG"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tarball-${{ matrix.arch }}
-          path: release-assets/*
-          if-no-files-found: error
-          retention-days: 7
-
-  # ---------------------------------------------------------------------------
   publish:
     name: GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [preflight, image, tarball]
+    needs: [preflight, image]
     permissions:
       contents: write # create the release + upload assets
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: tarball-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Generate SHA256SUMS
+      # The source release is an archive of the tagged commit (HEAD here),
+      # attached as an asset so SHA256SUMS covers it. GitHub's automatic
+      # "Source code" links are not assets and are not in SHA256SUMS.
+      - name: Source archive + SHA256SUMS
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
+          NAME="mcpsuite-crm-${VERSION}-source"
+          mkdir -p release-assets
+          git archive --format=tar.gz --prefix="${NAME}/" \
+            -o "release-assets/${NAME}.tar.gz" HEAD
           cd release-assets
-          COUNT="$(find . -maxdepth 1 -name '*.tar.gz' | wc -l)"
-          if [[ "$COUNT" -lt 2 ]]; then
-            echo "::error title=Missing artifacts::Expected one tarball per architecture (2 total), found $COUNT. Did both arches produce the same filename?"
-            ls -la
-            exit 1
-          fi
-          sha256sum ./*.tar.gz | sed 's|\./||' > SHA256SUMS
+          sha256sum "${NAME}.tar.gz" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create or update the GitHub Release
@@ -386,6 +243,7 @@ jobs:
           DOCKERHUB: ${{ needs.preflight.outputs.dockerhub }}
           GHCR_IMAGE: ${{ needs.preflight.outputs.ghcr_image }}
           DOCKERHUB_IMAGE: ${{ needs.preflight.outputs.dockerhub_image }}
+          DIGEST: ${{ needs.image.outputs.digest }}
         run: |
           set -euo pipefail
           {
@@ -397,6 +255,7 @@ jobs:
             else
               echo "- Docker Hub: **skipped** (secrets not configured — see RELEASING.md)"
             fi
+            echo "- Image digest: \`${DIGEST}\`"
             echo "- Assets:"
             for f in release-assets/*; do
               echo "  - \`$(basename "$f")\`"
