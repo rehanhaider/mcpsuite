@@ -9,7 +9,7 @@ import { resolvePipelineStage } from "./engagement-ops.ts";
 
 const zGet = z.object({ id: zId });
 
-async function logDealStageChange(
+export async function logDealStageChange(
   op: OpCtx,
   deal: Deal,
   toStageName: string,

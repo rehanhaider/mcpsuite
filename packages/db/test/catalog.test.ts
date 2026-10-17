@@ -216,6 +216,46 @@ describe("engagements", () => {
     expect(statusChange.body).toBe("replied!");
   });
 
+  it("bulk stage moves log status changes for engagements and deals", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Acme" }));
+    const person = await ok(run(owner, "person.create", { name: "Ada", companyId: company.id }));
+
+    for (const entityType of ["engagement", "deal"] as const) {
+      const record = await ok(
+        run(owner, `${entityType}.create`, {
+          title: "Bulk stage move",
+          companyId: company.id,
+          ...(entityType === "engagement" ? { personId: person.id } : { primaryPersonId: person.id }),
+        }),
+      );
+      const pipelines = await ok(run(owner, "pipeline.list", { type: entityType }));
+      const from = pipelines[0].stages.find((s: any) => s.id === record.stageId);
+      const stage = pipelines[0].stages[2];
+      const moved = await ok(run(owner, "bulk.updateStage", { entityType, ids: [record.id], stageId: stage.id }));
+      expect(moved).toEqual({ updated: 1, skipped: 0 });
+
+      const activities = await ok(run(owner, "activity.list", { [`${entityType}Id`]: record.id }));
+      const statusChanges = activities.items.filter((a: any) => a.kind === "status_change");
+      expect(statusChanges).toHaveLength(1);
+      expect(statusChanges[0]).toMatchObject({
+        [`${entityType}Id`]: record.id,
+        companyId: company.id,
+        personId: person.id,
+        title: `Stage: ${from.name} → ${stage.name}`,
+        body: null,
+        meta:
+          entityType === "engagement"
+            ? { fromStageId: record.stageId, toStageId: stage.id, entity: entityType }
+            : { entity: entityType },
+        actorType: "human",
+        actorUserId: ownerUserId,
+      });
+      const after = await ok(run(owner, `${entityType}.get`, { id: record.id }));
+      expect(after.stageId).toBe(stage.id);
+      expect(after.lastActivityAt).toBeTruthy();
+    }
+  });
+
   it("logging an activity bumps lastActivityAt", async () => {
     const engagement = await ok(run(owner, "engagement.create", { title: "Test lead" }));
     expect(engagement.lastActivityAt).toBeNull();
