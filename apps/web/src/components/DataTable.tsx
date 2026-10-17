@@ -1,7 +1,8 @@
 /**
  * DataTable — TanStack Table v8 wrapper with server-side sort/pagination,
  * row selection for bulk actions, sticky header, skeleton loading and an
- * empty state. All list pages run through this.
+ * empty state. Columns opt into sorting with enableSorting: true.
+ * All list pages run through this.
  */
 import {
   flexRender,
@@ -14,6 +15,7 @@ import {
 } from "@tanstack/react-table";
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
+import { nextSorting } from "~/lib/sorting.ts";
 import { EmptyState } from "./ui.tsx";
 import { Button } from "~/components/ui/button";
 import { Checkbox } from "~/components/ui/checkbox";
@@ -128,11 +130,21 @@ export function DataTable<T>(props: DataTableProps<T>) {
                 </th>
               ) : null}
               {hg.headers.map((header) => {
-                const canSort = header.column.getCanSort();
-                const dir = header.column.getIsSorted();
+                const canSort = header.column.columnDef.enableSorting === true;
+                const sorted = props.sorting.find(
+                  (entry) => entry.id === header.column.id,
+                );
+                const dir = sorted ? (sorted.desc ? "desc" : "asc") : undefined;
                 return (
                   <th
                     key={header.id}
+                    aria-sort={
+                      dir === "asc"
+                        ? "ascending"
+                        : dir === "desc"
+                          ? "descending"
+                          : undefined
+                    }
                     className="px-3 py-2 text-left font-medium whitespace-nowrap"
                     style={{
                       width:
@@ -145,7 +157,11 @@ export function DataTable<T>(props: DataTableProps<T>) {
                         variant="ghost"
                         size="xs"
                         className="-ml-2 h-6 gap-1 px-2 text-[11px] tracking-wider uppercase"
-                        onClick={header.column.getToggleSortingHandler()}
+                        onClick={() =>
+                          props.onSortingChange(
+                            nextSorting(props.sorting, header.column.id),
+                          )
+                        }
                       >
                         {flexRender(
                           header.column.columnDef.header,
