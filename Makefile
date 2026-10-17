@@ -104,31 +104,3 @@ autostart-status: ## Show enabled/active state of the web UI & MCP services
 			"$$(systemctl --user is-enabled $$u 2>/dev/null || echo absent)" \
 			"$$(systemctl --user is-active  $$u 2>/dev/null || echo inactive)"; \
 	done
-
-# -----------------------------------------------------------------------------
-# Release tarball + machine-wide installer (.scripts/release, .scripts/installer)
-# Docs: INSTALL.md
-# -----------------------------------------------------------------------------
-
-RELEASE_SCRIPTS := .scripts/release/build-tarball.sh \
-                   .scripts/release/payload/mcpsuite-run \
-                   .scripts/release/payload/mcpsuite-tsx \
-                   .scripts/installer/install.sh \
-                   .scripts/installer/launcher.sh \
-                   .scripts/installer/mcpsuite
-
-.PHONY: release-tarball release-check
-
-release-tarball: ## Build a self-contained release tarball into dist-release/ (ARCH=x86_64|arm64)
-	bash .scripts/release/build-tarball.sh $(if $(ARCH),--arch $(ARCH))
-
-release-check: ## Syntax-check installer + release scripts (shellcheck when available)
-	@for f in $(RELEASE_SCRIPTS); do \
-		bash -n "$$f" || exit 1; \
-		echo "  bash -n OK   $$f"; \
-	done
-	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck $(RELEASE_SCRIPTS) && echo "  shellcheck OK"; \
-	else \
-		echo "  (shellcheck not installed — skipped)"; \
-	fi

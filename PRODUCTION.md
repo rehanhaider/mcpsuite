@@ -1,9 +1,9 @@
 # Self-hosting MCP Suite CRM
 
-This runbook describes the current source checkout. Supported release
-installers, npm installation, and prebuilt images will be added only when the
-product is ready for its first stable release. The tested host platform is
-64-bit Linux; Windows and macOS are not supported release targets.
+This runbook describes installation from a source checkout. For Docker
+Compose installation with published images, see [INSTALL.md](INSTALL.md).
+The tested host platform is 64-bit Linux; Windows and macOS are not supported
+release targets.
 
 ## One process, one port
 
@@ -23,6 +23,9 @@ independently — it shares the same per-request handling and auth as the
 in-process endpoint — but the default install does not run it.
 
 ## Docker Compose
+
+For installation, version pinning, updates, and owner recovery, see
+[INSTALL.md](INSTALL.md).
 
 ```sh
 docker compose pull
@@ -71,12 +74,10 @@ mise exec -- make autostart
 mise exec -- make autostart-status
 ```
 
-The current autostart target installs systemd **user** services. It is
-intended for development and early self-hosting, not yet the final
-machine-wide installer. The web service alone is a complete install (it
-serves `/mcp` itself); the separate MCP HTTP service is only needed if you
-want MCP on its own port (`make autostart SVC=web` installs just the web
-service).
+The autostart target installs systemd **user** services from this checkout.
+The web service alone is a complete install, as it serves `/mcp` itself.
+The separate MCP HTTP service is only needed if you want MCP on its own
+port (`make autostart SVC=web` installs just the web service).
 
 After pulling source changes (this also refreshes the installed unit files):
 

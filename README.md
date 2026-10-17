@@ -5,8 +5,10 @@ application and every MCP client use the same typed operation catalog, with
 role checks, scoped agent keys, approval gates for risky agent actions, and a
 shared audit trail.
 
-> **Pre-release:** the source is public, but the supported installer, npm
-> package, container image, and stable release are not published yet.
+> **Pre-release:** the source is public; container images and a stable release
+> are not published yet. See [INSTALL.md](INSTALL.md) for Docker Compose
+> installation with published images and [PRODUCTION.md](PRODUCTION.md) for
+> installation from source.
 
 ## What is included
 
@@ -38,6 +40,9 @@ the SQLite database at `data/mcpsuite.db` and prints the initial owner credentia
 change the password after signing in.
 
 ## Run with Docker
+
+See [INSTALL.md](INSTALL.md) for installation, version pinning, updates, and
+owner recovery.
 
 ```sh
 docker compose pull
