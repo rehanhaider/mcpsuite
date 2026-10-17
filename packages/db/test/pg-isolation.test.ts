@@ -28,7 +28,7 @@
  * default `make test` suite ignores it (and never needs the pg driver).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { OpError, buildCatalog, runOperation, systemContext, type ActorStamp, type RequestContext } from "@mcpsuite/core";
+import { OpError, buildCatalog, newId, runOperation, systemContext, toErrorPayload, type ActorStamp, type RequestContext } from "@mcpsuite/core";
 import {
   connectPg,
   createPgPorts,
@@ -624,38 +624,35 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
   });
 
   it("relationship writes cannot attach A children to B parents (composite FKs)", async () => {
-    // A company ↔ B person and vice versa.
-    await expect(portsA.people.link({ companyId: A.companyId, personId: B.personId })).rejects.toThrow();
-    await expect(portsA.people.link({ companyId: B.companyId, personId: A.personId })).rejects.toThrow();
-    // Stakeholder with a B person.
-    await expect(portsA.deals.addStakeholder({ dealId: A.dealId, personId: B.personId })).rejects.toThrow();
-    // Tagging across workspaces, both directions.
-    await expect(portsA.tags.apply(A.tagId, "company", B.companyId)).rejects.toThrow();
-    await expect(portsA.tags.apply(B.tagId, "company", A.companyId)).rejects.toThrow();
-    // List membership with B entities.
-    await expect(portsA.lists.addMembers(A.listId, "person", [B.personId])).rejects.toThrow();
-    // Offering link to a B deal.
-    await expect(
-      portsA.offerings.link({ offeringId: A.offeringId, entityType: "deal", entityId: B.dealId }),
-    ).rejects.toThrow();
-    // Custom field value on a B company.
-    await expect(portsA.customFields.setValue(A.fieldId, "company", B.companyId, "High")).rejects.toThrow();
-    // Engagement pointing at a B pipeline/stage pair.
-    await expect(
-      portsA.engagements.create({
-        title: "Smuggled lead",
-        pipelineId: B.engagementPipelineId,
-        stageId: B.engagementStageIds[0]!,
-      }),
-    ).rejects.toThrow();
-    // Stage must belong to the referenced pipeline even inside A.
-    await expect(
-      portsA.engagements.create({
-        title: "Wrong stage pairing",
-        pipelineId: A.engagementPipelineId,
-        stageId: A.dealStageIds[0]!,
-      }),
-    ).rejects.toThrow();
+    const sameError = async (foreignId: string, write: (id: string) => Promise<unknown>) => {
+      const randomId = newId();
+      const failure = async (id: string) => {
+        try {
+          await write(id);
+        } catch (error) {
+          const payload = toErrorPayload(error);
+          expect(payload).toMatchObject({ code: "not_found", message: "Referenced record not found" });
+          expect(payload.message).not.toMatch(/select|insert|update|delete|violates|constraint|relation|column|syntax|\bSQL\b|duplicate key/i);
+          return payload;
+        }
+        throw new Error("Expected a relationship failure");
+      };
+      expect(await failure(foreignId)).toEqual(await failure(randomId));
+    };
+    await sameError(B.personId, (personId) => portsA.people.link({ companyId: A.companyId, personId }));
+    await sameError(B.companyId, (companyId) => portsA.people.link({ companyId, personId: A.personId }));
+    await sameError(B.personId, (personId) => portsA.deals.addStakeholder({ dealId: A.dealId, personId }));
+    await sameError(B.companyId, (id) => portsA.tags.apply(A.tagId, "company", id));
+    await sameError(B.tagId, (id) => portsA.tags.apply(id, "company", A.companyId));
+    await sameError(B.personId, (id) => portsA.lists.addMembers(A.listId, "person", [id]));
+    await sameError(B.dealId, (id) => portsA.offerings.link({ offeringId: A.offeringId, entityType: "deal", entityId: id }));
+    await sameError(B.companyId, (id) => portsA.customFields.setValue(A.fieldId, "company", id, "High"));
+    await sameError(B.engagementPipelineId, (pipelineId) => portsA.engagements.create({
+      title: "Smuggled lead", pipelineId, stageId: B.engagementStageIds[0]!,
+    }));
+    await sameError(A.dealStageIds[0]!, (stageId) => portsA.engagements.create({
+      title: "Wrong stage pairing", pipelineId: A.engagementPipelineId, stageId,
+    }));
 
     // B's rows unaffected by all of the above.
     expect((await portsB.companies.people(B.companyId)).length).toBe(1);

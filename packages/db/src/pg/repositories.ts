@@ -555,7 +555,15 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
    * another Ports object or by the identity store — and binds or checks its
    * workspace (a transaction can never change workspaces).
    */
-  const run = <T>(fn: (x: PgDb) => Promise<T>): Promise<T> => inPgTransaction(db, ws, fn);
+  const run = async <T>(fn: (x: PgDb) => Promise<T>): Promise<T> => {
+    try {
+      return await inPgTransaction(db, ws, fn);
+    } catch (error) {
+      // A hidden parent and an absent parent must have the same public error.
+      if (pgErrorCode(error) === "23503") throw new OpError("not_found", "Referenced record not found");
+      throw error;
+    }
+  };
 
   /** Normalized raw-SQL rows (node-postgres returns a QueryResult). */
   const execRows = async <T = Record<string, unknown>>(x: PgDb, q: SQL): Promise<T[]> => {

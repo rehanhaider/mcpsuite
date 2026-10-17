@@ -72,6 +72,5 @@ export function toErrorPayload(e: unknown): ErrorPayload {
   if (e instanceof OpError) {
     return { code: e.code, message: e.message, ...(e.details ? { details: e.details } : {}) };
   }
-  const message = e instanceof Error ? e.message : String(e);
-  return { code: "internal", message };
+  return { code: "internal", message: "An internal error occurred" };
 }
