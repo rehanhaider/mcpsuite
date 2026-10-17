@@ -6,8 +6,19 @@ import { opQuery, useOp } from "~/lib/api.ts";
 import { ButtonSpinner, Field, SectionCard, Spinner } from "~/components/ui.tsx";
 import { Button } from "~/components/ui/button.tsx";
 import { Input } from "~/components/ui/input.tsx";
+import { version } from "../../../../package.json";
 
 export const Route = createFileRoute("/app/admin/")({ component: WorkspaceSettings });
+
+export function SystemInfo() {
+  return (
+    <SectionCard title="System">
+      <Field label="Version">
+        <span className="font-mono">{version}</span>
+      </Field>
+    </SectionCard>
+  );
+}
 
 function WorkspaceSettings() {
   const ws = useQuery(opQuery<Workspace>("workspace.get"));
@@ -54,6 +65,8 @@ function SettingsForm({ workspace }: { workspace: Workspace }) {
           </Field>
         </div>
       </SectionCard>
+
+      <SystemInfo />
 
       <div className="flex justify-end">
         <Button
