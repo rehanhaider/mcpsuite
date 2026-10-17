@@ -2602,11 +2602,12 @@ export function createPorts(db: Db, workspaceId: string): Ports {
   //      the event loop; with async handlers two in-flight requests could
   //      otherwise interleave BEGINs on the shared connection.
   //
-  // Nested tx() calls join the outer transaction. Nesting is scoped to the
-  // request's async call chain (one AsyncLocalStorage per connection, shared
-  // with the identity store), so a nested call through a different Ports
-  // instance or through the identity store joins too, while other requests
-  // queue on the lock.
+  // Nested tx() calls open a savepoint inside the outer transaction, so a
+  // rejected inner call rolls back only its own writes. Nesting is scoped to
+  // the request's async call chain (one AsyncLocalStorage per connection,
+  // shared with the identity store), so a nested call through a different
+  // Ports instance or through the identity store nests too, while other
+  // requests queue on the lock.
   //
   // Async-capable adapters (e.g. a future Postgres one) should NOT copy this
   // shape — they can use real client transactions (BEGIN…COMMIT on a

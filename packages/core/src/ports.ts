@@ -428,7 +428,8 @@ export interface Ports {
   search: SearchPort;
   maintenance: MaintenancePort;
   /**
-   * Run fn atomically. Nested calls join the outer transaction.
+   * Run fn atomically. A nested call runs in a savepoint of the outer
+   * transaction: when it rejects, only its own writes roll back.
    * Adapters must guarantee the awaited fn commits only after it fully
    * resolves and rolls back when it rejects.
    */
