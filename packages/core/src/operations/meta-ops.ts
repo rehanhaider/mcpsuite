@@ -305,7 +305,9 @@ export const savedViewOps = [
       if (view.visibility === "private" && view.ownerUserId !== op.ctx.userId && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
         throw OpError.forbidden("Not your view");
       }
-      return op.ports.savedViews.update(id, definedOnly(patch));
+      const updated = await op.ports.savedViews.update(id, definedOnly(patch));
+      await audit(op, { operation: "savedView.update", entityType: "saved_view", entityId: id, summary: `Updated saved view "${updated.name}"` });
+      return updated;
     },
   }),
 
@@ -323,6 +325,7 @@ export const savedViewOps = [
         throw OpError.forbidden("Not your view");
       }
       await op.ports.savedViews.delete(id);
+      await audit(op, { operation: "savedView.delete", entityType: "saved_view", entityId: id, summary: `Deleted saved view "${view.name}"` });
       return { deleted: id };
     },
   }),
