@@ -2,6 +2,7 @@ export { getDb, openDatabase, closeDb, resolveDbPath, initSchema, type Db } from
 export { createPorts } from "./repositories.ts";
 export { bootstrap, DEFAULT_DEAL_STAGES, DEFAULT_ENGAGEMENT_STAGES, type BootstrapResult } from "./bootstrap.ts";
 export {
+  checkDatabaseHealth,
   createRuntime,
   createRuntimeFromEnv,
   getRuntime,

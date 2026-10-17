@@ -46,6 +46,8 @@ import { runGated } from "./gated-run.ts";
  */
 export interface RuntimeCore {
   adapter: "sqlite" | "postgres";
+  /** Read a CRM table to check readiness without returning row data. */
+  ping(): Promise<void>;
   catalog: Catalog;
   portsFor(workspaceId: string): Ports;
   /** Sign-in, sessions, codes, MCP keys and the request gates (./identity.ts). */
@@ -97,6 +99,9 @@ export function createRuntime(db: Db = getDb()): Runtime {
   const portsFor = (workspaceId: string) => createPorts(db, workspaceId);
   return {
     adapter: "sqlite",
+    ping: async () => {
+      db.$client.prepare("SELECT 1 FROM workspaces LIMIT 1").get();
+    },
     db,
     catalog,
     bootstrapResult,
@@ -132,6 +137,17 @@ export function getRuntimeAsync(): Promise<AnyRuntime> {
     });
   }
   return processRuntime;
+}
+
+/** Runtime acquisition and CRM reads must both succeed for readiness. */
+export async function checkDatabaseHealth(getRuntime: () => Promise<AnyRuntime>): Promise<boolean> {
+  try {
+    const runtime = await getRuntime();
+    await runtime.ping();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function acquireProcessRuntime(): Promise<AnyRuntime> {
@@ -190,6 +206,15 @@ async function createHostedRuntime(databaseUrl: string, pingTimeoutMs: number): 
   }
   return {
     adapter: "postgres",
+    ping: async () => {
+      // crm_app can SELECT this table. With no workspace context, forced
+      // RLS returns zero rows; successful execution is all readiness needs.
+      await withTimeout(
+        pg.handle.pool.query("SELECT 1 FROM crm.workspaces LIMIT 1"),
+        pingTimeoutMs,
+        "PostgreSQL readiness check",
+      );
+    },
     catalog: pg.catalog,
     portsFor: pg.portsFor,
     identity: pg.identity,
