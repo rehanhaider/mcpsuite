@@ -1057,6 +1057,24 @@ describe("search + import/export", () => {
       expect(preview).toMatchObject({ newCompanies: 0, existingCompanyMatches: 1 });
     });
   });
+
+  it("an imported lead's title names the person it links to, as stored (issue #27)", async () => {
+    const acme = await ok(run(owner, "company.create", { name: "Acme" }));
+    // Matching ignores surrounding spaces, so a matched person's stored name can differ from the CSV cell.
+    const tara = await ok(run(owner, "person.create", { name: "Tara Walsh ", email: "tara@acme.io", companyId: acme.id }));
+    const csv = "Company,Contact,Email\nAcme,Tara Walsh,tara@acme.io\nAcme,Tara W.,tara@acme.io\n";
+    const result = await ok(run(owner, "import.run", { csv, sourceLabel: "issue-27" }));
+    // Row 1 is Tara; row 2's name differs, so it is a new person even though the email is hers.
+    expect(result).toMatchObject({ peopleMatched: 1, peopleCreated: 1, engagementsCreated: 2 });
+
+    const leads = (await ports.engagements.list({ includeArchived: false, sort: "createdAt", dir: "asc", limit: 10, offset: 0 })).items;
+    expect(leads).toHaveLength(2);
+    const taraLead = leads.find((lead) => lead.personId === tara.id)!;
+    const otherLead = leads.find((lead) => lead.personId !== tara.id)!;
+    expect(taraLead.title).toBe(`${tara.name} @ Acme`);
+    expect((await ports.people.get(otherLead.personId!))?.name).toBe("Tara W.");
+    expect(otherLead.title).toBe("Tara W. @ Acme");
+  });
 });
 
 describe("admin", () => {
