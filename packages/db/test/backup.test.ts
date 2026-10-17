@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -60,6 +60,21 @@ afterEach(() => {
 });
 
 describe("data.backup", () => {
+  it("creates distinct files for backups in the same millisecond", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      const first = await ok<{ path: string }>(run(owner, "data.backup"));
+      const second = await ok<{ path: string }>(run(owner, "data.backup"));
+
+      expect(second.path).not.toBe(first.path);
+      expect(existsSync(first.path)).toBe(true);
+      expect(existsSync(second.path)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("creates distinct files for back-to-back backups", async () => {
     const first = await ok<{ path: string }>(run(owner, "data.backup"));
     const second = await ok<{ path: string }>(run(owner, "data.backup"));

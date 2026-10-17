@@ -9,6 +9,7 @@
  */
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import Database from "better-sqlite3";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
@@ -2523,7 +2524,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       const dir = join(dirname(dbPath), "backups");
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
-      const dest = join(dir, `mcpsuite-${stamp}.db`);
+      const dest = join(dir, `mcpsuite-${stamp}-${randomBytes(4).toString("hex")}.db`);
       // The catalog runs every operation inside a transaction; SQLite refuses
       // VACUUM inside one, so the backup needs its own connection.
       const backup = new Database(dbPath, { readonly: true, fileMustExist: true });
