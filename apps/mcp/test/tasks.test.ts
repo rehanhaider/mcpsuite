@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { runOperation, type OperationDef, type RequestContext } from "@mcpsuite/core";
+import { actorStamp, runOperation, type OperationDef, type RequestContext } from "@mcpsuite/core";
 import { createRuntime, mcpContext, openDatabase, type Db, type Runtime } from "@mcpsuite/db";
 import { handleMcpRequest } from "../src/handler.ts";
 import { WORKSPACE_LOCKED_RPC_CODE } from "../src/server.ts";
@@ -165,6 +165,42 @@ describe("MCP approval tasks over HTTP", () => {
     expect(state).toMatchObject({ resultType: "complete", status: "completed" });
     expect(state.result.isError).toBeUndefined();
     expect(JSON.parse(state.result.content[0].text)).toEqual({ deleted: target });
+    expect(await runtime.portsFor(human.workspaceId).companies.get(target)).toBeNull();
+  });
+
+  it("marks a failed approval via pendingAction_approve as a tool error with the failure record", async () => {
+    const target = await company();
+    const requester = await runtime.identity.resolveMcpToken(key);
+    expect(requester).not.toBeNull();
+    // Seed a stored request because customField.setValues is not approval-gated.
+    const action = await runtime.portsFor(human.workspaceId).pendingActions.create({
+      operation: "customField.setValues",
+      input: { entityType: "company", entityId: target, values: { unknown: "Invalid" } },
+      preview: null, riskCategory: "config", actor: actorStamp(mcpContext(requester!)),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const approverKey = await createKey("approver", ["approvals"]);
+    const response = await send(rpc("tools/call", {
+      name: "pendingAction_approve", arguments: { id: action.id },
+    }), approverKey);
+    const error = { code: "validation", message: 'No company custom field with key "unknown"' };
+    expect(response.result.isError).toBe(true);
+    expect(JSON.parse(response.result.content[0].text)).toMatchObject({
+      pendingAction: { id: action.id, status: "failed", result: { error } }, error,
+    });
+  });
+
+  it("leaves a successful approval via pendingAction_approve without a tool error", async () => {
+    const target = await company();
+    const taskId = await pending(target);
+    const approverKey = await createKey("approver", ["approvals"]);
+    const response = await send(rpc("tools/call", {
+      name: "pendingAction_approve", arguments: { id: taskId },
+    }), approverKey);
+    expect(response.result.isError).toBeUndefined();
+    expect(JSON.parse(response.result.content[0].text)).toMatchObject({
+      pendingAction: { id: taskId, status: "approved" }, result: { deleted: target },
+    });
     expect(await runtime.portsFor(human.workspaceId).companies.get(target)).toBeNull();
   });
 
