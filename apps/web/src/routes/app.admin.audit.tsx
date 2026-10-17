@@ -4,6 +4,7 @@ import { Bot, Terminal, User as UserIcon } from "lucide-react";
 import { useState } from "react";
 import type { AuditEvent, McpClient, Page, User } from "@mcpsuite/core/domain";
 import { opQuery } from "~/lib/api.ts";
+import { actorUserName } from "~/lib/actors.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { formatDateTime, relativeTime } from "~/lib/format.ts";
 import { EmptyState, Spinner } from "~/components/ui.tsx";
@@ -29,8 +30,12 @@ function AuditAdmin() {
   const clients = useQuery(opQuery<McpClient[]>("mcpClient.list"));
 
   const actorName = (e: AuditEvent) => {
-    if (e.actorType === "agent") return clients.data?.find((c) => c.id === e.actorClientId)?.name ?? "agent";
-    if (e.actorType === "human") return users.data?.find((u) => u.id === e.actorUserId)?.name ?? "user";
+    const userName = actorUserName(e.actorUserId, users.isSuccess ? users.data : undefined);
+    if (e.actorType === "agent") {
+      const client = clients.data?.find((c) => c.id === e.actorClientId);
+      return client?.name ?? (clients.isSuccess && userName === "Deleted user" ? userName : "agent");
+    }
+    if (e.actorType === "human") return userName ?? "user";
     return "system";
   };
 
