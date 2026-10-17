@@ -785,6 +785,28 @@ describe("search + import/export", () => {
     expect(exported.csv).toContain("Acme");
   });
 
+  it("CSV preview honours mapping overrides and agrees with the import", async () => {
+    const csv = "Organisation,Job Title,Work Email\nAcme,CTO,ada@acme.io\nBeta Corp,CEO,bob@beta.co\n,Analyst,cy@example.com\n";
+    await ok(run(owner, "company.create", { name: "Acme" }));
+    const automatic = await ok(run(owner, "import.preview", { csv }));
+    expect(automatic).toMatchObject({
+      mapping: { Organisation: "skip", "Job Title": "skip", "Work Email": "skip" },
+      importableRows: 0,
+      skippedRows: 3,
+      newCompanies: 0,
+    });
+
+    const mapping = { Organisation: "company.name", "Job Title": "person.title", "Work Email": "person.email" };
+    const preview = await ok(run(owner, "import.preview", { csv, mapping }));
+    expect(preview).toMatchObject({ mapping, importableRows: 2, skippedRows: 1, newCompanies: 1, existingCompanyMatches: 1 });
+    expect(preview.sample[0].person).toEqual({ title: "CTO", email: "ada@acme.io" });
+
+    const result = await ok(run(owner, "import.run", { csv, mapping, sourceLabel: "mapped-batch" }));
+    expect(result.companiesCreated).toBe(preview.newCompanies);
+    expect(result.companiesMatched).toBe(preview.existingCompanyMatches);
+    expect(result.engagementsCreated).toBe(preview.importableRows);
+  });
+
   describe("re-import matches only exactly the same data (issues #12, #23)", () => {
     // Ada and Bob have emails; Cy has none. Every row has a company.
     const csv =

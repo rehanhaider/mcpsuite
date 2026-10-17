@@ -38,6 +38,7 @@ function DataAdmin() {
 
 function ImportCard() {
   const fileRef = useRef<HTMLInputElement>(null);
+  const previewRequest = useRef<number>(0);
   const [csv, setCsv] = useState<string | null>(null);
   const [fileName, setFileName] = useState("");
   const [mapping, setMapping] = useState<Record<
@@ -54,11 +55,6 @@ function ImportCard() {
 
   const runPreview = useOp("import.preview", {
     invalidate: false,
-    onSuccess: (r) => {
-      const p = r as ImportPreview;
-      setPreview(p);
-      setMapping(p.mapping);
-    },
   });
   const runImport = useOp("import.run", {
     successToast: "Import complete",
@@ -75,7 +71,15 @@ function ImportCard() {
       setCsv(text);
       setFileName(file.name);
       setResult(null);
-      runPreview.mutate({ csv: text });
+      const request = ++previewRequest.current;
+      runPreview.mutate({ csv: text }, {
+        onSuccess: (r) => {
+          if (request !== previewRequest.current) return;
+          const p = r as ImportPreview;
+          setPreview(p);
+          setMapping(p.mapping);
+        },
+      });
     });
   }
 
@@ -154,12 +158,20 @@ function ImportCard() {
                         size="xs"
                         className="w-auto font-mono"
                         value={mapping?.[h] ?? "skip"}
-                        onChange={(e) =>
-                          setMapping((m) => ({
-                            ...(m ?? {}),
+                        onChange={(e) => {
+                          const next = {
+                            ...(mapping ?? {}),
                             [h]: e.target.value as ImportTargetField,
-                          }))
-                        }
+                          };
+                          setMapping(next);
+                          const request = ++previewRequest.current;
+                          runPreview.mutate({ csv, mapping: next }, {
+                            onSuccess: (r) => {
+                              if (request !== previewRequest.current) return;
+                              setPreview(r as ImportPreview);
+                            },
+                          });
+                        }}
                       >
                         {IMPORT_TARGET_FIELDS.map((t) => (
                           <option key={t} value={t}>
@@ -208,7 +220,7 @@ function ImportCard() {
             </Button>
             <Button
               size="sm"
-              disabled={runImport.isPending || preview.importableRows === 0}
+              disabled={runImport.isPending || runPreview.isPending || preview.importableRows === 0}
               onClick={() =>
                 runImport.mutate({
                   csv,
