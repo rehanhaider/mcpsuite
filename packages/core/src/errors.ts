@@ -66,6 +66,7 @@ export interface ErrorPayload {
   code: OpErrorCode;
   message: string;
   details?: Record<string, unknown>;
+  reference?: string;
 }
 
 export function toErrorPayload(e: unknown): ErrorPayload {
@@ -74,4 +75,16 @@ export function toErrorPayload(e: unknown): ErrorPayload {
   }
   const message = e instanceof Error ? e.message : String(e);
   return { code: "internal", message };
+}
+
+export function errorReference(): string {
+  return globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+}
+
+export function internalErrorPayload(e: unknown, context: string): ErrorPayload {
+  const payload = toErrorPayload(e);
+  const reference = errorReference();
+  const name = e instanceof Error ? e.name : "Error";
+  console.error(`[mcpsuite] error ref=${reference} context=${context} code=internal: ${name}: ${payload.message}`);
+  return { ...payload, reference };
 }

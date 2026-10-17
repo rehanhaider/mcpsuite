@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { runOperation, type Catalog } from "../src/catalog.ts";
+import { systemContext } from "../src/context.ts";
+import { defineOperation } from "../src/operations/define.ts";
+import type { Ports } from "../src/ports.ts";
 import { displayRef, listAccepts, LISTABLE_TYPES, validateCustomFieldValue, type CustomFieldDef } from "../src/domain.ts";
 import { roleAtLeast, trustAllows } from "../src/policy.ts";
 import { OpError, toErrorPayload } from "../src/errors.ts";
@@ -93,5 +98,58 @@ describe("errors", () => {
 
   it("wraps unknown errors as internal", () => {
     expect(toErrorPayload(new Error("boom")).code).toBe("internal");
+  });
+
+  const ports = { tx: async (fn) => fn() } as Ports;
+  const ctx = systemContext("test-workspace");
+  const secret = "s3cr3t-value";
+
+  function throwingCatalog(error: Error, duringParse = false): Catalog {
+    const input = z.object({ secret: z.string() });
+    const op = defineOperation({
+      name: "test.fail",
+      title: "Forced failure",
+      description: "Exercise error responses",
+      input: duringParse ? z.preprocess(() => { throw error; }, input) : input,
+      minRole: "member",
+      scope: "write",
+      handler: async () => { throw error; },
+    });
+    return new Map([[op.name, op]]);
+  }
+
+  it.each([
+    { error: new Error("boom"), duringParse: false },
+    { error: new Error("boom"), duringParse: true },
+    { error: new OpError("internal", "boom"), duringParse: false },
+  ])("matches an internal error response to one log without input: $error.name, parse=$duringParse", async ({ error, duringParse }) => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await runOperation(throwingCatalog(error, duringParse), ports, ctx, "test.fail", { secret });
+      expect(result.status).toBe("error");
+      if (result.status !== "error") throw new Error("Expected an error result");
+      expect(result.error.code).toBe("internal");
+      expect(result.error.message).toBe("boom");
+      expect(result.error.reference).toMatch(/^[0-9a-f]{12}$/);
+      expect(log).toHaveBeenCalledExactlyOnceWith(
+        `[mcpsuite] error ref=${result.error.reference} context=op test.fail code=internal: ${error.name}: boom`,
+      );
+      expect(JSON.stringify(log.mock.calls)).not.toContain(secret);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it.each([false, true])("does not reference or log an OpError validation failure, parse=%s", async (duringParse) => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await runOperation(
+        throwingCatalog(OpError.validation("Invalid value"), duringParse), ports, ctx, "test.fail", { secret },
+      );
+      expect(result).toEqual({ status: "error", error: { code: "validation", message: "Invalid value" } });
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
   });
 });

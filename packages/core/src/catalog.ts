@@ -6,7 +6,7 @@
  * validation → role/scope authorization → approval gating → execution.
  */
 import { z } from "zod";
-import { OpError, toErrorPayload } from "./errors.ts";
+import { internalErrorPayload, OpError, toErrorPayload } from "./errors.ts";
 import { nowIso } from "./ids.ts";
 import { actorStamp, type RequestContext } from "./context.ts";
 import type { AuditInput, Ports } from "./ports.ts";
@@ -183,6 +183,10 @@ export async function runOperation(
   name: string,
   rawInput: unknown,
 ): Promise<OpResult> {
+  const errorPayload = (e: unknown) => {
+    const payload = toErrorPayload(e);
+    return payload.code === "internal" ? internalErrorPayload(e, `op ${name}`) : payload;
+  };
   const op = catalog.get(name);
   if (!op) return { status: "error", error: { code: "not_found", message: `Unknown operation "${name}"` } };
 
@@ -203,7 +207,7 @@ export async function runOperation(
         },
       };
     }
-    return { status: "error", error: toErrorPayload(e) };
+    return { status: "error", error: errorPayload(e) };
   }
 
   const opCtx: OpCtx = { ctx, ports };
@@ -258,9 +262,9 @@ export async function runOperation(
       try {
         await ports.tx(() => ports.audit.record(e.event, actorStamp(ctx)));
       } catch (auditError) {
-        return { status: "error", error: toErrorPayload(auditError) };
+        return { status: "error", error: errorPayload(auditError) };
       }
     }
-    return { status: "error", error: toErrorPayload(e) };
+    return { status: "error", error: errorPayload(e) };
   }
 }
