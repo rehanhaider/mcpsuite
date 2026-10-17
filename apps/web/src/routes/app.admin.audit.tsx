@@ -2,11 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Terminal, User as UserIcon } from "lucide-react";
 import { useState } from "react";
-import type { AuditEvent, McpClient, Page, User } from "@mcpsuite/core/domain";
+import { auditChanges, type AuditEvent, type McpClient, type Page, type Pipeline, type User } from "@mcpsuite/core/domain";
 import { opQuery } from "~/lib/api.ts";
 import { actorUserName } from "~/lib/actors.ts";
 import { chipClass } from "~/lib/colors.ts";
-import { formatDateTime, relativeTime } from "~/lib/format.ts";
+import { formatDateTime, relativeTime, truncate } from "~/lib/format.ts";
 import { EmptyState, Spinner } from "~/components/ui.tsx";
 import { TABLE_CLASS, TableShell } from "~/components/TableShell.tsx";
 import { Button } from "~/components/ui/button.tsx";
@@ -28,6 +28,20 @@ function AuditAdmin() {
   );
   const users = useQuery(opQuery<User[]>("user.list"));
   const clients = useQuery(opQuery<McpClient[]>("mcpClient.list"));
+  const pipelines = useQuery(opQuery<Pipeline[]>("pipeline.list", {}));
+
+  function changeValue(field: string, value: unknown): string | null {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "string") {
+      if (field.endsWith("UserId")) return users.data?.find((user) => user.id === value)?.name ?? value;
+      if (field === "stageId") {
+        return pipelines.data?.flatMap((pipeline) => pipeline.stages).find((stage) => stage.id === value)?.name ?? value;
+      }
+      return value;
+    }
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    return JSON.stringify(value);
+  }
 
   const actorName = (e: AuditEvent) => {
     const userName = actorUserName(e.actorType, e.actorUserId, users.isSuccess ? users.data : undefined);
@@ -82,32 +96,52 @@ function AuditAdmin() {
                 </tr>
               </thead>
               <tbody>
-                {events.data!.items.map((e) => (
-                  <tr key={e.id} className="border-b border-border/60 last:border-0 hover:bg-accent/40">
-                    <td className="px-3 py-2 text-xs whitespace-nowrap text-muted-foreground" title={formatDateTime(e.createdAt)}>
-                      {relativeTime(e.createdAt)}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span className="flex items-center gap-1.5 text-xs">
-                        {e.actorType === "agent" ? (
-                          <Bot className="size-3.5 text-violet" />
-                        ) : e.actorType === "human" ? (
-                          <UserIcon className="size-3.5 text-muted-foreground" />
+                {events.data!.items.map((e) => {
+                  const changes = auditChanges(e);
+                  return (
+                    <tr key={e.id} className="border-b border-border/60 last:border-0 hover:bg-accent/40">
+                      <td className="px-3 py-2 text-xs whitespace-nowrap text-muted-foreground" title={formatDateTime(e.createdAt)}>
+                        {relativeTime(e.createdAt)}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className="flex items-center gap-1.5 text-xs">
+                          {e.actorType === "agent" ? (
+                            <Bot className="size-3.5 text-violet" />
+                          ) : e.actorType === "human" ? (
+                            <UserIcon className="size-3.5 text-muted-foreground" />
+                          ) : (
+                            <Terminal className="size-3.5 text-muted-foreground/70" />
+                          )}
+                          {actorName(e)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs">{e.operation}</td>
+                      <td className="max-w-md px-3 py-2">
+                        <div className="truncate text-sm text-foreground/70" title={e.summary}>{e.summary}</div>
+                        {changes === null ? null : Object.keys(changes).length === 0 ? (
+                          <div className="mt-0.5 text-xs text-muted-foreground/70">No fields changed</div>
                         ) : (
-                          <Terminal className="size-3.5 text-muted-foreground/70" />
+                          <dl className="mt-1 space-y-0.5 text-xs">
+                            {Object.entries(changes).map(([field, change]) => (
+                              <div key={field} className="flex min-w-0 items-baseline gap-1.5">
+                                <dt className="shrink-0 font-mono text-muted-foreground">{field}</dt>
+                                <dd className="relative flex min-w-0 items-baseline gap-1.5">
+                                  <span className="min-w-0 truncate text-muted-foreground line-through decoration-muted-foreground/50"><ChangeValue text={changeValue(field, change.before)} /></span>
+                                  <span aria-hidden className="text-muted-foreground/70">→</span>
+                                  <span className="sr-only">changed to</span>
+                                  <span className="min-w-0 truncate text-foreground/80"><ChangeValue text={changeValue(field, change.after)} /></span>
+                                </dd>
+                              </div>
+                            ))}
+                          </dl>
                         )}
-                        {actorName(e)}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 font-mono text-xs">{e.operation}</td>
-                    <td className="max-w-md truncate px-3 py-2 text-sm text-foreground/70" title={e.summary}>
-                      {e.summary}
-                    </td>
-                    <td className="px-3 py-2">
-                      <span className={`font-mono ${chipClass("ghost", "xs")}`}>{e.surface}</span>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`font-mono ${chipClass("ghost", "xs")}`}>{e.surface}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </TableShell>
@@ -120,4 +154,9 @@ function AuditAdmin() {
       )}
     </div>
   );
+}
+
+function ChangeValue({ text }: { text: string | null }) {
+  if (text === null) return <span className="italic text-muted-foreground/70">empty</span>;
+  return <span title={text}>{truncate(text, 60)}</span>;
 }
