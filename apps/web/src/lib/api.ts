@@ -14,6 +14,7 @@ export class OpFailure extends Error {
     public readonly code: string,
     message: string,
     public readonly details?: Record<string, unknown>,
+    public readonly reference?: string,
   ) {
     super(message);
     this.name = "OpFailure";
@@ -27,7 +28,7 @@ export async function callOp<T = unknown>(name: string, input: unknown = {}): Pr
     // Humans run ops directly; this only happens for exotic role setups.
     throw new OpFailure("pending_approval", result.message);
   }
-  throw new OpFailure(result.error.code, result.error.message, result.error.details);
+  throw new OpFailure(result.error.code, result.error.message, result.error.details, result.error.reference);
 }
 
 export function opQuery<T = unknown>(name: string, input: unknown = {}) {
@@ -98,7 +99,10 @@ export function useOp<TInput = Record<string, unknown>, TOut = unknown>(
       opts.onSuccess?.(data);
     },
     onError: (error) => {
-      if (!opts.silent) toast.error(error.message, { duration: 6000 });
+      if (!opts.silent) {
+        const reference = error instanceof OpFailure && error.reference ? ` (ref ${error.reference})` : "";
+        toast.error(`${error.message}${reference}`, { duration: 6000 });
+      }
     },
   });
 }

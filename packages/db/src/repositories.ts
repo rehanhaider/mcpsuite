@@ -723,6 +723,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       db.update(t.engagements).set({ companyId: null }).where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.companyId, id))).run();
       db.update(t.deals).set({ companyId: null }).where(and(eq(t.deals.workspaceId, ws), eq(t.deals.companyId, id))).run();
       db.update(t.activities).set({ companyId: null }).where(and(eq(t.activities.workspaceId, ws), eq(t.activities.companyId, id))).run();
+      db.delete(t.listMembers)
+        .where(and(eq(t.listMembers.workspaceId, ws), eq(t.listMembers.entityType, "company"), eq(t.listMembers.entityId, id)))
+        .run();
       db.delete(t.companies).where(and(eq(t.companies.workspaceId, ws), eq(t.companies.id, id))).run();
     },
     async people(companyId) {
@@ -885,6 +888,9 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       db.update(t.engagements).set({ personId: null }).where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.personId, id))).run();
       db.update(t.deals).set({ primaryPersonId: null }).where(and(eq(t.deals.workspaceId, ws), eq(t.deals.primaryPersonId, id))).run();
       db.update(t.activities).set({ personId: null }).where(and(eq(t.activities.workspaceId, ws), eq(t.activities.personId, id))).run();
+      db.delete(t.listMembers)
+        .where(and(eq(t.listMembers.workspaceId, ws), eq(t.listMembers.entityType, "person"), eq(t.listMembers.entityId, id)))
+        .run();
       db.delete(t.people).where(and(eq(t.people.workspaceId, ws), eq(t.people.id, id))).run();
     },
     async companies(personId) {
