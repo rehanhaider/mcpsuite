@@ -312,6 +312,20 @@ describe("tags + custom fields + saved views", () => {
     const list = await ok(run(owner, "savedView.list", {}));
     expect(list.some((v: any) => v.id === view.id)).toBe(true);
   });
+
+  it("audits saved view updates and deletes", async () => {
+    const view = await ok(run(owner, "savedView.create", { name: "UK leads", entityType: "engagement", filters: { search: "uk" } }));
+    await ok(run(owner, "savedView.update", { id: view.id, name: "Shared UK leads", visibility: "shared" }));
+    await ok(run(owner, "savedView.delete", { id: view.id }));
+
+    const events = await ok(run(owner, "audit.list", { entityType: "saved_view", entityId: view.id }));
+    const updated = events.items.filter((e: any) => e.operation === "savedView.update");
+    const deleted = events.items.filter((e: any) => e.operation === "savedView.delete");
+    expect(updated).toHaveLength(1);
+    expect(updated[0].entityId).toBe(view.id);
+    expect(deleted).toHaveLength(1);
+    expect(deleted[0].entityId).toBe(view.id);
+  });
 });
 
 describe("contact lists", () => {
