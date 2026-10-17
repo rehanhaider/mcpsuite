@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import {
   buildCatalog,
+  actorStamp,
   runOperation,
   systemContext,
   type Catalog,
@@ -22,6 +23,7 @@ import { createSession, resolveMcpToken, resolveSession } from "../src/auth.ts";
 import { resolveWorkspaceAccess } from "../src/hosting-access.ts";
 import { bootstrap } from "../src/bootstrap.ts";
 import { authServices, csvServices } from "../src/services.ts";
+import { withTransaction } from "../src/sqlite-tx.ts";
 
 let db: Db;
 let catalog: Catalog;
@@ -573,6 +575,59 @@ describe("offerings", () => {
   });
 });
 
+describe("nested SQLite transactions", () => {
+  it("rolls back inner writes on failure and commits outer writes", async () => {
+    let innerId = "";
+    await withTransaction(db.$client, async () => {
+      await ports.companies.create({ name: "Outer before" });
+      await expect(withTransaction(db.$client, async () => {
+        innerId = (await ports.companies.create({ name: "Inner" })).id;
+        throw new Error("inner failed");
+      })).rejects.toThrow("inner failed");
+      expect(await ports.companies.get(innerId)).toBeNull();
+      await ports.companies.create({ name: "Outer after" });
+    });
+    const companies = await ok(run(owner, "company.list", { sort: "name", dir: "asc" }));
+    expect(companies.items.map((c: { name: string }) => c.name)).toEqual(["Outer after", "Outer before"]);
+  });
+
+  it("commits successful nested writes", async () => {
+    const inner = await withTransaction(db.$client, () =>
+      withTransaction(db.$client, () => ports.companies.create({ name: "Inner success" })),
+    );
+    expect(await ports.companies.get(inner.id)).toEqual(inner);
+  });
+
+  it("keeps successful nested writes subject to the outer rollback", async () => {
+    let innerId = "";
+    await expect(withTransaction(db.$client, async () => {
+      innerId = (await withTransaction(db.$client, () => ports.companies.create({ name: "Inner success" }))).id;
+      throw new Error("outer failed");
+    })).rejects.toThrow("outer failed");
+    expect(await ports.companies.get(innerId)).toBeNull();
+  });
+
+  it("isolates doubly nested failures and permits later nested writes", async () => {
+    await withTransaction(db.$client, async () => {
+      await ports.companies.create({ name: "Outer" });
+      await withTransaction(db.$client, async () => {
+        await ports.companies.create({ name: "Middle" });
+        await expect(withTransaction(db.$client, async () => {
+          await ports.companies.create({ name: "Deep failure" });
+          throw new Error("deep failed");
+        })).rejects.toThrow("deep failed");
+        await withTransaction(db.$client, () => ports.companies.create({ name: "Deep success" }));
+      });
+      await expect(withTransaction(db.$client, async () => {
+        await withTransaction(db.$client, () => ports.companies.create({ name: "Doomed deep success" }));
+        throw new Error("middle failed");
+      })).rejects.toThrow("middle failed");
+    });
+    const companies = await ok(run(owner, "company.list", { sort: "name", dir: "asc" }));
+    expect(companies.items.map((c: { name: string }) => c.name)).toEqual(["Deep success", "Middle", "Outer"]);
+  });
+});
+
 describe("authorization + approval gating", () => {
   it("agent without scope is forbidden", async () => {
     const readOnly = agentCtx({ scopes: ["read"] });
@@ -608,6 +663,37 @@ describe("authorization + approval gating", () => {
     const ops = audit.items.map((e: any) => e.operation);
     expect(ops).toContain("pendingAction.create");
     expect(ops).toContain("pendingAction.approve");
+  });
+
+  it("persists failed approval and audit while rolling back the stored operation's partial write", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Approval target" }));
+    const field = await ok(run(owner, "customField.create", {
+      entityType: "company", label: "A", type: "text",
+    }));
+    await ok(run(owner, "customField.setValues", {
+      entityType: "company", entityId: company.id, values: { a: "Before" },
+    }));
+    // The real handler writes `a` before rejecting the unknown field. Seed a
+    // stored request directly because this operation is not approval-gated.
+    const pending = await ports.pendingActions.create({
+      operation: "customField.setValues",
+      input: { entityType: "company", entityId: company.id, values: { a: "Partial write", unknown: "Invalid" } },
+      preview: null, riskCategory: "config", actor: actorStamp(agentCtx()),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const error = { code: "validation", message: 'No company custom field with key "unknown"' };
+    const approval = await run(owner, "pendingAction.approve", { id: pending.id, note: "Reviewed" });
+    expect(approval).toEqual({ status: "error", error });
+    const persisted = createPorts(db, workspaceId);
+    expect(await persisted.pendingActions.get(pending.id)).toMatchObject({
+      id: pending.id, status: "failed", result: { error }, reviewedByUserId: ownerUserId, reviewNote: "Reviewed",
+    });
+    expect(await persisted.customFields.values("company", company.id)).toEqual({ [field.key]: "Before" });
+    const audit = await persisted.audit.list({ operation: "pendingAction.approve", entityId: pending.id, limit: 10, offset: 0 });
+    expect(audit.items).toHaveLength(1);
+    expect(audit.items[0]).toMatchObject({
+      summary: "Approved customField.setValues but execution FAILED", meta: { error },
+    });
   });
 
   it("trusted agent executes bulk ops directly, low-trust agent needs approval", async () => {
@@ -1337,7 +1423,10 @@ describe("user lifecycle: setup codes, deletion, ownership (docs/issues/0022)", 
     // owner-only even past the approval gate.
     const adminCtx: RequestContext = { ...owner, userId: created.user.id, role: "admin" };
     const approve = await run(adminCtx, "pendingAction.approve", { id: (gated as any).pendingActionId });
-    expect(approve.status).toBe("error");
+    expect(approve).toMatchObject({ status: "error", error: { code: "forbidden" } });
+    expect(await ports.pendingActions.get((gated as any).pendingActionId)).toMatchObject({
+      status: "failed", result: { error: { code: "forbidden" } },
+    });
     const users = await ok<any[]>(run(owner, "user.list"));
     expect(users.find((u) => u.id === ownerUserId).role).toBe("owner");
     expect(users.find((u) => u.id === created.user.id).role).toBe("admin");

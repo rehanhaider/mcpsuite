@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { runOperation, type OperationDef, type RequestContext } from "@mcpsuite/core";
+import { actorStamp, runOperation, type OperationDef, type RequestContext } from "@mcpsuite/core";
 import { createRuntime, mcpContext, openDatabase, type Db, type Runtime } from "@mcpsuite/db";
 import { handleMcpRequest } from "../src/handler.ts";
 import { WORKSPACE_LOCKED_RPC_CODE } from "../src/server.ts";
@@ -168,6 +168,43 @@ describe("MCP approval tasks over HTTP", () => {
     expect(await runtime.portsFor(human.workspaceId).companies.get(target)).toBeNull();
   });
 
+  it("marks a failed approval via pendingAction_approve as a tool error and persists the failure record", async () => {
+    const target = await company();
+    const requester = await runtime.identity.resolveMcpToken(key);
+    expect(requester).not.toBeNull();
+    // Seed a stored request because customField.setValues is not approval-gated.
+    const action = await runtime.portsFor(human.workspaceId).pendingActions.create({
+      operation: "customField.setValues",
+      input: { entityType: "company", entityId: target, values: { unknown: "Invalid" } },
+      preview: null, riskCategory: "config", actor: actorStamp(mcpContext(requester!)),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const approverKey = await createKey("approver", ["approvals"]);
+    const response = await send(rpc("tools/call", {
+      name: "pendingAction_approve", arguments: { id: action.id },
+    }), approverKey);
+    const error = { code: "validation", message: 'No company custom field with key "unknown"' };
+    expect(response.result.isError).toBe(true);
+    expect(JSON.parse(response.result.content[0].text)).toEqual({ error });
+    expect(await runtime.portsFor(human.workspaceId).pendingActions.get(action.id)).toMatchObject({
+      id: action.id, status: "failed", result: { error },
+    });
+  });
+
+  it("leaves a successful approval via pendingAction_approve without a tool error", async () => {
+    const target = await company();
+    const taskId = await pending(target);
+    const approverKey = await createKey("approver", ["approvals"]);
+    const response = await send(rpc("tools/call", {
+      name: "pendingAction_approve", arguments: { id: taskId },
+    }), approverKey);
+    expect(response.result.isError).toBeUndefined();
+    expect(JSON.parse(response.result.content[0].text)).toMatchObject({
+      pendingAction: { id: taskId, status: "approved" }, result: { deleted: target },
+    });
+    expect(await runtime.portsFor(human.workspaceId).companies.get(target)).toBeNull();
+  });
+
   it("returns a completed tool error for rejection with the reviewer's note", async () => {
     const rejectedId = await pending(await company());
     expect((await runtime.run(human, "pendingAction.reject", { id: rejectedId, note: "Keep this customer" })).status).toBe("ok");
@@ -189,7 +226,7 @@ describe("MCP approval tasks over HTTP", () => {
     expect(failed.result.content[0].text).toContain("Stored execution failure");
   });
 
-  it("keeps a failed SQLite approval pending and rolls back the target's partial write", async () => {
+  it("returns a completed tool error for a failed approval and rolls back the target's partial write", async () => {
     runtime.catalog.set("test.partialWrite", {
       name: "test.partialWrite", title: "Partial write test", description: "Test approval rollback",
       input: z.object({ id: z.string() }), minRole: "admin", scope: "write",
@@ -205,9 +242,16 @@ describe("MCP approval tasks over HTTP", () => {
     }));
     const taskId = called.result.taskId;
     expect(called.result.status).toBe("input_required");
-    expect((await runtime.run(human, "pendingAction.approve", { id: taskId })).status).toBe("error");
-    expect((await runtime.portsFor(human.workspaceId).pendingActions.get(taskId))?.status).toBe("pending");
-    expect((await send(rpc("tasks/get", { taskId }))).result.status).toBe("input_required");
+    const error = { code: "internal", message: "forced failure after write" };
+    expect(await runtime.run(human, "pendingAction.approve", { id: taskId })).toMatchObject({
+      status: "error", error,
+    });
+    expect(await runtime.portsFor(human.workspaceId).pendingActions.get(taskId)).toMatchObject({
+      status: "failed", result: { error },
+    });
+    const state = (await send(rpc("tasks/get", { taskId }))).result;
+    expect(state).toMatchObject({ resultType: "complete", status: "completed", result: { isError: true } });
+    expect(JSON.parse(state.result.content[0].text)).toEqual({ error });
     expect((await runtime.portsFor(human.workspaceId).companies.get(target))?.name).toBe("Task test company");
   });
 
