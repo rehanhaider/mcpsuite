@@ -2,7 +2,10 @@
 import { z } from "zod";
 import { OpError } from "../errors.ts";
 import { TAGGABLE_TYPES, zId } from "../domain.ts";
+import { actorStamp } from "../context.ts";
+import { nowIso } from "../ids.ts";
 import { defineOperation, type OpCtx } from "./define.ts";
+import { logDealStageChange } from "./deal-ops.ts";
 import { audit, found } from "./helpers.ts";
 
 const zBulkEntity = z.enum(["company", "person", "engagement", "deal"]);
@@ -57,10 +60,31 @@ export const bulkOps = [
             const e = await op.ports.engagements.get(id);
             if (!e || e.pipelineId !== stage.pipelineId) continue;
             await op.ports.engagements.update(id, { stageId });
+            if (e.stageId !== stageId) {
+              const from = await op.ports.pipelines.getStage(e.stageId);
+              await op.ports.activities.create(
+                {
+                  kind: "status_change",
+                  engagementId: id,
+                  companyId: e.companyId,
+                  personId: e.personId,
+                  title: `Stage: ${from?.name ?? "?"} → ${stage.name}`,
+                  body: null,
+                  meta: { fromStageId: e.stageId, toStageId: stageId, entity: "engagement" },
+                },
+                actorStamp(op.ctx),
+              );
+              await op.ports.engagements.update(id, { lastActivityAt: nowIso() });
+            }
           } else {
             const d = await op.ports.deals.get(id);
             if (!d || d.pipelineId !== stage.pipelineId) continue;
             await op.ports.deals.update(id, { stageId });
+            if (d.stageId !== stageId) {
+              const from = await op.ports.pipelines.getStage(d.stageId);
+              await logDealStageChange(op, d, stage.name, from?.name);
+              await op.ports.deals.update(id, { lastActivityAt: nowIso() });
+            }
           }
           n++;
         }
