@@ -4,6 +4,7 @@ import { Bot, Check, ChevronDown, ShieldCheck, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { PENDING_STATUSES, type McpClient, type PendingAction, type User } from "@mcpsuite/core/domain";
+import { canCancelPendingAction } from "@mcpsuite/core/policy";
 import { invalidateAfter, opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, type Tone } from "~/lib/colors.ts";
 import { formatDateTime, relativeTime } from "~/lib/format.ts";
@@ -89,7 +90,7 @@ function ApprovalsPage() {
       ) : (
         <div className="space-y-3">
           {visibleActions.map((pa) => (
-            <PendingCard key={pa.id} action={pa} requester={requesterName(pa)} isAdmin={isAdmin} reviewer={users.data ?? []} linked={search.action === pa.id} />
+            <PendingCard key={pa.id} action={pa} requester={requesterName(pa)} isAdmin={isAdmin} canCancel={!!auth && canCancelPendingAction({ role: auth.role, userId: auth.user.id, clientId: null }, pa)} reviewer={users.data ?? []} linked={search.action === pa.id} />
           ))}
         </div>
       )}
@@ -101,12 +102,14 @@ function PendingCard({
   action: pa,
   requester,
   isAdmin,
+  canCancel,
   reviewer,
   linked,
 }: {
   action: PendingAction;
   requester: string;
   isAdmin: boolean;
+  canCancel: boolean;
   reviewer: User[];
   linked: boolean;
 }) {
@@ -178,7 +181,7 @@ function PendingCard({
             </Button>
           </>
         ) : null}
-        {isPending && !isAdmin ? (
+        {isPending && !isAdmin && canCancel ? (
           <Button variant="ghost" size="xs" onClick={() => cancel.mutate({ id: pa.id })}>
             Cancel
           </Button>
