@@ -12,6 +12,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SearchHit } from "@mcpsuite/core/domain";
 import { opQuery } from "~/lib/api.ts";
+import { chipClass } from "~/lib/colors.ts";
 import { useUi } from "~/store/ui.ts";
 import { Button } from "~/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "~/components/ui/dialog";
@@ -107,6 +108,7 @@ export function CommandPalette() {
     key: string;
     icon: ReactNode;
     label: string;
+    archived?: boolean;
     sub?: string | null;
     go(): void;
   };
@@ -117,6 +119,7 @@ export function CommandPalette() {
         key: `${h.entityType}:${h.id}`,
         icon: TYPE_META[h.entityType]!.icon,
         label: h.title,
+        archived: h.archived,
         sub:
           [h.ref, h.subtitle].filter(Boolean).join(" · ") ||
           TYPE_META[h.entityType]!.label,
@@ -198,7 +201,12 @@ export function CommandPalette() {
               >
                 <span className="text-muted-foreground">{item.icon}</span>
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate">{item.label}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="block truncate min-w-0">{item.label}</span>
+                    {item.archived ? (
+                      <span className={`shrink-0 ${chipClass("warning", "xs")}`}>archived</span>
+                    ) : null}
+                  </span>
                   {item.sub ? (
                     <span className="block truncate text-xs text-muted-foreground">
                       {item.sub}
