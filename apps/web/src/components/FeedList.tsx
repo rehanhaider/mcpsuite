@@ -16,6 +16,7 @@ import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import type { Activity, User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
+import { actorUserName } from "~/lib/actors.ts";
 import { daysUntil, formatDateTime, relativeTime } from "~/lib/format.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { Button } from "~/components/ui/button";
@@ -46,8 +47,6 @@ export function FeedList({
   showLinks?: boolean;
 }) {
   const users = useQuery(opQuery<User[]>("user.list"));
-  const userName = (id: string | null) =>
-    id ? (users.data?.find((u) => u.id === id)?.name ?? null) : null;
 
   if (items.length === 0) {
     return (
@@ -62,7 +61,7 @@ export function FeedList({
         <FeedRow
           key={a.id}
           activity={a}
-          actorName={userName(a.actorUserId)}
+          actorName={actorUserName(a.actorType, a.actorUserId, users.isSuccess ? users.data : undefined)}
           showLinks={showLinks}
         />
       ))}
