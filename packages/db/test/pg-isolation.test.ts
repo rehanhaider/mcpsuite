@@ -796,6 +796,28 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     expect(audit.items.every((e) => e.operation.startsWith("company."))).toBe(true);
   });
 
+  it("pending actions: guarded transitions preserve terminal status and approval results", async () => {
+    const pending = await portsA.pendingActions.create({
+      operation: "company.delete",
+      input: { id: A.companyId },
+      preview: null,
+      riskCategory: "destructive",
+      actor: actor(A.userId),
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    expect(await portsA.pendingActions.transitionIfPending(pending.id, { status: "rejected" })).toBe(true);
+    expect((await portsA.pendingActions.get(pending.id))?.status).toBe("rejected");
+    expect(await portsA.pendingActions.transitionIfPending(pending.id, { status: "cancelled" })).toBe(false);
+    expect((await portsA.pendingActions.get(pending.id))?.status).toBe("rejected");
+
+    const result = { data: { approved: true } };
+    await portsA.pendingActions.setStatus(pending.id, { status: "approved", reviewedByUserId: A.userId, result });
+    for (const status of ["cancelled", "rejected"] as const) {
+      expect(await portsA.pendingActions.transitionIfPending(pending.id, { status })).toBe(false);
+      expect(await portsA.pendingActions.get(pending.id)).toMatchObject({ status: "approved", result });
+    }
+  });
+
   it("mcp clients: lifecycle within the workspace", async () => {
     const client = await portsA.mcpClients.get(A.clientId);
     expect(client!.scopes).toEqual(["read", "write"]);

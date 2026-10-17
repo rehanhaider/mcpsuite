@@ -48,7 +48,7 @@ export const approvalOps = [
     handler: async (op, { id }) => {
       const pa = await ownPendingAction(op, id);
       if (pa.status !== "pending" || pa.expiresAt >= nowIso()) return pa;
-      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewNote: "expired" });
+      const cancelled = await op.ports.pendingActions.transitionIfPending(id, { status: "cancelled", reviewNote: "expired" });
       if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
       await audit(op, {
         operation: "pendingAction.expire",
@@ -70,11 +70,12 @@ export const approvalOps = [
     handler: async (op, { id, note }) => {
       const pa = found(await op.ports.pendingActions.get(id), "pending action", id);
       if (pa.status !== "pending") throw OpError.validation(`Action is already ${pa.status}`);
-      const updated = await op.ports.pendingActions.setStatus(id, {
+      const rejected = await op.ports.pendingActions.transitionIfPending(id, {
         status: "rejected",
         reviewedByUserId: op.ctx.userId,
         reviewNote: note ?? null,
       });
+      if (!rejected) return found(await op.ports.pendingActions.get(id), "pending action", id);
       await audit(op, {
         operation: "pendingAction.reject",
         entityType: "pending_action",
@@ -82,7 +83,7 @@ export const approvalOps = [
         summary: `Rejected pending ${pa.operation}`,
         meta: { note },
       });
-      return updated;
+      return found(await op.ports.pendingActions.get(id), "pending action", id);
     },
   }),
 
@@ -103,17 +104,18 @@ export const approvalOps = [
         throw OpError.forbidden("Only the requester or an admin can cancel");
       }
       const agentSelfCancel = op.ctx.actorType === "agent" && !!op.ctx.clientId && pa.requestedByClientId === op.ctx.clientId;
-      const updated = await op.ports.pendingActions.setStatus(id, {
+      const cancelled = await op.ports.pendingActions.transitionIfPending(id, {
         status: "cancelled",
         reviewedByUserId: agentSelfCancel ? null : op.ctx.userId,
       });
+      if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
       await audit(op, {
         operation: "pendingAction.cancel",
         entityType: "pending_action",
         entityId: id,
         summary: `Cancelled pending ${pa.operation}`,
       });
-      return updated;
+      return found(await op.ports.pendingActions.get(id), "pending action", id);
     },
   }),
 
@@ -129,7 +131,7 @@ export const approvalOps = [
     handler: async (op, { id }) => {
       const pa = await ownPendingAction(op, id);
       if (pa.status !== "pending") return pa;
-      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewedByUserId: op.ctx.actorType === "agent" ? null : op.ctx.userId });
+      const cancelled = await op.ports.pendingActions.transitionIfPending(id, { status: "cancelled", reviewedByUserId: op.ctx.actorType === "agent" ? null : op.ctx.userId });
       if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
       await audit(op, {
         operation: "pendingAction.cancel",
