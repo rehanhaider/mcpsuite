@@ -144,6 +144,12 @@ function PendingCard({
                 · reviewed by {reviewedBy} {pa.reviewedAt ? relativeTime(pa.reviewedAt) : ""}
               </>
             ) : null}
+            {pa.status === "cancelled" && !pa.reviewedByUserId && pa.requestedByType === "agent" && pa.reviewNote !== "expired" ? (
+              <>
+                {" "}
+                · cancelled by {requester} {pa.reviewedAt ? relativeTime(pa.reviewedAt) : ""}
+              </>
+            ) : null}
           </p>
         </div>
         <Button variant="ghost" size="xs" className="gap-1" onClick={() => setDetailsOpen((o) => !o)}>
