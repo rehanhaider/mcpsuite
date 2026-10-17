@@ -131,11 +131,6 @@ let cached: { identity: IdentityStore; app: FetchApp } | null = null;
 export function getAuthApp(identity: IdentityStore): FetchApp {
   if (cached && cached.identity === identity) return cached.app;
   const storage = createOpenAuthStorage(identity.authKv) as StorageAdapter;
-  const sendKey = (email: string) => ["mcpsuite", "code-send", normalizeEmail(email)];
-  async function recentSends(email: string): Promise<number[]> {
-    const record = await storage.get(sendKey(email)) as { timestamps: number[] } | undefined;
-    return (record?.timestamps ?? []).filter((time) => time > Date.now() - AUTH_CODE_ISSUE_WINDOW_MS);
-  }
   const password = PasswordProvider({
     login: loginUi,
     register: registerUi,
@@ -147,11 +142,11 @@ export function getAuthApp(identity: IdentityStore): FetchApp {
           ? `Password must be at most ${MAX_PASSWORD} characters`
           : undefined,
     async sendCode(email, code) {
-      // Record only successful delivery, including the self-host display channel.
+      // OpenAuth's own register/change verification codes go through the
+      // same delivery seam as CRM-issued codes (docs/auth-api.md).
       const delivery = await deliverAuthCode({ email, code, purpose: "verify" });
-      const now = Date.now();
-      await storage.set(sendKey(email), { timestamps: [...await recentSends(email), now] }, new Date(now + AUTH_CODE_ISSUE_WINDOW_MS));
       if (delivery.mode === "display") {
+        // Display mode (self-host): the terminal IS the delivery channel.
         console.log(`[mcpsuite] verification code for ${email}: ${code}`);
       }
     },
@@ -170,28 +165,28 @@ export function getAuthApp(identity: IdentityStore): FetchApp {
         const ui = flow === "register" ? registerUi : changeUi;
         if (action === "verify" && state.type === "code") {
           const digest = createHash("sha256").update(`${normalizeEmail(state.email)}:${flow}:${state.code}`).digest("hex");
-          const key = ["mcpsuite", "code-attempts", digest];
-          const record = await storage.get(key) as { count: number } | undefined;
-          const count = record?.count ?? 0;
-          if (count >= AUTH_CODE_MAX_ATTEMPTS) {
+          const key = joinAuthKey(["mcpsuite", "code-attempts", digest]);
+          // Reserve before the provider runs. Refresh expiry to outlive every
+          // cookie issued for this code, including a refused replay.
+          const count = await identity.authKv.increment(key, Date.now() + PROVIDER_STATE_TTL_SECONDS * 1000);
+          if (count > AUTH_CODE_MAX_ATTEMPTS) {
             const start = { type: "start", ...("redirect" in state ? { redirect: state.redirect } : {}) };
             await ctx.set(c, "provider", PROVIDER_STATE_TTL_SECONDS, start);
             return ctx.forward(c, await ui(c.req.raw, start, form, { type: "too_many_attempts" }));
           }
-          await next();
-          if (form.get("code")?.toString() !== state.code) {
-            // Outlive every cookie issued for this code, including the failure
-            // response above. Replaying an older cookie retains this count.
-            await storage.set(key, { count: count + 1 }, new Date(Date.now() + PROVIDER_STATE_TTL_SECONDS * 1000));
-          }
-          return;
+          return next();
         }
         // 0.4.3 sends on register/start, register/code, and change/code.
         const email = flow === "register" && action === "register"
           ? state.type === "code" ? state.email : state.type === "start" ? form.get("email")?.toString() : undefined
           : flow === "change" && action === "code" ? form.get("email")?.toString() : undefined;
-        if (email && (await recentSends(email)).length >= AUTH_CODE_ISSUE_MAX) {
-          return ctx.forward(c, await ui(c.req.raw, state, form, { type: "too_many_codes" }));
+        if (email) {
+          const window = Math.floor(Date.now() / AUTH_CODE_ISSUE_WINDOW_MS);
+          const key = joinAuthKey(["mcpsuite", "code-send", normalizeEmail(email), String(window)]);
+          const count = await identity.authKv.increment(key, (window + 1) * AUTH_CODE_ISSUE_WINDOW_MS);
+          if (count > AUTH_CODE_ISSUE_MAX) {
+            return ctx.forward(c, await ui(c.req.raw, state, form, { type: "too_many_codes" }));
+          }
         }
         return next();
       });

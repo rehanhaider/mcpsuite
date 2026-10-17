@@ -198,14 +198,54 @@ for (const adapter of ["sqlite", "postgres"] as const) {
         expect(sent).toHaveLength(prior + 1);
       });
 
-      it(`${flow}: sends resume after the issue window`, async () => {
+      it(`${flow}: twenty parallel guesses reach the provider only ten times; the correct code is then refused`, async () => {
         const email = emailFor(flow);
         const browser = await start(flow, email);
         const path = `/api/auth/password/${flow}`;
+        await browser.request(path, submitCode(flow, email));
+        const code = sent[0]!.code;
+        const savedCookies = new Map(browser.cookies);
+        const wrong = code === "000000" ? "111111" : "000000";
+        const responses = await Promise.all(Array.from({ length: 20 }, () => {
+          const replay = new Browser();
+          replay.cookies = new Map(savedCookies);
+          return replay.request(path, { action: "verify", code: wrong });
+        }));
+        const errors = responses.map((response) => params(response).get("error"));
+        // invalid_code comes from the real provider, proving how many reached it.
+        expect(errors.filter((error) => error === "invalid_code")).toHaveLength(AUTH_CODE_MAX_ATTEMPTS);
+        expect(errors.filter((error) => error === "too_many_attempts")).toHaveLength(20 - AUTH_CODE_MAX_ATTEMPTS);
+        browser.cookies = savedCookies;
+        expect(params(await browser.request(path, { action: "verify", code })).get("error")).toBe("too_many_attempts");
+      });
+
+      it(`${flow}: ten parallel sends deliver exactly five codes for one email`, async () => {
+        const email = emailFor(flow);
+        const browser = await start(flow, email);
+        const path = `/api/auth/password/${flow}`;
+        const responses = await Promise.all(Array.from({ length: 10 }, () => {
+          const replay = new Browser();
+          replay.cookies = new Map(browser.cookies);
+          return replay.request(path, submitCode(flow, email));
+        }));
+        expect(responses.filter((response) => params(response).get("state") === "code")).toHaveLength(AUTH_CODE_ISSUE_MAX);
+        expect(responses.filter((response) => params(response).get("error") === "too_many_codes")).toHaveLength(10 - AUTH_CODE_ISSUE_MAX);
+        expect(sent).toHaveLength(AUTH_CODE_ISSUE_MAX);
+        expect(sent.every((delivery) => delivery.email === email)).toBe(true);
+      });
+
+      it(`${flow}: sends resume exactly at the fixed issue-window boundary`, async () => {
+        const email = emailFor(flow);
+        const browser = await start(flow, email);
+        const path = `/api/auth/password/${flow}`;
+        const now = Date.now();
+        const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+        const windowEnd = (Math.floor(now / AUTH_CODE_ISSUE_WINDOW_MS) + 1) * AUTH_CODE_ISSUE_WINDOW_MS;
         for (let n = 0; n < AUTH_CODE_ISSUE_MAX; n++) await browser.request(path, submitCode(flow, email));
         expect(params(await browser.request(path, submitCode(flow, email))).get("error")).toBe("too_many_codes");
-        const now = Date.now();
-        vi.spyOn(Date, "now").mockReturnValue(now + AUTH_CODE_ISSUE_WINDOW_MS + 1);
+        clock.mockReturnValue(windowEnd - 1);
+        expect(params(await browser.request(path, submitCode(flow, email))).get("error")).toBe("too_many_codes");
+        clock.mockReturnValue(windowEnd);
         expect(params(await browser.request(path, submitCode(flow, email))).get("state")).toBe("code");
         expect(sent).toHaveLength(AUTH_CODE_ISSUE_MAX + 1);
       });
@@ -220,15 +260,15 @@ for (const adapter of ["sqlite", "postgres"] as const) {
       expect(sent).toHaveLength(AUTH_CODE_ISSUE_MAX);
     });
 
-    it("does not count registration submissions that send no code", async () => {
+    it("reserves the send budget before registration validation even when no code is sent", async () => {
       const email = emailFor("register");
       const browser = await start("register", email);
-      for (let n = 0; n <= AUTH_CODE_ISSUE_MAX; n++) {
+      for (let n = 0; n < AUTH_CODE_ISSUE_MAX; n++) {
         expect(params(await browser.request("/api/auth/password/register", { action: "register", email, password: "short", repeat: "short" })).get("error")).toBe("validation_error");
       }
       expect(sent).toHaveLength(0);
-      expect(params(await browser.request("/api/auth/password/register", submitCode("register", email))).get("state")).toBe("code");
-      expect(sent).toHaveLength(1);
+      expect(params(await browser.request("/api/auth/password/register", submitCode("register", email))).get("error")).toBe("too_many_codes");
+      expect(sent).toHaveLength(0);
     });
   });
 }

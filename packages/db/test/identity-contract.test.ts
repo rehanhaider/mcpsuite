@@ -202,6 +202,34 @@ for (const adapter of ADAPTERS) {
       surface: "web",
     });
 
+    describe("issuer counters", () => {
+      it("creates and increments decimal values with the supplied expiry", async () => {
+        const key = joinAuthKey(["counter", "expiry"]);
+        const expiry = Date.now() + 60_000;
+        expect(await identity.authKv.increment(key, expiry)).toBe(1);
+        expect(await identity.authKv.get(key)).toEqual({ value: "1", expiry });
+        expect(await identity.authKv.increment(key, null)).toBe(2);
+        expect(await identity.authKv.get(key)).toEqual({ value: "2", expiry: null });
+        expect(await identity.authKv.increment(key, expiry)).toBe(3);
+        expect(await identity.authKv.get(key)).toEqual({ value: "3", expiry });
+      });
+
+      it("restarts an expired row at one without a preceding read", async () => {
+        const key = joinAuthKey(["counter", "expired"]);
+        await identity.authKv.set(key, "99", Date.now() - 1000);
+        const expiry = Date.now() + 60_000;
+        expect(await identity.authKv.increment(key, expiry)).toBe(1);
+        expect(await identity.authKv.get(key)).toEqual({ value: "1", expiry });
+      });
+
+      it("parallel reservations return 1..20 without duplicates or lost updates", async () => {
+        const key = joinAuthKey(["counter", "parallel"]);
+        const values = await Promise.all(Array.from({ length: 20 }, () => identity.authKv.increment(key, null)));
+        expect(values.sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+        expect(await identity.authKv.get(key)).toEqual({ value: "20", expiry: null });
+      });
+    });
+
     // ── sessions ────────────────────────────────────────────────────────────
 
     describe("sessions", () => {

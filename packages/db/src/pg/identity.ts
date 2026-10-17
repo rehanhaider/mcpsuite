@@ -163,6 +163,18 @@ export function createPgIdentity(db: PgDb, options: { hooks?: IdentityTestHooks 
   const authKv: AuthKvStore = {
     get: (key) => inTx(null, (x) => kvGet(x, key)),
     set: (key, value, expiry) => inTx(null, (x) => kvSet(x, key, value, expiry)),
+    increment: (key, expiry) => inTx(null, async (x) => {
+      const expiresAt = expiry == null ? null : new Date(expiry).toISOString();
+      const [row] = await rows<{ value: string }>(x,
+        sql`INSERT INTO crm.openauth_kv (key, value, expires_at) VALUES (${key}, '1'::jsonb, ${expiresAt}::timestamptz)
+            ON CONFLICT (key) DO UPDATE SET
+              value = CASE WHEN openauth_kv.expires_at IS NOT NULL AND openauth_kv.expires_at <= now()
+                THEN '1'::jsonb ELSE to_jsonb((openauth_kv.value::text)::bigint + 1) END,
+              expires_at = excluded.expires_at
+            RETURNING value::text AS value`,
+      );
+      return Number(row!.value);
+    }),
     remove: (key) => inTx(null, (x) => kvRemove(x, key)),
     scanPrefix: (prefix) => inTx(null, (x) => kvScan(x, prefix)),
   };
