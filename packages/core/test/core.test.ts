@@ -5,7 +5,7 @@ import { systemContext } from "../src/context.ts";
 import { defineOperation } from "../src/operations/define.ts";
 import type { Ports } from "../src/ports.ts";
 import { displayRef, listAccepts, LISTABLE_TYPES, validateCustomFieldValue, type CustomFieldDef } from "../src/domain.ts";
-import { roleAtLeast, trustAllows } from "../src/policy.ts";
+import { canCancelPendingAction, roleAtLeast, trustAllows } from "../src/policy.ts";
 import { OpError, toErrorPayload } from "../src/errors.ts";
 import { newId, slugify } from "../src/ids.ts";
 
@@ -18,6 +18,19 @@ describe("policy", () => {
     expect(roleAtLeast("admin", "owner")).toBe(false);
     expect(roleAtLeast("member", "member")).toBe(true);
     expect(roleAtLeast("viewer", "member")).toBe(false);
+  });
+
+  it("cancel rule", () => {
+    const action = { requestedByUserId: "user-1", requestedByClientId: "client-1" };
+    expect(canCancelPendingAction({ role: "member", userId: "user-1", clientId: null }, action)).toBe(true);
+    expect(canCancelPendingAction({ role: "member", userId: "user-2", clientId: null }, action)).toBe(false);
+    expect(canCancelPendingAction({ role: "member", userId: "user-2", clientId: "client-1" }, action)).toBe(true);
+    expect(canCancelPendingAction({ role: "admin", userId: "user-2", clientId: "client-2" }, action)).toBe(true);
+    expect(canCancelPendingAction({ role: "owner", userId: "user-2", clientId: "client-2" }, action)).toBe(true);
+    expect(canCancelPendingAction(
+      { role: "member", userId: null, clientId: null },
+      { requestedByUserId: null, requestedByClientId: null },
+    )).toBe(false);
   });
 
   it("trust matrix", () => {

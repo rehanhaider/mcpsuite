@@ -1167,6 +1167,28 @@ describe("agent authority mirrors the owning user", () => {
     expect(resolveMcpToken(db, created.token)).toBeNull();
   });
 
+  it("pendingAction.cancel lets a member cancel only their own agent's requests", async () => {
+    const member = await createUser("member");
+    const other = await createUser("member");
+    const a = await ok(run(owner, "company.create", { name: "Member Co" }));
+    const b = await ok(run(owner, "company.create", { name: "Other Co" }));
+
+    const ownGated = await run(agentCtx({ userId: member.userId, clientId: "client-member" }), "company.delete", { id: a.id });
+    const otherGated = await run(agentCtx({ userId: other.userId, clientId: "client-other" }), "company.delete", { id: b.id });
+    expect(ownGated.status).toBe("pending_approval");
+    expect(otherGated.status).toBe("pending_approval");
+    const ownPendingId = (ownGated as any).pendingActionId;
+    const otherPendingId = (otherGated as any).pendingActionId;
+
+    const denied = await run(member, "pendingAction.cancel", { id: otherPendingId });
+    expect(denied.status).toBe("error");
+    expect((denied as any).error.code).toBe("forbidden");
+    expect((await ports.pendingActions.get(otherPendingId))!.status).toBe("pending");
+
+    const cancelled = await ok(run(member, "pendingAction.cancel", { id: ownPendingId }));
+    expect(cancelled.status).toBe("cancelled");
+  });
+
   it("an agent cannot approve its own pending actions", async () => {
     const company = await ok(run(owner, "company.create", { name: "Doomed Co" }));
     const requester = agentCtx({ clientId: "client-self", scopes: ["read", "write"] });
