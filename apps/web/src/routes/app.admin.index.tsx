@@ -66,8 +66,6 @@ function SettingsForm({ workspace }: { workspace: Workspace }) {
         </div>
       </SectionCard>
 
-      <SystemInfo />
-
       <div className="flex justify-end">
         <Button
           size="sm"
@@ -89,6 +87,8 @@ function SettingsForm({ workspace }: { workspace: Workspace }) {
           Save changes
         </Button>
       </div>
+
+      <SystemInfo />
     </div>
   );
 }

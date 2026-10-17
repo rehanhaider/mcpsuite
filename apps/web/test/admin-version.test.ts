@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createRuntime, getRuntimeAsync, openDatabase, type Db, type Runtime } from "@mcpsuite/db";
@@ -42,7 +43,7 @@ describe("Admin system information", () => {
     expect(typeof version).toBe("string");
     expect(version.length).toBeGreaterThan(0);
 
-    const markup = renderToStaticMarkup(<SystemInfo />);
+    const markup = renderToStaticMarkup(createElement(SystemInfo));
     expect(markup).toContain("System");
     expect(markup).toContain("Version");
     expect(markup).toContain(`<span class="font-mono">${version}</span>`);
