@@ -653,13 +653,12 @@ describe("authorization + approval gating", () => {
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     });
     const error = { code: "validation", message: 'No company custom field with key "unknown"' };
-    const approval = await ok(run(owner, "pendingAction.approve", { id: pending.id, note: "Reviewed" }));
-    expect(approval).toMatchObject({
-      pendingAction: { status: "failed", result: { error }, reviewedByUserId: ownerUserId, reviewNote: "Reviewed" },
-      error,
-    });
+    const approval = await run(owner, "pendingAction.approve", { id: pending.id, note: "Reviewed" });
+    expect(approval).toEqual({ status: "error", error });
     const persisted = createPorts(db, workspaceId);
-    expect(await persisted.pendingActions.get(pending.id)).toEqual(approval.pendingAction);
+    expect(await persisted.pendingActions.get(pending.id)).toMatchObject({
+      id: pending.id, status: "failed", result: { error }, reviewedByUserId: ownerUserId, reviewNote: "Reviewed",
+    });
     expect(await persisted.customFields.values("company", company.id)).toEqual({ [field.key]: "Before" });
     const audit = await persisted.audit.list({ operation: "pendingAction.approve", entityId: pending.id, limit: 10, offset: 0 });
     expect(audit.items).toHaveLength(1);
@@ -1383,9 +1382,10 @@ describe("user lifecycle: setup codes, deletion, ownership (docs/issues/0022)", 
     // owner-only even past the approval gate.
     const adminCtx: RequestContext = { ...owner, userId: created.user.id, role: "admin" };
     const approve = await run(adminCtx, "pendingAction.approve", { id: (gated as any).pendingActionId });
-    expect(approve).toMatchObject({ status: "ok", data: {
-      pendingAction: { status: "failed" }, error: { code: "forbidden" },
-    } });
+    expect(approve).toMatchObject({ status: "error", error: { code: "forbidden" } });
+    expect(await ports.pendingActions.get((gated as any).pendingActionId)).toMatchObject({
+      status: "failed", result: { error: { code: "forbidden" } },
+    });
     const users = await ok<any[]>(run(owner, "user.list"));
     expect(users.find((u) => u.id === ownerUserId).role).toBe("owner");
     expect(users.find((u) => u.id === created.user.id).role).toBe("admin");

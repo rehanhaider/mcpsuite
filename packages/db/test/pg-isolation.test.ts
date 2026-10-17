@@ -872,11 +872,11 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     });
     const error = { code: "validation", message: 'No company custom field with key "unknown"' };
     const approval = await runOperation(catalog, portsA, owner, "pendingAction.approve", { id: pending.id, note: "Reviewed" });
-    expect(approval).toMatchObject({ status: "ok", data: {
-      pendingAction: { status: "failed", result: { error }, reviewedByUserId: A.userId, reviewNote: "Reviewed" }, error,
-    } });
+    expect(approval).toEqual({ status: "error", error });
     const persisted = createPgPorts(app.db, wsA);
-    expect(await persisted.pendingActions.get(pending.id)).toMatchObject({ status: "failed", result: { error } });
+    expect(await persisted.pendingActions.get(pending.id)).toMatchObject({
+      id: pending.id, status: "failed", result: { error }, reviewedByUserId: A.userId, reviewNote: "Reviewed",
+    });
     expect((await persisted.customFields.values("company", A.companyId))[field.key]).toBe("Before");
     const audit = await persisted.audit.list({ operation: "pendingAction.approve", entityId: pending.id, limit: 10, offset: 0 });
     expect(audit.items).toHaveLength(1);

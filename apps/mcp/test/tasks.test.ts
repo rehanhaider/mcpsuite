@@ -168,7 +168,7 @@ describe("MCP approval tasks over HTTP", () => {
     expect(await runtime.portsFor(human.workspaceId).companies.get(target)).toBeNull();
   });
 
-  it("marks a failed approval via pendingAction_approve as a tool error with the failure record", async () => {
+  it("marks a failed approval via pendingAction_approve as a tool error and persists the failure record", async () => {
     const target = await company();
     const requester = await runtime.identity.resolveMcpToken(key);
     expect(requester).not.toBeNull();
@@ -185,8 +185,9 @@ describe("MCP approval tasks over HTTP", () => {
     }), approverKey);
     const error = { code: "validation", message: 'No company custom field with key "unknown"' };
     expect(response.result.isError).toBe(true);
-    expect(JSON.parse(response.result.content[0].text)).toMatchObject({
-      pendingAction: { id: action.id, status: "failed", result: { error } }, error,
+    expect(JSON.parse(response.result.content[0].text)).toEqual({ error });
+    expect(await runtime.portsFor(human.workspaceId).pendingActions.get(action.id)).toMatchObject({
+      id: action.id, status: "failed", result: { error },
     });
   });
 
@@ -243,7 +244,7 @@ describe("MCP approval tasks over HTTP", () => {
     expect(called.result.status).toBe("input_required");
     const error = { code: "internal", message: "forced failure after write" };
     expect(await runtime.run(human, "pendingAction.approve", { id: taskId })).toMatchObject({
-      status: "ok", data: { pendingAction: { status: "failed", result: { error } }, error },
+      status: "error", error,
     });
     expect(await runtime.portsFor(human.workspaceId).pendingActions.get(taskId)).toMatchObject({
       status: "failed", result: { error },

@@ -292,10 +292,6 @@ function registerTool(
       // already understand; the operation is never executed.
       if (await workspaceLocked(runtime, ctx)) return toText(workspaceLockedResult());
       const result = await runtime.run(ctx, op.name, args ?? {});
-      // Approval failures return ok so their failure record commits, but the tool must report an error.
-      if (op.name === "pendingAction.approve" && result.status === "ok" && (result.data as { error?: unknown } | null)?.error) {
-        return { ...toText(result), isError: true };
-      }
       if (result.status === "pending_approval") onPendingApproval?.(extra.requestId, result);
       return toText(result);
     },

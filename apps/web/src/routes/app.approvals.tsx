@@ -1,11 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Bot, Check, ChevronDown, ShieldCheck, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { toast } from "sonner";
 import { PENDING_STATUSES, type McpClient, type PendingAction, type User } from "@mcpsuite/core/domain";
-import { opQuery, useOp } from "~/lib/api.ts";
+import { invalidateAfter, opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, type Tone } from "~/lib/colors.ts";
 import { formatDateTime, relativeTime } from "~/lib/format.ts";
 import { EmptyState, Modal, PageHeader, Spinner } from "~/components/ui.tsx";
@@ -113,12 +112,8 @@ function PendingCard({
 }) {
   const [detailsOpen, setDetailsOpen] = useState(linked);
   const [rejectOpen, setRejectOpen] = useState(false);
-  const approve = useOp<{ id: string }, { error?: { message: string } }>("pendingAction.approve", {
-    onSuccess: ({ error }) => {
-      if (error) toast.error(`Approved, but execution failed: ${error.message}`, { duration: 6000 });
-      else toast.success("Approved & executed");
-    },
-  });
+  const queryClient = useQueryClient();
+  const approve = useOp("pendingAction.approve", { successToast: "Approved & executed" });
   const cancel = useOp("pendingAction.cancel", { successToast: "Cancelled" });
   const isPending = pa.status === "pending";
   const reviewedBy = pa.reviewedByUserId ? reviewer.find((u) => u.id === pa.reviewedByUserId)?.name : null;
@@ -167,7 +162,9 @@ function PendingCard({
               size="xs"
               className="gap-1 bg-success text-success-foreground hover:bg-success/85"
               disabled={approve.isPending}
-              onClick={() => approve.mutate({ id: pa.id })}
+              onClick={() => approve.mutate({ id: pa.id }, {
+                onError: () => invalidateAfter(queryClient, "pendingAction.approve"),
+              })}
             >
               <Check className="size-3.5" /> Approve
             </Button>

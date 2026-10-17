@@ -50,6 +50,11 @@ class AuditedRefusal extends OpError {
   }
 }
 
+/** A handler returns this when its failure record and audit must commit but the caller must see an error. */
+class CommittedFailure {
+  constructor(readonly error: ReturnType<typeof toErrorPayload>) {}
+}
+
 export function buildCatalog(deps: CatalogDeps): Catalog {
   const ops: OperationDef[] = [
     ...companyOps,
@@ -110,7 +115,7 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
         result = await op.ports.tx(() => target.handler(op, parsed));
       } catch (e) {
         const error = toErrorPayload(e);
-        const failed = await op.ports.pendingActions.setStatus(id, {
+        await op.ports.pendingActions.setStatus(id, {
           status: "failed",
           reviewedByUserId: op.ctx.userId,
           reviewNote: note ?? null,
@@ -125,7 +130,7 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
         });
         // Return so the outer transaction commits the failure and its audit.
         // The target's nested transaction has already rolled back its writes.
-        return { pendingAction: failed, error };
+        return new CommittedFailure(error);
       }
       const updated = await op.ports.pendingActions.setStatus(id, {
         status: "approved",
@@ -255,6 +260,7 @@ export async function runOperation(
     }
 
     const data = await ports.tx(() => op.handler(opCtx, input));
+    if (data instanceof CommittedFailure) return { status: "error", error: data.error };
     return { status: "ok", data };
   } catch (e) {
     if (e instanceof AuditedRefusal) {
