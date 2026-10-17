@@ -23,7 +23,19 @@ interface ImportPreview {
   skippedRows: number;
   newCompanies: number;
   existingCompanyMatches: number;
+  newPeople: number;
+  existingPeopleMatches: number;
   sample: unknown[];
+}
+
+interface ImportResult {
+  companiesCreated: number;
+  companiesMatched: number;
+  peopleCreated: number;
+  peopleMatched: number;
+  engagementsCreated: number;
+  engagementsSkipped: number;
+  tag: string;
 }
 
 function DataAdmin() {
@@ -47,7 +59,7 @@ function ImportCard() {
   > | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [sourceLabel, setSourceLabel] = useState("");
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [result, setResult] = useState<ImportResult | null>(null);
   const pipelines = useQuery(
     opQuery<Pipeline[]>("pipeline.list", { type: "engagement" }),
   );
@@ -59,7 +71,7 @@ function ImportCard() {
   const runImport = useOp("import.run", {
     successToast: "Import complete",
     onSuccess: (r) => {
-      setResult(r as Record<string, unknown>);
+      setResult(r as ImportResult);
       setPreview(null);
       setCsv(null);
       setFileName("");
@@ -133,8 +145,12 @@ function ImportCard() {
               </span>
             ) : null}
             <span className="text-muted-foreground">
-              {preview.newCompanies} new companies ·{" "}
-              {preview.existingCompanyMatches} matches
+              Companies: {preview.newCompanies} new ·{" "}
+              {preview.existingCompanyMatches} matched
+            </span>
+            <span className="text-muted-foreground">
+              People: {preview.newPeople} new ·{" "}
+              {preview.existingPeopleMatches} matched
             </span>
           </div>
 
@@ -231,7 +247,7 @@ function ImportCard() {
               }
             >
               {runImport.isPending ? <ButtonSpinner /> : null}
-              Import {preview.importableRows} rows
+              Run import
             </Button>
           </div>
         </div>
@@ -242,10 +258,19 @@ function ImportCard() {
       ) : null}
 
       {result ? (
-        <div className="mt-3 rounded-lg bg-success/10 p-3 text-sm text-success">
-          Imported {String(result.engagementsCreated)} leads ·{" "}
-          {String(result.companiesCreated)} new companies ·{" "}
-          {String(result.peopleCreated)} people · tagged "{String(result.tag)}"
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 rounded-lg bg-success/10 p-3 text-sm text-success">
+          <span>
+            Leads: {result.engagementsCreated} created ·{" "}
+            {result.engagementsSkipped} skipped (already imported)
+          </span>
+          <span>
+            Companies: {result.companiesCreated} new ·{" "}
+            {result.companiesMatched} matched
+          </span>
+          <span>
+            People: {result.peopleCreated} new · {result.peopleMatched} matched
+          </span>
+          <span>Tagged "{result.tag}"</span>
         </div>
       ) : null}
     </SectionCard>
