@@ -250,6 +250,10 @@ describe("engagements", () => {
         actorType: "human",
         actorUserId: ownerUserId,
       });
+      await ok(run(owner, "bulk.updateStage", { entityType, ids: [record.id], stageId: stage.id }));
+      const again = await ok(run(owner, "activity.list", { [`${entityType}Id`]: record.id }));
+      expect(again.items.filter((a: any) => a.kind === "status_change")).toHaveLength(1);
+
       const after = await ok(run(owner, `${entityType}.get`, { id: record.id }));
       expect(after.stageId).toBe(stage.id);
       expect(after.lastActivityAt).toBeTruthy();
