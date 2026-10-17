@@ -562,6 +562,17 @@ describe("pipelines", () => {
     expect((del as any).error.code).toBe("in_use");
   });
 
+  it("stage delete error names the stage instead of its id", async () => {
+    const pipelines = await ok(run(owner, "pipeline.list", { type: "engagement" }));
+    const stage = pipelines[0].stages[0];
+    await ok(run(owner, "engagement.create", { title: "L1" }));
+    const del = await run(owner, "stage.delete", { id: stage.id });
+    expect(del.status).toBe("error");
+    expect((del as any).error.code).toBe("in_use");
+    expect((del as any).error.message).toContain(`"${stage.name}"`);
+    expect((del as any).error.message).not.toContain(stage.id);
+  });
+
   it("create custom pipeline and reorder stages", async () => {
     const pipeline = await ok(
       run(owner, "pipeline.create", {
