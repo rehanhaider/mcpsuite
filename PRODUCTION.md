@@ -13,7 +13,8 @@ The installed product is a single application process. It serves, on one port
 - the browser application and operation API (`/`, `/api/...`),
 - the stateless MCP HTTP endpoint for agents (`POST /mcp`, Bearer API key
   from **Admin → Agents** required),
-- a cheap liveness probe (`GET /healthz`).
+- a readiness probe (`GET /healthz`) that returns 503 unless a trivial CRM
+  database read succeeds.
 
 MCP over stdio is launched on demand by agent clients (`pnpm mcp:stdio`) and
 is not a service. A separate MCP HTTP process (`pnpm mcp:http`, port
@@ -31,8 +32,8 @@ docker compose logs -f
 Compose builds the `mcpsuite/crm` image from this checkout, exposes
 everything on `:2222`, and persists SQLite under `./data`. The first run
 against an empty `./data` prints a one-time owner setup code in the logs —
-redeem it at `/set-password`. The container healthcheck probes
-`GET /healthz`.
+redeem it at `/set-password`. The container healthcheck uses `GET /healthz`
+as a readiness probe that returns 503 unless a trivial CRM database read succeeds.
 
 To scale MCP separately, run a second container from the same image with a
 command override (skip publishing `:8765` unless agents connect from outside

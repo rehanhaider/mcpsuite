@@ -33,6 +33,7 @@ import { initPgSchema } from "../src/pg/init.ts";
 import { createPgIdentity } from "../src/pg/identity.ts";
 import { dropTestDatabase, setTestRolePassword } from "./pg-test-support.ts";
 import { joinAuthKey, normalizeAuthCode } from "../src/openauth.ts";
+import { checkDatabaseHealth, createRuntimeFromEnv } from "../src/runtime.ts";
 
 const enabled = process.env.PG_TESTS === "1" && !!process.env.DATABASE_URL;
 /** The fixed fields every identity lookup returns (schema.sql). */
@@ -161,6 +162,35 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
       await dropTestDatabase(root, AUTH_DB).catch(() => {});
       await root.close();
     }
+  });
+
+  it("runtime ping shares overlapping calls, succeeds with no visible workspaces and fails after pool shutdown", async () => {
+    // This pool has no tenant context, so RLS hides even the seeded rows.
+    expect((await app.pool.query("SELECT 1 FROM crm.workspaces LIMIT 1")).rows).toHaveLength(0);
+    const appUrl = new URL(process.env.DATABASE_URL!);
+    appUrl.pathname = `/${AUTH_DB}`;
+    appUrl.username = "crm_app";
+    appUrl.password = APP_ROLE_TEST_PASSWORD;
+    const runtime = await createRuntimeFromEnv({ DATABASE_URL: appUrl.toString() });
+    if (runtime.adapter !== "postgres") throw new Error("expected the PostgreSQL adapter");
+    try {
+      const firstPing = runtime.ping();
+      expect(runtime.ping()).toBe(firstPing);
+      await expect(firstPing).resolves.toBeUndefined();
+      const nextPing = runtime.ping();
+      expect(nextPing).not.toBe(firstPing);
+      await expect(nextPing).resolves.toBeUndefined();
+      await expect(checkDatabaseHealth(async () => runtime)).resolves.toBe(true);
+    } finally {
+      await runtime.close();
+    }
+    const failedPing = runtime.ping();
+    expect(runtime.ping()).toBe(failedPing);
+    await expect(failedPing).rejects.toThrow();
+    const nextFailedPing = runtime.ping();
+    expect(nextFailedPing).not.toBe(failedPing);
+    await expect(nextFailedPing).rejects.toThrow();
+    await expect(checkDatabaseHealth(async () => runtime)).resolves.toBe(false);
   });
 
   // ── 1. New columns and their invariants ───────────────────────────────────

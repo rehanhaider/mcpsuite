@@ -46,6 +46,8 @@ import { runGated } from "./gated-run.ts";
  */
 export interface RuntimeCore {
   adapter: "sqlite" | "postgres";
+  /** Read a CRM table to check readiness without returning row data. */
+  ping(): Promise<void>;
   catalog: Catalog;
   portsFor(workspaceId: string): Ports;
   /** Sign-in, sessions, codes, MCP keys and the request gates (./identity.ts). */
@@ -97,6 +99,9 @@ export function createRuntime(db: Db = getDb()): Runtime {
   const portsFor = (workspaceId: string) => createPorts(db, workspaceId);
   return {
     adapter: "sqlite",
+    ping: async () => {
+      db.$client.prepare("SELECT 1 FROM workspaces LIMIT 1").get();
+    },
     db,
     catalog,
     bootstrapResult,
@@ -134,6 +139,17 @@ export function getRuntimeAsync(): Promise<AnyRuntime> {
   return processRuntime;
 }
 
+/** Runtime acquisition and CRM reads must both succeed for readiness. */
+export async function checkDatabaseHealth(getRuntime: () => Promise<AnyRuntime>): Promise<boolean> {
+  try {
+    const runtime = await getRuntime();
+    await runtime.ping();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function acquireProcessRuntime(): Promise<AnyRuntime> {
   const url = process.env.DATABASE_URL?.trim();
   if (url && isPostgresUrl(url)) return createHostedRuntime(url, pgStartupTimeoutMs(process.env));
@@ -161,6 +177,7 @@ export async function createRuntimeFromEnv(env: NodeJS.ProcessEnv = process.env)
 // ---------------------------------------------------------------------------
 
 const PG_STARTUP_PING_TIMEOUT_MS = 10_000;
+const READINESS_PING_TIMEOUT_MS = 2_000;
 
 /** Startup ping budget; override with MCPSUITE_PG_STARTUP_TIMEOUT_MS. */
 function pgStartupTimeoutMs(env: NodeJS.ProcessEnv): number {
@@ -188,8 +205,24 @@ async function createHostedRuntime(databaseUrl: string, pingTimeoutMs: number): 
       { cause },
     );
   }
+  let inFlightPing: Promise<void> | null = null;
   return {
     adapter: "postgres",
+    ping: () => {
+      if (!inFlightPing) {
+        // crm_app can SELECT this table. With no workspace context, forced
+        // RLS returns zero rows; successful execution is all readiness needs.
+        const query = pg.handle.pool.query("SELECT 1 FROM crm.workspaces LIMIT 1")
+          .then(() => {})
+          .finally(() => {
+            // A caller timeout does not cancel the query. Keep sharing the
+            // same ping until the query settles so probes cannot fill the pool.
+            inFlightPing = null;
+          });
+        inFlightPing = withTimeout(query, READINESS_PING_TIMEOUT_MS, "PostgreSQL readiness check");
+      }
+      return inFlightPing;
+    },
     catalog: pg.catalog,
     portsFor: pg.portsFor,
     identity: pg.identity,
