@@ -9,6 +9,9 @@ import { roleAtLeast, trustAllows } from "../src/policy.ts";
 import { OpError, toErrorPayload } from "../src/errors.ts";
 import { newId, slugify } from "../src/ids.ts";
 
+// Core typechecks without DOM or Node globals; the tests spy on this one.
+declare const console: { error(message: string): void };
+
 describe("policy", () => {
   it("role ladder", () => {
     expect(roleAtLeast("owner", "admin")).toBe(true);

@@ -77,10 +77,21 @@ export function toErrorPayload(e: unknown): ErrorPayload {
   return { code: "internal", message };
 }
 
+// Core compiles against plain ES2023 with no DOM or Node types; these are the
+// only two runtime globals it uses (both exist in Node 22 and browsers).
+declare const crypto: { randomUUID(): string };
+declare const console: { error(message: string): void };
+
+/** A short id shown to the user and written to the server log line. */
 export function errorReference(): string {
-  return globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+  return crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 }
 
+/**
+ * Internal failure: log one line an operator can find by reference, then
+ * return the payload with that reference. Logs the error only, never the
+ * operation input, request body, or credentials.
+ */
 export function internalErrorPayload(e: unknown, context: string): ErrorPayload {
   const payload = toErrorPayload(e);
   const reference = errorReference();
