@@ -16,7 +16,7 @@ export async function logDealStageChange(
   fromStageName: string | undefined,
   note?: string | null,
 ): Promise<void> {
-  await op.ports.activities.create(
+  const activity = await op.ports.activities.create(
     {
       kind: "status_change",
       dealId: deal.id,
@@ -28,6 +28,7 @@ export async function logDealStageChange(
     },
     actorStamp(op.ctx),
   );
+  await op.ports.activities.touchLinked(activity, activity.createdAt);
 }
 
 export const dealOps = [
@@ -164,9 +165,8 @@ export const dealOps = [
         patch.status = "open";
         patch.closedAt = null;
       }
-      const updated = await op.ports.deals.update(id, patch);
+      await op.ports.deals.update(id, patch);
       await logDealStageChange(op, deal, to.name, from?.name, note);
-      await op.ports.deals.update(id, { lastActivityAt: nowIso() });
       await audit(op, {
         operation: "deal.updateStage",
         entityType: "deal",
@@ -174,7 +174,7 @@ export const dealOps = [
         summary: `Moved deal "${deal.title}" to stage "${to.name}"`,
         meta: { from: from?.name, to: to.name },
       });
-      return updated;
+      return found(await op.ports.deals.get(id), "deal", id);
     },
   }),
 
@@ -191,7 +191,7 @@ export const dealOps = [
       const pipeline = found(await op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
       const wonStage = pipeline.stages.find((s) => s.outcome === "won");
       const from = pipeline.stages.find((s) => s.id === deal.stageId);
-      const updated = await op.ports.deals.update(id, {
+      await op.ports.deals.update(id, {
         status: "won",
         closedAt: nowIso(),
         probability: 100,
@@ -199,7 +199,7 @@ export const dealOps = [
       });
       await logDealStageChange(op, deal, wonStage?.name ?? "Won", from?.name, note);
       await audit(op, { operation: "deal.markWon", entityType: "deal", entityId: id, summary: `Won deal "${deal.title}"` });
-      return updated;
+      return found(await op.ports.deals.get(id), "deal", id);
     },
   }),
 
@@ -221,7 +221,7 @@ export const dealOps = [
       const pipeline = found(await op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
       const lostStage = pipeline.stages.find((s) => s.outcome === "lost");
       const from = pipeline.stages.find((s) => s.id === deal.stageId);
-      const updated = await op.ports.deals.update(id, {
+      await op.ports.deals.update(id, {
         status: "lost",
         closedAt: nowIso(),
         probability: 0,
@@ -235,7 +235,7 @@ export const dealOps = [
         entityId: id,
         summary: `Lost deal "${deal.title}"${lostReason ? ` — ${lostReason}` : ""}`,
       });
-      return updated;
+      return found(await op.ports.deals.get(id), "deal", id);
     },
   }),
 

@@ -271,6 +271,39 @@ describe("engagements", () => {
 });
 
 describe("deals", () => {
+  it("markWon bumps lastActivityAt in the response and stored deal", async () => {
+    const deal = await ok(run(owner, "deal.create", { title: "Won deal" }));
+    expect(deal.lastActivityAt).toBeNull();
+
+    const won = await ok(run(owner, "deal.markWon", { id: deal.id }));
+    expect(won.lastActivityAt).toBeTruthy();
+
+    const after = await ok(run(owner, "deal.get", { id: deal.id }));
+    expect(after.lastActivityAt).toBe(won.lastActivityAt);
+  });
+
+  it("markLost bumps lastActivityAt in the response and stored deal", async () => {
+    const deal = await ok(run(owner, "deal.create", { title: "Lost deal" }));
+    expect(deal.lastActivityAt).toBeNull();
+
+    const lost = await ok(run(owner, "deal.markLost", { id: deal.id }));
+    expect(lost.lastActivityAt).toBeTruthy();
+
+    const after = await ok(run(owner, "deal.get", { id: deal.id }));
+    expect(after.lastActivityAt).toBe(lost.lastActivityAt);
+  });
+
+  it("updateStage returns the deal with lastActivityAt", async () => {
+    const deal = await ok(run(owner, "deal.create", { title: "Stage move" }));
+    expect(deal.lastActivityAt).toBeNull();
+    const pipelines = await ok(run(owner, "pipeline.list", { type: "deal" }));
+    const stage = pipelines[0].stages.find((s: any) => s.id !== deal.stageId);
+
+    const moved = await ok(run(owner, "deal.updateStage", { id: deal.id, stageId: stage.id }));
+    expect(moved.stageId).toBe(stage.id);
+    expect(moved.lastActivityAt).toBeTruthy();
+  });
+
   it("full lifecycle: create → stage moves → won with closedAt", async () => {
     const company = await ok(run(owner, "company.create", { name: "Acme" }));
     const deal = await ok(
