@@ -5,7 +5,8 @@
  * store the way every CRM surface does.
  *
  *   - every lifecycle operation: provision, access set, inspect, owner
- *     transfer, owner recovery, permanent delete (with audit redaction);
+ *     transfer, owner recovery, permanent delete (with audit redaction, and
+ *     the workspace's sessions and MCP keys gone and refused);
  *   - idempotency: replay returns the stored response, a different body
  *     under the same key is a conflict;
  *   - atomicity: a fault injected after the change, after the receipt, or
@@ -70,6 +71,8 @@ type Table =
   | "memberships"
   | "pipelines"
   | "audit_events"
+  | "sessions"
+  | "mcp_clients"
   | "access"
   | "service_audit"
   | "outbox"
@@ -96,6 +99,8 @@ async function sqliteHarness(): Promise<Harness> {
     memberships: "memberships",
     pipelines: "pipelines",
     audit_events: "audit_events",
+    sessions: "sessions",
+    mcp_clients: "mcp_clients",
     access: "hc_workspace_access",
     service_audit: "hc_service_audit",
     outbox: "hc_auth_delivery_outbox",
@@ -173,6 +178,8 @@ async function pgHarness(): Promise<PgHarness> {
     memberships: "crm.memberships",
     pipelines: "crm.pipelines",
     audit_events: "crm.audit_events",
+    sessions: "crm.sessions",
+    mcp_clients: "crm.mcp_clients",
     access: "hosting.workspace_access",
     service_audit: "hosting.service_audit",
     outbox: "hosting.auth_delivery_outbox",
@@ -395,6 +402,28 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
       const keep = await workspace();
       const ws = await workspace();
       await h.crm.redeemCodeAndSetPassword({ email: ws.ownerEmail, purpose: "setup", code: ws.setupCode, password: "gone-password-1" });
+
+      // The owner signs in (activating them) and creates an MCP key: a live
+      // browser session and a live key for the workspace, both resolving.
+      const signIn = await h.crm.resolveAuthSuccess(ws.ownerEmail);
+      expect(signIn).toMatchObject({ status: "linked", userId: ws.ownerId });
+      const session = await h.crm.createSession(ws.ownerId, {
+        authSubject: signIn.status === "linked" ? signIn.subject : null,
+      });
+      const mcpKey = `mcpsuite_${name}_delete_${++seq}_${"d".repeat(24)}`;
+      await h.portsFor(ws.id).mcpClients.create({
+        name: "Doomed agent",
+        tokenHash: sha256Hex(mcpKey),
+        tokenPrefix: mcpKey.slice(0, 12),
+        scopes: ["read"],
+        trust: "review_risky_actions",
+        createdByUserId: ws.ownerId,
+      });
+      expect(await h.crm.resolveSession(session.token)).toMatchObject({ workspaceId: ws.id, user: { id: ws.ownerId } });
+      expect(await h.crm.resolveMcpToken(mcpKey)).toMatchObject({ workspaceId: ws.id, userId: ws.ownerId });
+      expect(await h.count("sessions", { user_id: ws.ownerId })).toBe(1);
+      expect(await h.count("mcp_clients", { workspace_id: ws.id })).toBe(1);
+
       await call("PUT", `/api/v1/workspaces/${ws.id}/access`, { idem: idem("pre-lock"), body: { accessMode: "locked" } });
 
       const del = await call("DELETE", `/api/v1/workspaces/${ws.id}`, { idem: idem("delete"), body: { reason: "contract" } });
@@ -405,6 +434,12 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
       expect(await h.count("memberships", { workspace_id: ws.id })).toBe(0);
       expect(await h.count("pipelines", { workspace_id: ws.id })).toBe(0);
       expect(await h.count("audit_events", { workspace_id: ws.id })).toBe(0);
+      expect(await h.count("sessions", { user_id: ws.ownerId })).toBe(0);
+      expect(await h.count("sessions", { token_hash: sha256Hex(session.token) })).toBe(0);
+      expect(await h.count("mcp_clients", { workspace_id: ws.id })).toBe(0);
+      expect(await h.count("mcp_clients", { token_hash: sha256Hex(mcpKey) })).toBe(0);
+      expect(await h.crm.resolveSessionAny(session.token)).toBeNull();
+      expect(await h.crm.resolveMcpToken(mcpKey)).toBeNull();
       expect(await h.count("access", { workspace_id: ws.id })).toBe(0);
       expect(await h.count("service_audit", { workspace_id: ws.id })).toBe(0);
       expect(await h.count("service_audit", { target_hash: sha256Hex(ws.id) })).toBeGreaterThan(0);
