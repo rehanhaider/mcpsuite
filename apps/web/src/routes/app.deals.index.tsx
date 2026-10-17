@@ -119,6 +119,7 @@ function DealsPage() {
     () => [
       {
         id: "displayId",
+        enableSorting: true,
         header: "Ref",
         size: 70,
         cell: ({ row }) => (
@@ -129,6 +130,7 @@ function DealsPage() {
       },
       {
         id: "title",
+        enableSorting: true,
         header: "Deal",
         cell: ({ row }) => (
           <div className="max-w-72">
@@ -145,6 +147,7 @@ function DealsPage() {
       },
       {
         id: "amountMinor",
+        enableSorting: true,
         header: "Value",
         cell: ({ row }) => (
           <span className="tnum font-mono text-xs">
@@ -217,6 +220,7 @@ function DealsPage() {
       },
       {
         id: "expectedCloseDate",
+        enableSorting: true,
         header: "Close",
         cell: ({ row }) => {
           const d = row.original.expectedCloseDate;
@@ -245,6 +249,7 @@ function DealsPage() {
       },
       {
         id: "lastActivityAt",
+        enableSorting: true,
         header: "Activity",
         cell: ({ row }) => (
           <span className="text-xs text-muted-foreground">

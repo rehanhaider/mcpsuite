@@ -70,6 +70,7 @@ function PeoplePage() {
     () => [
       {
         id: "name",
+        enableSorting: true,
         header: "Person",
         cell: ({ row }) => (
           <div className="flex max-w-72 items-center gap-2.5">
@@ -120,6 +121,7 @@ function PeoplePage() {
       },
       {
         id: "updatedAt",
+        enableSorting: true,
         header: "Updated",
         cell: ({ row }) => <span className="text-xs text-muted-foreground">{relativeTime(row.original.updatedAt)}</span>,
       },

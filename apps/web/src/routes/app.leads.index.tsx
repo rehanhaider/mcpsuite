@@ -127,6 +127,7 @@ function LeadsPage() {
     () => [
       {
         id: "displayId",
+        enableSorting: true,
         header: "Ref",
         size: 70,
         cell: ({ row }) => (
@@ -137,6 +138,7 @@ function LeadsPage() {
       },
       {
         id: "title",
+        enableSorting: true,
         header: "Lead",
         cell: ({ row }) => (
           <div className="max-w-72">
@@ -219,6 +221,7 @@ function LeadsPage() {
       },
       {
         id: "nextActionDue",
+        enableSorting: true,
         header: "Next action",
         cell: ({ row }) => {
           const e = row.original;
@@ -242,6 +245,7 @@ function LeadsPage() {
       },
       {
         id: "lastActivityAt",
+        enableSorting: true,
         header: "Activity",
         cell: ({ row }) => (
           <span className="text-xs text-muted-foreground">

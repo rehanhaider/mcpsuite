@@ -67,12 +67,14 @@ function CompaniesPage() {
     () => [
       {
         id: "displayId",
+        enableSorting: true,
         header: "Ref",
         size: 90,
         cell: ({ row }) => <span className="tnum font-mono text-xs text-muted-foreground/70">COMPANY-{row.original.displayId}</span>,
       },
       {
         id: "name",
+        enableSorting: true,
         header: "Company",
         cell: ({ row }) => (
           <div className="max-w-72">
@@ -109,6 +111,7 @@ function CompaniesPage() {
       },
       {
         id: "updatedAt",
+        enableSorting: true,
         header: "Updated",
         cell: ({ row }) => <span className="text-xs text-muted-foreground">{relativeTime(row.original.updatedAt)}</span>,
       },
