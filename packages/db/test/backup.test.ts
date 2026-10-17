@@ -60,6 +60,15 @@ afterEach(() => {
 });
 
 describe("data.backup", () => {
+  it("creates distinct files for back-to-back backups", async () => {
+    const first = await ok<{ path: string }>(run(owner, "data.backup"));
+    const second = await ok<{ path: string }>(run(owner, "data.backup"));
+
+    expect(second.path).not.toBe(first.path);
+    expect(existsSync(first.path)).toBe(true);
+    expect(existsSync(second.path)).toBe(true);
+  });
+
   it("backs up committed WAL data through the catalog and records an audit event", async () => {
     const company = await ok<Company>(run(owner, "company.create", { name: "Before backup" }));
 

@@ -2522,7 +2522,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       const dbPath = (sqlite as unknown as { name: string }).name;
       const dir = join(dirname(dbPath), "backups");
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
       const dest = join(dir, `mcpsuite-${stamp}.db`);
       // The catalog runs every operation inside a transaction; SQLite refuses
       // VACUUM inside one, so the backup needs its own connection.
