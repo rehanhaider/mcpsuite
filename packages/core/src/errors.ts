@@ -52,11 +52,12 @@ export class OpError extends Error {
     );
   }
 
-  static inUse(entity: string, id: string, count: number): OpError {
-    return new OpError("in_use", `${entity} ${id} is referenced by ${count} record(s); reassign them first.`, {
+  static inUse(entity: string, id: string, count: number, name?: string): OpError {
+    return new OpError("in_use", `${entity} ${name !== undefined ? `"${name}"` : id} is referenced by ${count} record(s); reassign them first.`, {
       entity,
       id,
       count,
+      ...(name !== undefined ? { name } : {}),
     });
   }
 }

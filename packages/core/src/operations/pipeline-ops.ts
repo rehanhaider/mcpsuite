@@ -155,7 +155,7 @@ export const pipelineOps = [
     handler: async (op, { id }) => {
       const stage = found(await op.ports.pipelines.getStage(id), "stage", id);
       const usage = await op.ports.pipelines.stageUsage(id);
-      if (usage > 0) throw OpError.inUse("stage", id, usage);
+      if (usage > 0) throw OpError.inUse("stage", id, usage, stage.name);
       await op.ports.pipelines.deleteStage(id);
       await audit(op, { operation: "stage.delete", entityType: "stage", entityId: id, summary: `Deleted stage "${stage.name}"` });
       return { deleted: id };
