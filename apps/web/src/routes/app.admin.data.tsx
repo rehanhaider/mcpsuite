@@ -15,7 +15,7 @@ export const Route = createFileRoute("/app/admin/data")({
   component: DataAdmin,
 });
 
-interface ImportPreview {
+export interface ImportPreview {
   headers: string[];
   mapping: Record<string, ImportTargetField>;
   totalRows: number;
@@ -28,7 +28,7 @@ interface ImportPreview {
   sample: unknown[];
 }
 
-interface ImportResult {
+export interface ImportResult {
   companiesCreated: number;
   companiesMatched: number;
   peopleCreated: number;
@@ -144,14 +144,7 @@ function ImportCard() {
                 {preview.skippedRows} skipped
               </span>
             ) : null}
-            <span className="text-muted-foreground">
-              Companies: {preview.newCompanies} new ·{" "}
-              {preview.existingCompanyMatches} matched
-            </span>
-            <span className="text-muted-foreground">
-              People: {preview.newPeople} new ·{" "}
-              {preview.existingPeopleMatches} matched
-            </span>
+            <ImportPreviewCounts preview={preview} />
           </div>
 
           <div className="overflow-x-auto rounded-xl border border-border">
@@ -257,23 +250,42 @@ function ImportCard() {
         <p className="text-sm text-muted-foreground">Analyzing CSV…</p>
       ) : null}
 
-      {result ? (
-        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 rounded-lg bg-success/10 p-3 text-sm text-success">
-          <span>
-            Leads: {result.engagementsCreated} created ·{" "}
-            {result.engagementsSkipped} skipped (already imported)
-          </span>
-          <span>
-            Companies: {result.companiesCreated} new ·{" "}
-            {result.companiesMatched} matched
-          </span>
-          <span>
-            People: {result.peopleCreated} new · {result.peopleMatched} matched
-          </span>
-          <span>Tagged "{result.tag}"</span>
-        </div>
-      ) : null}
+      {result ? <ImportResultSummary result={result} /> : null}
     </SectionCard>
+  );
+}
+
+export function ImportPreviewCounts({ preview }: { preview: ImportPreview }) {
+  return (
+    <>
+      <span className="text-muted-foreground">
+        Companies: {preview.newCompanies} new ·{" "}
+        {preview.existingCompanyMatches} matched
+      </span>
+      <span className="text-muted-foreground">
+        People: {preview.newPeople} new ·{" "}
+        {preview.existingPeopleMatches} matched
+      </span>
+    </>
+  );
+}
+
+export function ImportResultSummary({ result }: { result: ImportResult }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 rounded-lg bg-success/10 p-3 text-sm text-success">
+      <span>
+        Leads: {result.engagementsCreated} created ·{" "}
+        {result.engagementsSkipped} skipped (already imported)
+      </span>
+      <span>
+        Companies: {result.companiesCreated} new ·{" "}
+        {result.companiesMatched} matched
+      </span>
+      <span>
+        People: {result.peopleCreated} new · {result.peopleMatched} matched
+      </span>
+      <span>Tagged "{result.tag}"</span>
+    </div>
   );
 }
 
