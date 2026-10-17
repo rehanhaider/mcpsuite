@@ -785,6 +785,18 @@ describe("search + import/export", () => {
     expect(exported.csv).toContain("Acme");
   });
 
+  it("CSV preview counts same-file company and person reuse as matches", async () => {
+    await ok(run(owner, "company.create", { name: "Acme" }));
+    const csv = "Company,Contact,Email\nBeta Corp,Bob,bob@beta.co\nBeta Corp,Bob,bob@beta.co\nAcme,,\n";
+    const preview = await ok(run(owner, "import.preview", { csv }));
+    expect(preview).toMatchObject({ newCompanies: 1, existingCompanyMatches: 2, newPeople: 1, existingPeopleMatches: 1 });
+
+    const result = await ok(run(owner, "import.run", { csv, sourceLabel: "same-file-reuse" }));
+    expect(result).toMatchObject({ companiesCreated: 1, companiesMatched: 2, peopleCreated: 1, peopleMatched: 1 });
+    expect(preview.existingCompanyMatches).toBe(result.companiesMatched);
+    expect(preview.existingPeopleMatches).toBe(result.peopleMatched);
+  });
+
   it("CSV preview honours mapping overrides and agrees with the import", async () => {
     const csv = "Organisation,Job Title,Work Email\nAcme,CTO,ada@acme.io\nBeta Corp,CEO,bob@beta.co\n,Analyst,cy@example.com\n";
     await ok(run(owner, "company.create", { name: "Acme" }));
@@ -909,14 +921,14 @@ describe("search + import/export", () => {
     it("a repeated row inside one CSV creates one person and one lead; a differing row does not share them", async () => {
       const dup = "Company,Contact,Email\nAcme,Ada,ada@acme.io\nAcme,Ada,ada@acme.io\nAcme,Ada,\n";
       const preview = await ok(run(owner, "import.preview", { csv: dup }));
-      expect(preview).toMatchObject({ newCompanies: 1, newPeople: 2, existingPeopleMatches: 0 });
+      expect(preview).toMatchObject({ newCompanies: 1, newPeople: 2, existingPeopleMatches: 1 });
       const result = await ok(run(owner, "import.run", { csv: dup, sourceLabel: "dup" }));
       expect(result).toMatchObject({ companiesCreated: 1, peopleCreated: 2, peopleMatched: 1, engagementsCreated: 2, engagementsSkipped: 1 });
     });
 
     it("preview reports people and agrees with what the run then does", async () => {
       const before = await ok(run(owner, "import.preview", { csv }));
-      expect(before).toMatchObject({ newCompanies: 2, existingCompanyMatches: 0, newPeople: 3, existingPeopleMatches: 0 });
+      expect(before).toMatchObject({ newCompanies: 2, existingCompanyMatches: 1, newPeople: 3, existingPeopleMatches: 0 });
       const result = await ok(run(owner, "import.run", { csv, sourceLabel: "batch-1" }));
       expect(result.companiesCreated).toBe(before.newCompanies);
       expect(result.peopleCreated).toBe(before.newPeople);

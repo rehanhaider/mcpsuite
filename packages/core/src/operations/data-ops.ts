@@ -188,10 +188,17 @@ async function previewImport(op: OpCtx, csvServices: CsvServices, input: z.infer
   let existingCompanyMatches = 0;
   let existingPeopleMatches = 0;
   for (const plan of plans) {
+    // Count same-file reuse as a match, just as the run does.
     if (plan.company?.kind === "existing") existingCompanyMatches++;
-    else if (plan.company) newCompanies.add(plan.company.key);
+    else if (plan.company) {
+      if (newCompanies.has(plan.company.key)) existingCompanyMatches++;
+      newCompanies.add(plan.company.key);
+    }
     if (plan.person?.kind === "existing") existingPeopleMatches++;
-    else if (plan.person) newPeople.add(plan.person.key);
+    else if (plan.person) {
+      if (newPeople.has(plan.person.key)) existingPeopleMatches++;
+      newPeople.add(plan.person.key);
+    }
   }
   return {
     headers,
