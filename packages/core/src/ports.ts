@@ -342,8 +342,8 @@ export interface PendingActionPort {
       result?: Record<string, unknown> | null;
     },
   ): Promise<PendingAction>;
-  /** Cancel only while pending; one guarded UPDATE returns whether it changed a row. */
-  cancelIfPending(id: string, patch: { reviewedByUserId?: string | null; reviewNote?: string | null }): Promise<boolean>;
+  /** One guarded UPDATE (WHERE status = 'pending'); returns whether it changed a row. */
+  transitionIfPending(id: string, patch: { status: "cancelled" | "rejected"; reviewedByUserId?: string | null; reviewNote?: string | null }): Promise<boolean>;
   countPending(): Promise<number>;
 }
 

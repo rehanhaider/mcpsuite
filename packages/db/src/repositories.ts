@@ -2256,10 +2256,10 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       if (!pa) throw OpError.notFound("pending action", id);
       return pa;
     },
-    async cancelIfPending(id, patch) {
+    async transitionIfPending(id, patch) {
       const result = db.update(t.pendingActions)
         .set({
-          status: "cancelled",
+          status: patch.status,
           reviewedByUserId: patch.reviewedByUserId ?? null,
           reviewedAt: nowIso(),
           reviewNote: patch.reviewNote ?? null,

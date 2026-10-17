@@ -568,6 +568,32 @@ describe("authorization + approval gating", () => {
     expect((await ok(run(owner, "company.list", {}))).total).toBe(1);
     const pa = await ok(run(owner, "pendingAction.get", { id: pendingId }));
     expect(pa.status).toBe("rejected");
+    const audit = await ports.audit.list({ operation: "pendingAction.reject", entityId: pendingId, limit: 10, offset: 0 });
+    expect(audit.total).toBe(1);
+  });
+
+  it.each(["pendingAction.cancel", "pendingAction.reject"])("keeps an approval that wins the race with %s", async (operation) => {
+    const company = await ok(run(owner, "company.create", { name: "Safe Inc" }));
+    const gated = await run(agentCtx(), "company.delete", { id: company.id });
+    expect(gated.status).toBe("pending_approval");
+    const pendingId = (gated as any).pendingActionId;
+    const admin: RequestContext = { ...owner, role: "admin" };
+    const result = { data: { approved: true } };
+    const racedPorts: Ports = {
+      ...ports,
+      pendingActions: {
+        ...ports.pendingActions,
+        transitionIfPending: async (id, patch) => {
+          await ports.pendingActions.setStatus(id, { status: "approved", reviewedByUserId: admin.userId, result });
+          return ports.pendingActions.transitionIfPending(id, patch);
+        },
+      },
+    };
+    const outcome = await runOperation(catalog, racedPorts, admin, operation, { id: pendingId });
+    expect(outcome).toMatchObject({ status: "ok", data: { status: "approved", result } });
+    expect(await ports.pendingActions.get(pendingId)).toMatchObject({ status: "approved", result });
+    const audit = await ports.audit.list({ operation, entityId: pendingId, limit: 10, offset: 0 });
+    expect(audit.total).toBe(0);
   });
 
   it.each(["pendingAction.cancel", "pendingAction.cancelOwnTask"])("%s attributes an agent's self-cancel to the agent", async (operation) => {
@@ -612,6 +638,8 @@ describe("authorization + approval gating", () => {
     const stored = await ports.pendingActions.get(pendingId);
     expect(stored?.status).toBe("cancelled");
     expect(stored?.reviewedByUserId).toBe(admin.userId);
+    const audit = await ports.audit.list({ operation: "pendingAction.cancel", entityId: pendingId, limit: 10, offset: 0 });
+    expect(audit.total).toBe(1);
   });
 
   it("viewer cannot write", async () => {

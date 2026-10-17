@@ -2767,12 +2767,12 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
         return pa;
       });
     },
-    async cancelIfPending(id, patch) {
+    async transitionIfPending(id, patch) {
       return run(async (x) => {
         const rows = await x
           .update(t.pendingActions)
           .set({
-            status: "cancelled",
+            status: patch.status,
             reviewedByUserId: patch.reviewedByUserId ?? null,
             reviewedAt: new Date(),
             reviewNote: patch.reviewNote ?? null,

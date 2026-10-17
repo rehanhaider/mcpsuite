@@ -244,9 +244,9 @@ describe("MCP approval tasks over HTTP", () => {
       ...ports,
       pendingActions: {
         ...ports.pendingActions,
-        cancelIfPending: async (id: string, patch: { reviewedByUserId?: string | null; reviewNote?: string | null }) => {
+        transitionIfPending: async (id: string, patch: { status: "cancelled" | "rejected"; reviewedByUserId?: string | null; reviewNote?: string | null }) => {
           await ports.pendingActions.setStatus(id, { status: "approved", reviewedByUserId: human.userId, result });
-          return ports.pendingActions.cancelIfPending(id, patch);
+          return ports.pendingActions.transitionIfPending(id, patch);
         },
       },
     };
