@@ -8,7 +8,7 @@ import {
   type Company,
 } from "../domain.ts";
 import { defineOperation } from "./define.ts";
-import { audit, checkVersion, definedOnly, found } from "./helpers.ts";
+import { audit, checkVersion, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 const zArchiveInput = z.object({ id: zId });
 const zGetInput = z.object({ id: zId });
@@ -80,7 +80,7 @@ export const companyOps = [
         entityType: "company",
         entityId: id,
         summary: `Updated company "${updated.name}"`,
-        meta: { fields: Object.keys(definedOnly(patch)) },
+        meta: { changes: fieldChanges(existing, updated, Object.keys(definedOnly(patch))) },
       });
       return updated;
     },

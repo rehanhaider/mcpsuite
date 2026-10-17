@@ -4,7 +4,7 @@ import { nowIso } from "../ids.ts";
 import { zDealCreate, zDealFilter, zDealUpdate, zExpectedVersion, zId, type Deal } from "../domain.ts";
 import { actorStamp } from "../context.ts";
 import { defineOperation, type OpCtx } from "./define.ts";
-import { audit, checkVersion, definedOnly, found } from "./helpers.ts";
+import { audit, checkVersion, definedOnly, fieldChanges, found } from "./helpers.ts";
 import { resolvePipelineStage } from "./engagement-ops.ts";
 
 const zGet = z.object({ id: zId });
@@ -136,7 +136,7 @@ export const dealOps = [
         entityType: "deal",
         entityId: id,
         summary: `Updated deal "${updated.title}"`,
-        meta: { fields: Object.keys(definedOnly(patch)) },
+        meta: { changes: fieldChanges(existing, updated, Object.keys(definedOnly(patch))) },
       });
       return updated;
     },
@@ -167,14 +167,15 @@ export const dealOps = [
       }
       await op.ports.deals.update(id, patch);
       await logDealStageChange(op, deal, to.name, from?.name, note);
+      const updated = found(await op.ports.deals.get(id), "deal", id);
       await audit(op, {
         operation: "deal.updateStage",
         entityType: "deal",
         entityId: id,
         summary: `Moved deal "${deal.title}" to stage "${to.name}"`,
-        meta: { from: from?.name, to: to.name },
+        meta: { from: from?.name, to: to.name, changes: fieldChanges(deal, updated, Object.keys(patch)) },
       });
-      return found(await op.ports.deals.get(id), "deal", id);
+      return updated;
     },
   }),
 
@@ -191,15 +192,23 @@ export const dealOps = [
       const pipeline = found(await op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
       const wonStage = pipeline.stages.find((s) => s.outcome === "won");
       const from = pipeline.stages.find((s) => s.id === deal.stageId);
-      await op.ports.deals.update(id, {
+      const patch: Partial<Deal> = {
         status: "won",
         closedAt: nowIso(),
         probability: 100,
         ...(wonStage ? { stageId: wonStage.id } : {}),
-      });
+      };
+      await op.ports.deals.update(id, patch);
       await logDealStageChange(op, deal, wonStage?.name ?? "Won", from?.name, note);
-      await audit(op, { operation: "deal.markWon", entityType: "deal", entityId: id, summary: `Won deal "${deal.title}"` });
-      return found(await op.ports.deals.get(id), "deal", id);
+      const updated = found(await op.ports.deals.get(id), "deal", id);
+      await audit(op, {
+        operation: "deal.markWon",
+        entityType: "deal",
+        entityId: id,
+        summary: `Won deal "${deal.title}"`,
+        meta: { changes: fieldChanges(deal, updated, Object.keys(patch)) },
+      });
+      return updated;
     },
   }),
 
@@ -221,21 +230,24 @@ export const dealOps = [
       const pipeline = found(await op.ports.pipelines.get(deal.pipelineId), "pipeline", deal.pipelineId);
       const lostStage = pipeline.stages.find((s) => s.outcome === "lost");
       const from = pipeline.stages.find((s) => s.id === deal.stageId);
-      await op.ports.deals.update(id, {
+      const patch: Partial<Deal> = {
         status: "lost",
         closedAt: nowIso(),
         probability: 0,
         lostReason: lostReason ?? deal.lostReason,
         ...(lostStage ? { stageId: lostStage.id } : {}),
-      });
+      };
+      await op.ports.deals.update(id, patch);
       await logDealStageChange(op, deal, lostStage?.name ?? "Lost", from?.name, note ?? lostReason);
+      const updated = found(await op.ports.deals.get(id), "deal", id);
       await audit(op, {
         operation: "deal.markLost",
         entityType: "deal",
         entityId: id,
         summary: `Lost deal "${deal.title}"${lostReason ? ` — ${lostReason}` : ""}`,
+        meta: { changes: fieldChanges(deal, updated, Object.keys(patch)) },
       });
-      return found(await op.ports.deals.get(id), "deal", id);
+      return updated;
     },
   }),
 
@@ -250,8 +262,15 @@ export const dealOps = [
       const deal = found(await op.ports.deals.get(id), "deal", id);
       checkVersion("deal", id, deal.version, expectedVersion);
       if (deal.status === "open") throw OpError.validation("Deal is already open");
-      const updated = await op.ports.deals.update(id, { status: "open", closedAt: null, lostReason: null });
-      await audit(op, { operation: "deal.reopen", entityType: "deal", entityId: id, summary: `Reopened deal "${deal.title}"` });
+      const patch: Partial<Deal> = { status: "open", closedAt: null, lostReason: null };
+      const updated = await op.ports.deals.update(id, patch);
+      await audit(op, {
+        operation: "deal.reopen",
+        entityType: "deal",
+        entityId: id,
+        summary: `Reopened deal "${deal.title}"`,
+        meta: { changes: fieldChanges(deal, updated, Object.keys(patch)) },
+      });
       return updated;
     },
   }),
@@ -347,8 +366,16 @@ export const dealOps = [
     minRole: "member",
     scope: "write",
     handler: async (op, { id, ...patch }) => {
-      found(await op.ports.deals.getStakeholder(id), "stakeholder", id);
-      return op.ports.deals.updateStakeholder(id, definedOnly(patch));
+      const before = found(await op.ports.deals.getStakeholder(id), "stakeholder", id);
+      const after = await op.ports.deals.updateStakeholder(id, definedOnly(patch));
+      await audit(op, {
+        operation: "deal.updateStakeholder",
+        entityType: "deal",
+        entityId: before.dealId,
+        summary: "Updated stakeholder",
+        meta: { stakeholderId: id, personId: before.personId, changes: fieldChanges(before, after, Object.keys(definedOnly(patch))) },
+      });
+      return after;
     },
   }),
 

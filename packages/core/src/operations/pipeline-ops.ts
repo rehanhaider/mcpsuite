@@ -2,7 +2,7 @@ import { z } from "zod";
 import { OpError } from "../errors.ts";
 import { PIPELINE_TYPES, zId, zPipelineCreate, zSemanticColor, zStageInput } from "../domain.ts";
 import { defineOperation } from "./define.ts";
-import { audit, definedOnly, found } from "./helpers.ts";
+import { audit, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 export const pipelineOps = [
   defineOperation({
@@ -44,9 +44,15 @@ export const pipelineOps = [
     scope: "admin",
     risk: "config",
     handler: async (op, { id, name }) => {
-      found(await op.ports.pipelines.get(id), "pipeline", id);
+      const existing = found(await op.ports.pipelines.get(id), "pipeline", id);
       const p = await op.ports.pipelines.rename(id, name);
-      await audit(op, { operation: "pipeline.rename", entityType: "pipeline", entityId: id, summary: `Renamed pipeline to "${name}"` });
+      await audit(op, {
+        operation: "pipeline.rename",
+        entityType: "pipeline",
+        entityId: id,
+        summary: `Renamed pipeline to "${name}"`,
+        meta: { changes: fieldChanges(existing, p, ["name"]) },
+      });
       return p;
     },
   }),
@@ -117,9 +123,15 @@ export const pipelineOps = [
     scope: "admin",
     risk: "config",
     handler: async (op, { id, ...patch }) => {
-      found(await op.ports.pipelines.getStage(id), "stage", id);
+      const existing = found(await op.ports.pipelines.getStage(id), "stage", id);
       const stage = await op.ports.pipelines.updateStage(id, definedOnly(patch));
-      await audit(op, { operation: "stage.update", entityType: "stage", entityId: id, summary: `Updated stage "${stage.name}"` });
+      await audit(op, {
+        operation: "stage.update",
+        entityType: "stage",
+        entityId: id,
+        summary: `Updated stage "${stage.name}"`,
+        meta: { changes: fieldChanges(existing, stage, Object.keys(definedOnly(patch))) },
+      });
       return stage;
     },
   }),

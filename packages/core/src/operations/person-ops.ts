@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { zId, zPersonCreate, zPersonFilter, zPersonUpdate, type Person } from "../domain.ts";
 import { defineOperation } from "./define.ts";
-import { audit, checkVersion, definedOnly, found } from "./helpers.ts";
+import { audit, checkVersion, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 const zGet = z.object({ id: zId });
 
@@ -81,7 +81,7 @@ export const personOps = [
         entityType: "person",
         entityId: id,
         summary: `Updated person "${updated.name}"`,
-        meta: { fields: Object.keys(definedOnly(patch)) },
+        meta: { changes: fieldChanges(existing, updated, Object.keys(definedOnly(patch))) },
       });
       return updated;
     },

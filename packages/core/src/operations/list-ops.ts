@@ -13,7 +13,7 @@ import { OpError } from "../errors.ts";
 import type { ListableType } from "../domain.ts";
 import { zListCreate, zListMembers, zListUpdate, zId, zLimit, zOffset, LISTABLE_TYPES, LISTABLE_LABELS, listAccepts } from "../domain.ts";
 import { defineOperation } from "./define.ts";
-import { audit, definedOnly, found } from "./helpers.ts";
+import { audit, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 export const listOps = [
   defineOperation({
@@ -79,7 +79,7 @@ export const listOps = [
     minRole: "member",
     scope: "write",
     handler: async (op, { id, ...patch }) => {
-      found(await op.ports.lists.get(id), "list", id);
+      const existing = found(await op.ports.lists.get(id), "list", id);
       if (patch.entityType) {
         const counts = await op.ports.lists.memberTypeCounts(id);
         for (const [type, n] of Object.entries(counts)) {
@@ -89,7 +89,13 @@ export const listOps = [
         }
       }
       const list = await op.ports.lists.update(id, definedOnly(patch));
-      await audit(op, { operation: "list.update", entityType: "list", entityId: id, summary: `Updated list "${list.name}"` });
+      await audit(op, {
+        operation: "list.update",
+        entityType: "list",
+        entityId: id,
+        summary: `Updated list "${list.name}"`,
+        meta: { changes: fieldChanges(existing, list, Object.keys(definedOnly(patch))) },
+      });
       return list;
     },
   }),

@@ -21,7 +21,7 @@ import {
   type CustomFieldValue,
 } from "../domain.ts";
 import { defineOperation } from "./define.ts";
-import { audit, definedOnly, found } from "./helpers.ts";
+import { audit, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 export const tagOps = [
   defineOperation({
@@ -58,9 +58,15 @@ export const tagOps = [
     minRole: "member",
     scope: "write",
     handler: async (op, { id, ...patch }) => {
-      found(await op.ports.tags.get(id), "tag", id);
+      const existing = found(await op.ports.tags.get(id), "tag", id);
       const tag = await op.ports.tags.update(id, definedOnly(patch));
-      await audit(op, { operation: "tag.update", entityType: "tag", entityId: id, summary: `Updated tag "${tag.name}"` });
+      await audit(op, {
+        operation: "tag.update",
+        entityType: "tag",
+        entityId: id,
+        summary: `Updated tag "${tag.name}"`,
+        meta: { changes: fieldChanges(existing, tag, Object.keys(definedOnly(patch))) },
+      });
       return tag;
     },
   }),
@@ -182,6 +188,7 @@ export const customFieldOps = [
         entityType: "custom_field",
         entityId: id,
         summary: `Updated field "${updated.label}"`,
+        meta: { changes: fieldChanges(def, updated, Object.keys(definedOnly(patch))) },
       });
       return updated;
     },
@@ -237,6 +244,7 @@ export const customFieldOps = [
       }[entityType];
       found(await port(), entityType, entityId);
 
+      const before = await op.ports.customFields.values(entityType, entityId);
       const results: Record<string, CustomFieldValue> = {};
       for (const [key, raw] of Object.entries(values)) {
         const def = await op.ports.customFields.getDefByKey(entityType, key);
@@ -255,6 +263,7 @@ export const customFieldOps = [
         entityType,
         entityId,
         summary: `Set custom fields: ${Object.keys(values).join(", ")}`,
+        meta: { changes: fieldChanges(before, results, Object.keys(values)) },
       });
       return { entityType, entityId, values: results };
     },
@@ -306,7 +315,13 @@ export const savedViewOps = [
         throw OpError.forbidden("Not your view");
       }
       const updated = await op.ports.savedViews.update(id, definedOnly(patch));
-      await audit(op, { operation: "savedView.update", entityType: "saved_view", entityId: id, summary: `Updated saved view "${updated.name}"` });
+      await audit(op, {
+        operation: "savedView.update",
+        entityType: "saved_view",
+        entityId: id,
+        summary: `Updated saved view "${updated.name}"`,
+        meta: { changes: fieldChanges(view, updated, Object.keys(definedOnly(patch))) },
+      });
       return updated;
     },
   }),
