@@ -61,7 +61,7 @@ export function FeedList({
         <FeedRow
           key={a.id}
           activity={a}
-          actorName={actorUserName(a.actorUserId, users.isSuccess ? users.data : undefined)}
+          actorName={actorUserName(a.actorType, a.actorUserId, users.isSuccess ? users.data : undefined)}
           showLinks={showLinks}
         />
       ))}

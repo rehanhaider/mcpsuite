@@ -61,7 +61,7 @@ const INVALIDATION_GRAPH: Record<string, string[]> = {
   pendingAction: ["pendingAction", "stats", "audit", "company", "person", "engagement", "deal", "activity", "whoami"],
   bulk: ["company", "person", "engagement", "deal", "stats", "audit", "tag", "list"],
   import: ["company", "person", "engagement", "tag", "list", "stats", "audit"],
-  user: ["user", "audit", "whoami"],
+  user: ["user", "mcpClient", "audit", "whoami"],
   mcpClient: ["mcpClient", "audit"],
   workspace: ["workspace", "whoami", "audit", "stats"],
   export: ["audit"],

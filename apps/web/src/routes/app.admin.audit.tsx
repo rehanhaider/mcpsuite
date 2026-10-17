@@ -30,10 +30,11 @@ function AuditAdmin() {
   const clients = useQuery(opQuery<McpClient[]>("mcpClient.list"));
 
   const actorName = (e: AuditEvent) => {
-    const userName = actorUserName(e.actorUserId, users.isSuccess ? users.data : undefined);
+    const userName = actorUserName(e.actorType, e.actorUserId, users.isSuccess ? users.data : undefined);
     if (e.actorType === "agent") {
+      if (userName === "Deleted user") return userName;
       const client = clients.data?.find((c) => c.id === e.actorClientId);
-      return client?.name ?? (clients.isSuccess && userName === "Deleted user" ? userName : "agent");
+      return client?.name ?? "agent";
     }
     if (e.actorType === "human") return userName ?? "user";
     return "system";
