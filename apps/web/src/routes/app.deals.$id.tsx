@@ -86,13 +86,13 @@ function DealDetailPage() {
   );
   const users = useQuery(opQuery<User[]>("user.list"));
   const [editOpen, setEditOpen] = useState(false);
+  const [wonOpen, setWonOpen] = useState(false);
   const [lostOpen, setLostOpen] = useState(false);
   const [stakeholderOpen, setStakeholderOpen] = useState(false);
 
   const moveStage = useOp("deal.updateStage", {
     successToast: "Stage updated",
   });
-  const markWon = useOp("deal.markWon", { successToast: "Deal won" });
   const reopen = useOp("deal.reopen", { successToast: "Reopened" });
   const archive = useOp("deal.archive", { successToast: "Archived" });
   const restore = useOp("deal.restore", { successToast: "Restored" });
@@ -162,7 +162,7 @@ function DealDetailPage() {
                 <Button
                   size="sm"
                   className="bg-success text-success-foreground hover:bg-success/85"
-                  onClick={() => markWon.mutate({ id: d.id })}
+                  onClick={() => setWonOpen(true)}
                 >
                   <ThumbsUp className="size-3.5" /> Won
                 </Button>
@@ -429,6 +429,11 @@ function DealDetailPage() {
         onClose={() => setEditOpen(false)}
         deal={d}
       />
+      <MarkWonModal
+        open={wonOpen}
+        onClose={() => setWonOpen(false)}
+        dealId={d.id}
+      />
       <MarkLostModal
         open={lostOpen}
         onClose={() => setLostOpen(false)}
@@ -584,6 +589,58 @@ function EditDealModal({
           >
             {update.isPending ? <ButtonSpinner /> : null}
             Save
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function MarkWonModal({
+  open,
+  onClose,
+  dealId,
+}: {
+  open: boolean;
+  onClose(): void;
+  dealId: string;
+}) {
+  const [note, setNote] = useState("");
+  const markWon = useOp("deal.markWon", {
+    successToast: "Deal won",
+    onSuccess: () => {
+      setNote("");
+      onClose();
+    },
+  });
+  return (
+    <Modal open={open} onClose={onClose} title="Mark deal won">
+      <div className="space-y-3">
+        <label className="block">
+          <span className="mb-1 block text-xs text-muted-foreground">
+            Note (optional)
+          </span>
+          <Textarea
+            autoFocus
+            className="min-h-20"
+            placeholder="Signed annual contract, champion pushed it through…"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+        </label>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            className="bg-success text-success-foreground hover:bg-success/85"
+            size="sm"
+            disabled={markWon.isPending}
+            onClick={() =>
+              markWon.mutate({ id: dealId, note: note.trim() || undefined })
+            }
+          >
+            Mark won
           </Button>
         </div>
       </div>
