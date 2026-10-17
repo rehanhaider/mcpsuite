@@ -17,6 +17,7 @@ import type {
   Tag,
   User,
 } from "@mcpsuite/core/domain";
+import { listAccepts } from "@mcpsuite/core/domain";
 import { CHANNEL_HINTS } from "~/lib/channels.ts";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
@@ -105,6 +106,7 @@ function LeadsPage() {
   const users = useQuery(opQuery<User[]>("user.list"));
   const tags = useQuery(opQuery<Array<Tag & { usage: number }>>("tag.list"));
   const lists = useQuery(opQuery<ContactListWithCounts[]>("list.list"));
+  const eligibleLists = (lists.data ?? []).filter((l) => listAccepts(l, "engagement"));
   const offerings = useQuery(opQuery<Offering[]>("offering.list"));
 
   const moveStage = useOp("engagement.updateStage");
@@ -360,11 +362,13 @@ function LeadsPage() {
           onChange={(e) => patch({ listId: e.target.value || undefined })}
         >
           <option value="">Any list</option>
-          {(lists.data ?? []).map((l) => (
-            <option key={l.id} value={l.id}>
-              {l.name} ({l.engagements})
-            </option>
-          ))}
+          {(lists.data ?? [])
+            .filter((l) => listAccepts(l, "engagement") || l.id === search.listId)
+            .map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name} ({l.engagements})
+              </option>
+            ))}
         </Select>
         <Select
           className="w-auto"
@@ -406,7 +410,7 @@ function LeadsPage() {
           ids={selectedIds}
           stages={pipeline?.stages ?? []}
           tags={tags.data ?? []}
-          lists={lists.data ?? []}
+          lists={eligibleLists}
           users={users.data ?? []}
           onDone={() => setSelection({})}
         />
