@@ -139,7 +139,10 @@ Two-step state machine (state lives in an encrypted `provider` cookie, 24 h):
    POST `action=register` in state `code` re-sends a fresh code.
 
 Errors: `invalid_email`, `invalid_password`, `password_mismatch`,
-`email_taken`, `invalid_code`, `validation_error` (+`message`).
+`email_taken`, `invalid_code`, `validation_error` (+`message`),
+`too_many_attempts` (10 failed code submissions for this code; flow restarts,
+request a new code), `too_many_codes` (more than 5 codes sent to this email
+in the current 15-minute window).
 
 Register must be entered **inside an authorize flow** (it completes via the
 `authorization` cookie). It is UI-gated, not existence-gated: without
@@ -159,6 +162,10 @@ Self-contained email-code → new-password flow (no authorize state needed).
 2. POST `action=verify`, `code` → state `update`.
 3. POST `action=update`, `password`, `repeat` → stores the new hash, revokes
    all refresh tokens for the subject, `302 redirect_uri`.
+
+Code-limit errors: `too_many_attempts` (10 failed code submissions for this
+code; flow restarts, request a new code), `too_many_codes` (more than 5 codes
+sent to this email in the current 15-minute window).
 
 This flow only works for **existing** credentials. The CRM's own reset path
 (admin-issued codes, below) is the primary self-host mechanism; this flow is

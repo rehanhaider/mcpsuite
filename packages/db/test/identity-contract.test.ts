@@ -16,7 +16,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import Database from "better-sqlite3";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildCatalog, type Ports, type RequestContext } from "@mcpsuite/core";
 import { openDatabase, type Db } from "../src/connection.ts";
 import { bootstrap } from "../src/bootstrap.ts";
@@ -200,6 +200,50 @@ for (const adapter of ADAPTERS) {
       scopes: ["read", "write", "admin", "approvals"],
       trust: "fully_authorized_agent",
       surface: "web",
+    });
+
+    describe("issuer counters", () => {
+      it("creates and increments decimal values with the supplied expiry", async () => {
+        const key = joinAuthKey(["counter", "expiry"]);
+        const expiry = Date.now() + 60_000;
+        expect(await identity.authKv.increment(key, expiry)).toBe(1);
+        expect(await identity.authKv.get(key)).toEqual({ value: "1", expiry });
+        expect(await identity.authKv.increment(key, null)).toBe(2);
+        expect(await identity.authKv.get(key)).toEqual({ value: "2", expiry: null });
+        expect(await identity.authKv.increment(key, expiry)).toBe(3);
+        expect(await identity.authKv.get(key)).toEqual({ value: "3", expiry });
+      });
+
+      it("restarts an expired row at one without a preceding read", async () => {
+        const key = joinAuthKey(["counter", "expired"]);
+        await identity.authKv.set(key, "99", Date.now() - 1000);
+        const expiry = Date.now() + 60_000;
+        expect(await identity.authKv.increment(key, expiry)).toBe(1);
+        expect(await identity.authKv.get(key)).toEqual({ value: "1", expiry });
+      });
+
+      it.runIf(adapter.name === "postgres")("uses app time for expiry when the database clock is ahead", async () => {
+        const now = Date.now() - 60_000;
+        const expiry = now + 2000;
+        const key = joinAuthKey(["counter", "app-clock"]);
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+          vi.setSystemTime(now);
+          expect(await identity.authKv.increment(key, expiry)).toBe(1);
+          expect(await identity.authKv.increment(key, expiry)).toBe(2);
+          vi.setSystemTime(expiry + 1);
+          expect(await identity.authKv.increment(key, expiry + 60_000)).toBe(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("parallel reservations return 1..20 without duplicates or lost updates", async () => {
+        const key = joinAuthKey(["counter", "parallel"]);
+        const values = await Promise.all(Array.from({ length: 20 }, () => identity.authKv.increment(key, null)));
+        expect(values.sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+        expect(await identity.authKv.get(key)).toEqual({ value: "20", expiry: null });
+      });
     });
 
     // ── sessions ────────────────────────────────────────────────────────────

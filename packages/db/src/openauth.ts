@@ -39,11 +39,15 @@ export function splitAuthKey(key: string): string[] {
 /**
  * The dialect-agnostic storage seam. Keys are opaque joined strings, values
  * raw JSON, expiry epoch milliseconds (null = never). The PostgreSQL adapter
- * implements the same four methods over its own openauth_kv table.
+ * implements the same methods over its own openauth_kv table.
  */
 export interface AuthKvStore {
   get(key: string): Promise<{ value: string; expiry: number | null } | null>;
   set(key: string, value: string, expiry: number | null): Promise<void>;
+  /** Atomically reserve the next integer, starting at 1 if absent or expired.
+   * Store its decimal string and the supplied expiry in epoch milliseconds.
+   */
+  increment(key: string, expiry: number | null): Promise<number>;
   remove(key: string): Promise<void>;
   /** Every row whose key starts with `prefix` (plain string prefix, no decoding). */
   scanPrefix(prefix: string): Promise<Array<{ key: string; value: string; expiry: number | null }>>;
@@ -75,6 +79,21 @@ export function sqliteAuthKv(db: Db): AuthKvStore {
         .values({ key, value, expiry })
         .onConflictDoUpdate({ target: t.openauthKv.key, set: { value, expiry } })
         .run();
+    },
+    async increment(key, expiry) {
+      const row = db.insert(t.openauthKv)
+        .values({ key, value: "1", expiry })
+        .onConflictDoUpdate({
+          target: t.openauthKv.key,
+          set: {
+            value: sql`CASE WHEN ${t.openauthKv.expiry} IS NOT NULL AND ${t.openauthKv.expiry} <= ${Date.now()}
+              THEN '1' ELSE CAST(CAST(${t.openauthKv.value} AS INTEGER) + 1 AS TEXT) END`,
+            expiry,
+          },
+        })
+        .returning({ value: t.openauthKv.value })
+        .get();
+      return Number(row.value);
     },
     async remove(key) {
       db.delete(t.openauthKv).where(eq(t.openauthKv.key, key)).run();

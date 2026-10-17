@@ -62,6 +62,7 @@ export function createSqliteIdentity(db: Db, options: { hooks?: IdentityTestHook
   const authKv: AuthKvStore = {
     get: (key) => unit(() => rawKv.get(key)),
     set: (key, value, expiry) => unit(() => rawKv.set(key, value, expiry)),
+    increment: (key, expiry) => unit(() => rawKv.increment(key, expiry)),
     remove: (key) => unit(() => rawKv.remove(key)),
     scanPrefix: (prefix) => unit(() => rawKv.scanPrefix(prefix)),
   };
