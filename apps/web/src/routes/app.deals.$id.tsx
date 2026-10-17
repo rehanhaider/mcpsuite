@@ -228,7 +228,7 @@ function DealDetailPage() {
       </div>
 
       {pipeline ? (
-        <div className="mb-5 flex items-center gap-1 overflow-x-auto rounded-xl border border-border bg-card p-1.5">
+        <div className="mb-5 flex items-center gap-1 overflow-x-auto rounded-xl border border-border bg-card p-1.5 [contain:inline-size]">
           {pipeline.stages.map((s, i) => {
             const isCurrent = s.id === d.stageId;
             const currentIdx = pipeline.stages.findIndex(
