@@ -527,6 +527,18 @@ describe("authorization + approval gating", () => {
     expect(stored?.reviewedByUserId).toBeNull();
   });
 
+  it("pendingAction.cancel by a different agent keeps the cancelling agent's user", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Safe Inc" }));
+    const gated = await run(agentCtx({ userId: ownerUserId }), "company.delete", { id: company.id });
+    expect(gated.status).toBe("pending_approval");
+    const pendingId = (gated as any).pendingActionId;
+
+    const other = agentCtx({ userId: ownerUserId, clientId: "client-2", role: "owner" });
+    const cancelled = await ok(run(other, "pendingAction.cancel", { id: pendingId }));
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.reviewedByUserId).toBe(ownerUserId);
+  });
+
   it("pendingAction.cancel records the human admin who cancels", async () => {
     const created = await ok(run(owner, "user.create", { name: "Admin", email: "admin@example.com", role: "admin" }));
     setUserStatus(created.user.id, "active");

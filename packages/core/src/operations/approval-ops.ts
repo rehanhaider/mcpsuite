@@ -102,7 +102,11 @@ export const approvalOps = [
       if (!isRequester && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
         throw OpError.forbidden("Only the requester or an admin can cancel");
       }
-      const updated = await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewedByUserId: op.ctx.actorType === "agent" ? null : op.ctx.userId });
+      const agentSelfCancel = op.ctx.actorType === "agent" && !!op.ctx.clientId && pa.requestedByClientId === op.ctx.clientId;
+      const updated = await op.ports.pendingActions.setStatus(id, {
+        status: "cancelled",
+        reviewedByUserId: agentSelfCancel ? null : op.ctx.userId,
+      });
       await audit(op, {
         operation: "pendingAction.cancel",
         entityType: "pending_action",
