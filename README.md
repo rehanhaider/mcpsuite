@@ -40,14 +40,18 @@ change the password after signing in.
 ## Run with Docker
 
 ```sh
+docker compose pull
 docker compose up -d
 ```
 
 One container, one process on `:2222`: the web app, the operation API, the
 MCP endpoint for agents (`POST /mcp`) and `GET /healthz`. Persistent state
-lives in `./data`. The compose file builds the `mcpsuite/crm` image locally
-until official images are released. See [PRODUCTION.md](PRODUCTION.md) for
-the standalone-MCP command override and reverse-proxy guidance.
+lives in `./data`. Compose runs the published `mcpsuite/crm` image, the latest
+stable release by default. To pin an exact release, put
+`MCPSUITE_VERSION=X.Y.Z` in a `.env` file next to `docker-compose.yml`, then
+run both commands again; they also update an unpinned install. See
+[PRODUCTION.md](PRODUCTION.md) for the standalone-MCP command override and
+reverse-proxy guidance.
 
 ## Connect an agent
 

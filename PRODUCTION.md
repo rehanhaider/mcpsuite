@@ -25,12 +25,16 @@ in-process endpoint — but the default install does not run it.
 ## Docker Compose
 
 ```sh
+docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
 
-Compose builds the `mcpsuite/crm` image from this checkout, exposes
-everything on `:2222`, and persists SQLite under `./data`. The first run
+Compose runs the published `mcpsuite/crm` image, exposes everything on
+`:2222`, and persists SQLite under `./data`. It uses the latest stable release
+unless `MCPSUITE_VERSION=X.Y.Z` in a `.env` file next to `docker-compose.yml`
+pins an exact one; `docker compose config` shows the resolved image. Pull and
+up again to apply a new pin or to update an unpinned install. The first run
 against an empty `./data` prints a one-time owner setup code in the logs —
 redeem it at `/set-password`. The container healthcheck uses `GET /healthz`
 as a readiness probe that returns 503 unless a trivial CRM database read succeeds.
@@ -41,7 +45,7 @@ the host):
 
 ```yaml
   mcpsuite-mcp:
-    image: mcpsuite/crm
+    image: mcpsuite/crm:${MCPSUITE_VERSION:-latest}
     command: pnpm mcp:http
     ports:
       - "8765:8765"

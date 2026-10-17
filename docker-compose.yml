@@ -1,8 +1,13 @@
 # Self-hosting MCP Suite CRM with Docker Compose.
+#   docker compose pull           → fetch the published mcpsuite/crm image
 #   docker compose up -d          → everything on http://localhost:2222
 # One service, one process: web UI, operation API, MCP for agents (POST /mcp)
 # and health (GET /healthz) all share :2222. All state lives in ./data (one
 # SQLite file + WAL sidecars). Back up that dir.
+#
+# Version: the latest stable release by default. To pin an exact release, put
+# MCPSUITE_VERSION=X.Y.Z in a .env file next to this one, then pull and up
+# again. Updating an unpinned install is the same two commands.
 #
 # First run against an empty ./data prints a ONE-TIME owner setup code in the
 # logs (`docker compose logs mcpsuite`) — redeem it at /set-password.
@@ -11,8 +16,7 @@
 # proxy with TLS in front — see "Put it behind HTTPS" in PRODUCTION.md.
 services:
   mcpsuite:
-    image: mcpsuite/crm
-    build: .
+    image: mcpsuite/crm:${MCPSUITE_VERSION:-latest}
     ports:
       - "2222:2222" # web UI + /api + /mcp (agents; per-agent API keys from Admin → Agents) + /healthz
     volumes:
