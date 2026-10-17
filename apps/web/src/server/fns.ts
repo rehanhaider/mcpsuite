@@ -15,6 +15,7 @@
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { internalErrorPayload } from "@mcpsuite/core";
 import { getRuntimeAsync, workspaceLockedResult, WORKSPACE_LOCKED_MESSAGE } from "@mcpsuite/db";
 import { LOGIN_ERROR_MESSAGES, performPasswordLogin } from "./auth-issuer.ts";
 import { currentSession, requireContext, setSessionCookie, revokeSession } from "./session.ts";
@@ -32,10 +33,14 @@ export const op = createServerFn({ method: "POST" })
   .validator(z.object({ name: z.string().min(1), input: z.unknown().optional() }))
   .handler(async ({ data }): Promise<string> => {
     const { ctx, runtime } = await requireContext();
-    if ((await runtime.identity.workspaceAccess(ctx.workspaceId)).mode === "locked") {
-      return JSON.stringify(workspaceLockedResult());
+    try {
+      if ((await runtime.identity.workspaceAccess(ctx.workspaceId)).mode === "locked") {
+        return JSON.stringify(workspaceLockedResult());
+      }
+      return JSON.stringify(await runtime.run(ctx, data.name, data.input ?? {}));
+    } catch (e) {
+      return JSON.stringify({ status: "error", error: internalErrorPayload(e, `op ${data.name}`) });
     }
-    return JSON.stringify(await runtime.run(ctx, data.name, data.input ?? {}));
   });
 
 export const whoami = createServerFn({ method: "GET" }).handler(async () => {

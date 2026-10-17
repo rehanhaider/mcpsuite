@@ -7,41 +7,49 @@
  *     http://localhost:2222/api/ops/company.list -d '{"limit":5}'
  */
 import { createFileRoute } from "@tanstack/react-router";
+import { internalErrorPayload } from "@mcpsuite/core";
 import { getRuntimeAsync, webContext, workspaceLockedResult } from "@mcpsuite/db";
 
 export const Route = createFileRoute("/api/ops/$name")({
   server: {
     handlers: {
       POST: async ({ request, params }) => {
-        const runtime = await getRuntimeAsync();
-        const session = await runtime.identity.resolveSession(
-          cookieValue(request.headers.get("cookie"), "mcpsuite_session"),
-        );
-        if (!session) {
-          return Response.json(
-            { status: "error", error: { code: "unauthorized", message: "Sign in first" } },
-            { status: 401 },
-          );
-        }
-        // Hosted access gate: identification succeeded, but a locked
-        // workspace refuses every catalog operation.
-        if ((await runtime.identity.workspaceAccess(session.workspaceId)).mode === "locked") {
-          return Response.json(workspaceLockedResult(), { status: 403 });
-        }
-        let input: unknown = {};
         try {
-          const text = await request.text();
-          input = text ? JSON.parse(text) : {};
-        } catch {
+          const runtime = await getRuntimeAsync();
+          const session = await runtime.identity.resolveSession(
+            cookieValue(request.headers.get("cookie"), "mcpsuite_session"),
+          );
+          if (!session) {
+            return Response.json(
+              { status: "error", error: { code: "unauthorized", message: "Sign in first" } },
+              { status: 401 },
+            );
+          }
+          // Hosted access gate: identification succeeded, but a locked
+          // workspace refuses every catalog operation.
+          if ((await runtime.identity.workspaceAccess(session.workspaceId)).mode === "locked") {
+            return Response.json(workspaceLockedResult(), { status: 403 });
+          }
+          let input: unknown = {};
+          try {
+            const text = await request.text();
+            input = text ? JSON.parse(text) : {};
+          } catch {
+            return Response.json(
+              { status: "error", error: { code: "validation", message: "Body must be JSON" } },
+              { status: 400 },
+            );
+          }
+          const result = await runtime.run(webContext(session), params.name, input);
+          const status =
+            result.status === "ok" ? 200 : result.status === "pending_approval" ? 202 : httpStatus(result.error.code);
+          return Response.json(result, { status });
+        } catch (e) {
           return Response.json(
-            { status: "error", error: { code: "validation", message: "Body must be JSON" } },
-            { status: 400 },
+            { status: "error", error: internalErrorPayload(e, `api ops ${params.name}`) },
+            { status: 500 },
           );
         }
-        const result = await runtime.run(webContext(session), params.name, input);
-        const status =
-          result.status === "ok" ? 200 : result.status === "pending_approval" ? 202 : httpStatus(result.error.code);
-        return Response.json(result, { status });
       },
     },
   },
