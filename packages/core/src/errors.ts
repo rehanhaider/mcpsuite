@@ -73,8 +73,7 @@ export function toErrorPayload(e: unknown): ErrorPayload {
   if (e instanceof OpError) {
     return { code: e.code, message: e.message, ...(e.details ? { details: e.details } : {}) };
   }
-  const message = e instanceof Error ? e.message : String(e);
-  return { code: "internal", message };
+  return { code: "internal", message: "An internal error occurred" };
 }
 
 // Core compiles against plain ES2023 with no DOM or Node types; these are the
@@ -96,6 +95,7 @@ export function internalErrorPayload(e: unknown, context: string): ErrorPayload 
   const payload = toErrorPayload(e);
   const reference = errorReference();
   const name = e instanceof Error ? e.name : "Error";
-  console.error(`[mcpsuite] error ref=${reference} context=${context} code=internal: ${name}: ${payload.message}`);
+  const message = e instanceof Error ? e.message : String(e);
+  console.error(`[mcpsuite] error ref=${reference} context=${context} code=internal: ${name}: ${message}`);
   return { ...payload, reference };
 }

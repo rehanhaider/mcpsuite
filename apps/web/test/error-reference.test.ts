@@ -78,7 +78,7 @@ describe("POST /api/ops error references", () => {
       const result = await response.json();
       expect(result.status).toBe("error");
       expect(result.error.code).toBe("internal");
-      expect(result.error.message).toBe("boom");
+      expect(result.error.message).toBe("An internal error occurred");
       expect(result.error.reference).toMatch(/^[0-9a-f]{12}$/);
       const context = source === "handler" ? "op test.fail" : "api ops test.fail";
       expect(log).toHaveBeenCalledExactlyOnceWith(

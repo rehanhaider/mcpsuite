@@ -132,7 +132,7 @@ describe("errors", () => {
       expect(result.status).toBe("error");
       if (result.status !== "error") throw new Error("Expected an error result");
       expect(result.error.code).toBe("internal");
-      expect(result.error.message).toBe("boom");
+      expect(result.error.message).toBe(error instanceof OpError ? "boom" : "An internal error occurred");
       expect(result.error.reference).toMatch(/^[0-9a-f]{12}$/);
       expect(log).toHaveBeenCalledExactlyOnceWith(
         `[mcpsuite] error ref=${result.error.reference} context=op test.fail code=internal: ${error.name}: boom`,

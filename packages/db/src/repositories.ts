@@ -436,12 +436,15 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return rows.map((r) => mapUser(r.user, r.role as Role));
     },
     async get(id) {
+      const membership = db.select().from(t.memberships)
+        .where(and(eq(t.memberships.workspaceId, ws), eq(t.memberships.userId, id))).get();
+      if (!membership) return null;
       const row = db.select().from(t.users).where(eq(t.users.id, id)).get();
       return row ? mapUser(row, roleOf(id)) : null;
     },
     async getByEmail(email) {
       const row = db.select().from(t.users).where(eq(t.users.email, email.toLowerCase())).get();
-      if (!row) return null;
+      if (!row || !(await this.get(row.id))) return null;
       return { ...mapUser(row, roleOf(row.id)), passwordHash: row.passwordHash };
     },
     async create(input) {
@@ -461,6 +464,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return (await this.get(id))!;
     },
     async update(id, patch) {
+      if (!(await this.get(id))) throw OpError.notFound("user", id);
       const now = nowIso();
       if (patch.name !== undefined || patch.disabledAt !== undefined) {
         const current = patch.disabledAt !== undefined ? db.select().from(t.users).where(eq(t.users.id, id)).get() : null;
@@ -526,6 +530,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
     // link, sessions, memberships, MCP clients, private saved views; business
     // records remain (actors render as "Deleted user"); ownerships/tasks unassigned.
     async deletePermanently(userId) {
+      if (!(await this.get(userId))) throw OpError.notFound("user", userId);
       const user = db.select().from(t.users).where(eq(t.users.id, userId)).get();
       if (!user) throw OpError.notFound("user", userId);
       const membership = db.select().from(t.memberships).where(eq(t.memberships.userId, userId)).get();
@@ -589,6 +594,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
     // Issues a hashed single-use setup/reset code (invalidates prior codes of
     // that purpose; reset also ends the user's sessions). Raw code returned once.
     async issueCode(userId, purpose) {
+      if (!(await usersPort.get(userId))) throw OpError.notFound("user", userId);
       const { code } = await issueAuthCode(db, { userId, purpose });
       return { code };
     },
@@ -602,6 +608,10 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         .run().changes;
       if (changed === 0) throw OpError.notFound("user", userId);
     },
+  };
+
+  const requireUser = async (id: string | null | undefined): Promise<void> => {
+    if (id && !(await usersPort.get(id))) throw OpError.notFound("user", id);
   };
 
   // --- companies ----------------------------------------------------------
@@ -664,6 +674,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return row ? mapCompany(row) : null;
     },
     async create(input) {
+      await requireUser(input.ownerUserId);
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.companies)
@@ -687,6 +698,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return (await this.get(id))!;
     },
     async update(id, patch) {
+      await requireUser(patch.ownerUserId);
       db.update(t.companies)
         .set({
           ...(patch as Record<string, unknown>),
@@ -831,6 +843,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return row ? mapPerson(row) : null;
     },
     async create(input) {
+      await requireUser(input.ownerUserId);
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.people)
@@ -853,6 +866,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return (await this.get(id))!;
     },
     async update(id, patch) {
+      await requireUser(patch.ownerUserId);
       db.update(t.people)
         .set({ ...(patch as Record<string, unknown>), version: sql`${t.people.version} + 1`, updatedAt: nowIso() })
         .where(and(eq(t.people.workspaceId, ws), eq(t.people.id, id)))
@@ -1201,6 +1215,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return row ? mapEngagement(row) : null;
     },
     async create(input) {
+      await requireUser(input.ownerUserId);
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.engagements)
@@ -1227,6 +1242,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return (await this.get(id))!;
     },
     async update(id, patch) {
+      await requireUser(patch.ownerUserId);
       db.update(t.engagements)
         .set({ ...(patch as Record<string, unknown>), version: sql`${t.engagements.version} + 1`, updatedAt: nowIso() })
         .where(and(eq(t.engagements.workspaceId, ws), eq(t.engagements.id, id)))
@@ -1341,6 +1357,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return row ? mapDeal(row) : null;
     },
     async create(input) {
+      await requireUser(input.ownerUserId);
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.deals)
@@ -1371,6 +1388,10 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return (await this.get(id))!;
     },
     async update(id, patch) {
+      await requireUser(patch.ownerUserId);
+      if (patch.companyId && !(await companiesPort.get(patch.companyId))) throw OpError.notFound("company", patch.companyId);
+      if (patch.primaryPersonId && !(await peoplePort.get(patch.primaryPersonId))) throw OpError.notFound("person", patch.primaryPersonId);
+      if (patch.engagementId && !(await engagementsPort.get(patch.engagementId))) throw OpError.notFound("engagement", patch.engagementId);
       db.update(t.deals)
         .set({ ...(patch as Record<string, unknown>), version: sql`${t.deals.version} + 1`, updatedAt: nowIso() })
         .where(and(eq(t.deals.workspaceId, ws), eq(t.deals.id, id)))
@@ -1515,6 +1536,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return row ? mapOffering(row) : null;
     },
     async create(input) {
+      await requireUser(input.ownerUserId);
       const id = newId();
       const now = nowIso();
       db.insert(t.offerings)
@@ -1533,6 +1555,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return (await this.get(id))!;
     },
     async update(id, patch) {
+      await requireUser(patch.ownerUserId);
       const { active, ...rest } = patch;
       db.update(t.offerings)
         .set({
@@ -1736,6 +1759,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return row ? mapActivity(row) : null;
     },
     async create(input, actor: ActorStamp) {
+      await requireUser(input.assigneeUserId);
       const id = input.id ?? newId();
       const now = nowIso();
       db.insert(t.activities)
@@ -1764,6 +1788,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
       return (await this.get(id))!;
     },
     async update(id, patch) {
+      await requireUser(patch.assigneeUserId);
       const { meta, ...rest } = patch;
       db.update(t.activities)
         .set({
@@ -2526,6 +2551,11 @@ export function createPorts(db: Db, workspaceId: string): Ports {
 
   const maintenancePort: Ports["maintenance"] = {
     async backup() {
+      // A physical file includes every workspace. Only a single-workspace file
+      // can be returned through the workspace-scoped operation catalog.
+      if (sqlite.prepare("SELECT 1 FROM workspaces WHERE id <> ? LIMIT 1").get(ws)) {
+        throw OpError.forbidden("Database backups are unavailable when the file contains other workspaces");
+      }
       const dbPath = (sqlite as unknown as { name: string }).name;
       const dir = join(dirname(dbPath), "backups");
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
