@@ -40,6 +40,7 @@ import type { Ports } from "@mcpsuite/core";
 import {
   createSqliteHostingStore,
   createSqliteIdentity,
+  generateMcpToken,
   openDatabase,
   sha256Hex,
   type HostingStore,
@@ -67,6 +68,8 @@ const FAULT_POINTS: FaultPoint[] = ["afterChange", "afterReceipt", "afterAudit"]
 type Table =
   | "workspaces"
   | "users"
+  | "sessions"
+  | "mcp_clients"
   | "memberships"
   | "pipelines"
   | "audit_events"
@@ -93,6 +96,8 @@ async function sqliteHarness(): Promise<Harness> {
   const names: Record<Table, string> = {
     workspaces: "workspaces",
     users: "users",
+    sessions: "sessions",
+    mcp_clients: "mcp_clients",
     memberships: "memberships",
     pipelines: "pipelines",
     audit_events: "audit_events",
@@ -170,6 +175,8 @@ async function pgHarness(): Promise<PgHarness> {
   const names: Record<Table, string> = {
     workspaces: "crm.workspaces",
     users: "crm.users",
+    sessions: "crm.sessions",
+    mcp_clients: "crm.mcp_clients",
     memberships: "crm.memberships",
     pipelines: "crm.pipelines",
     audit_events: "crm.audit_events",
@@ -395,6 +402,19 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
       const keep = await workspace();
       const ws = await workspace();
       await h.crm.redeemCodeAndSetPassword({ email: ws.ownerEmail, purpose: "setup", code: ws.setupCode, password: "gone-password-1" });
+      await h.crm.resolveAuthSuccess(ws.ownerEmail);
+      const session = await h.crm.createSession(ws.ownerId);
+      const key = generateMcpToken();
+      const client = await h.portsFor(ws.id).mcpClients.create({
+        name: "Contract agent",
+        tokenHash: key.hash,
+        tokenPrefix: key.prefix,
+        scopes: ["read"],
+        trust: "review_risky_actions",
+        createdByUserId: ws.ownerId,
+      });
+      expect(await h.crm.resolveSession(session.token)).toMatchObject({ user: { id: ws.ownerId }, workspaceId: ws.id });
+      expect(await h.crm.resolveMcpToken(key.token)).toMatchObject({ clientId: client.id, userId: ws.ownerId, workspaceId: ws.id });
       await call("PUT", `/api/v1/workspaces/${ws.id}/access`, { idem: idem("pre-lock"), body: { accessMode: "locked" } });
 
       const del = await call("DELETE", `/api/v1/workspaces/${ws.id}`, { idem: idem("delete"), body: { reason: "contract" } });
@@ -402,6 +422,10 @@ function contractSuite(name: "sqlite" | "postgres", makeHarness: () => Promise<H
 
       expect(await h.count("workspaces", { id: ws.id })).toBe(0);
       expect(await h.count("users", { email: ws.ownerEmail })).toBe(0);
+      expect(await h.count("sessions", { user_id: ws.ownerId })).toBe(0);
+      expect(await h.count("mcp_clients", { workspace_id: ws.id })).toBe(0);
+      expect(await h.crm.resolveSession(session.token)).toBeNull();
+      expect(await h.crm.resolveMcpToken(key.token)).toBeNull();
       expect(await h.count("memberships", { workspace_id: ws.id })).toBe(0);
       expect(await h.count("pipelines", { workspace_id: ws.id })).toBe(0);
       expect(await h.count("audit_events", { workspace_id: ws.id })).toBe(0);
