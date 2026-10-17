@@ -3,6 +3,7 @@ import { z } from "zod";
 import { OpError } from "../errors.ts";
 import { zId, PENDING_STATUSES, type PendingAction } from "../domain.ts";
 import { nowIso } from "../ids.ts";
+import { canCancelPendingAction } from "../policy.ts";
 import { defineOperation, type OpCtx } from "./define.ts";
 import { audit, found } from "./helpers.ts";
 
@@ -97,10 +98,7 @@ export const approvalOps = [
     handler: async (op, { id }) => {
       const pa = found(await op.ports.pendingActions.get(id), "pending action", id);
       if (pa.status !== "pending") throw OpError.validation(`Action is already ${pa.status}`);
-      const isRequester =
-        (op.ctx.clientId && pa.requestedByClientId === op.ctx.clientId) ||
-        (op.ctx.userId && pa.requestedByUserId === op.ctx.userId);
-      if (!isRequester && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
+      if (!canCancelPendingAction(op.ctx, pa)) {
         throw OpError.forbidden("Only the requester or an admin can cancel");
       }
       const agentSelfCancel = op.ctx.actorType === "agent" && !!op.ctx.clientId && pa.requestedByClientId === op.ctx.clientId;

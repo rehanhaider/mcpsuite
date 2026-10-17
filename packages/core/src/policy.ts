@@ -10,6 +10,17 @@ export function roleAtLeast(role: Role, min: Role): boolean {
   return ROLES.indexOf(role) >= ROLES.indexOf(min);
 }
 
+/** Cancellation rule shared by pendingAction.cancel and the approvals page. */
+export function canCancelPendingAction(
+  actor: { role: Role; userId: string | null; clientId: string | null },
+  action: { requestedByUserId: string | null; requestedByClientId: string | null },
+): boolean {
+  const isRequester =
+    (!!actor.clientId && action.requestedByClientId === actor.clientId) ||
+    (!!actor.userId && action.requestedByUserId === actor.userId);
+  return isRequester || roleAtLeast(actor.role, "admin");
+}
+
 export const MCP_SCOPES = ["read", "write", "admin", "approvals"] as const;
 export type McpScope = (typeof MCP_SCOPES)[number];
 
