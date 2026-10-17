@@ -510,6 +510,35 @@ describe("contact lists", () => {
     expect(mixed.entityType).toBe("person");
   });
 
+  it("hard-deleting a listed company and person clears list memberships and counts", async () => {
+    const companyList = await ok(run(owner, "list.create", { name: "Companies", entityType: "company" }));
+    const peopleList = await ok(run(owner, "list.create", { name: "People", entityType: "person" }));
+    const company = await ok(run(owner, "company.create", { name: "Gone company" }));
+    const person = await ok(run(owner, "person.create", { name: "Gone person" }));
+    await ok(run(owner, "list.addMembers", { listId: companyList.id, entityType: "company", entityIds: [company.id] }));
+    await ok(run(owner, "list.addMembers", { listId: peopleList.id, entityType: "person", entityIds: [person.id] }));
+
+    const before = await ok(run(owner, "list.list", {}));
+    expect(before.find((l: any) => l.id === companyList.id).companies).toBe(1);
+    expect(before.find((l: any) => l.id === peopleList.id).people).toBe(1);
+
+    await ok(run(owner, "company.delete", { id: company.id }));
+    await ok(run(owner, "person.delete", { id: person.id }));
+
+    const companyMembers = await ok(run(owner, "list.members", { id: companyList.id }));
+    const peopleMembers = await ok(run(owner, "list.members", { id: peopleList.id }));
+    expect(companyMembers.companies).toMatchObject({ items: [], total: 0 });
+    expect(peopleMembers.people).toMatchObject({ items: [], total: 0 });
+
+    const after = await ok(run(owner, "list.list", {}));
+    expect.soft(after.find((l: any) => l.id === companyList.id).companies).toBe(0);
+    expect.soft(after.find((l: any) => l.id === peopleList.id).people).toBe(0);
+    const remaining = db.$client
+      .prepare("SELECT * FROM list_members WHERE workspace_id = ? AND entity_id IN (?, ?)")
+      .all(workspaceId, company.id, person.id);
+    expect.soft(remaining).toEqual([]);
+  });
+
   it("hard-deleting a listed lead clears list membership counts", async () => {
     const list = await ok(run(owner, "list.create", { name: "Delete cleanup", entityType: "engagement" }));
     const lead = await ok(run(owner, "engagement.create", { title: "Gone" }));
