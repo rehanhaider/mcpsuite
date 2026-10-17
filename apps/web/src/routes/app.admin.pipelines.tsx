@@ -121,6 +121,11 @@ function PipelineCard({ pipeline }: { pipeline: Pipeline }) {
           <Button
             variant="ghost"
             size="icon-xs"
+            aria-label={
+              renaming
+                ? `Cancel renaming ${pipeline.name}`
+                : `Rename ${pipeline.name}`
+            }
             onClick={() => setRenaming((r) => !r)}
           >
             <Pencil className="size-3.5" />
@@ -129,6 +134,7 @@ function PipelineCard({ pipeline }: { pipeline: Pipeline }) {
             variant="ghost"
             size="icon-xs"
             className="text-destructive"
+            aria-label={`Delete ${pipeline.name}`}
             onClick={() => {
               if (
                 confirm(
@@ -164,6 +170,7 @@ function PipelineCard({ pipeline }: { pipeline: Pipeline }) {
               <Button
                 variant="ghost"
                 size="icon-xs"
+                aria-label={`Move ${s.name} up`}
                 disabled={i === 0}
                 onClick={() => move(i, -1)}
               >
@@ -172,6 +179,7 @@ function PipelineCard({ pipeline }: { pipeline: Pipeline }) {
               <Button
                 variant="ghost"
                 size="icon-xs"
+                aria-label={`Move ${s.name} down`}
                 disabled={i === pipeline.stages.length - 1}
                 onClick={() => move(i, 1)}
               >
@@ -180,6 +188,7 @@ function PipelineCard({ pipeline }: { pipeline: Pipeline }) {
               <Button
                 variant="ghost"
                 size="icon-xs"
+                aria-label={`Edit ${s.name}`}
                 onClick={() => setEditStage(s)}
               >
                 <Pencil className="size-3.5" />
@@ -220,6 +229,7 @@ function DeleteStageButton({ stage }: { stage: Stage }) {
       variant="ghost"
       size="icon-xs"
       className="text-destructive"
+      aria-label={`Delete ${stage.name}`}
       onClick={() => {
         if (
           confirm(`Delete stage "${stage.name}"? Blocked if records sit in it.`)
@@ -271,6 +281,7 @@ function StageFields(props: {
     <div className="space-y-3">
       <Field label="Name">
         <Input
+          aria-label="Name"
           value={props.name}
           autoFocus
           onChange={(e) => props.setName(e.target.value)}
@@ -283,6 +294,7 @@ function StageFields(props: {
         {props.isDeal ? (
           <Field label="Probability %" hint="Default win chance">
             <Input
+              aria-label="Probability %"
               type="number"
               min={0}
               max={100}
@@ -293,6 +305,7 @@ function StageFields(props: {
         ) : null}
         <Field label="Outcome" hint="Terminal stages only">
           <Select
+            aria-label="Outcome"
             value={props.outcome}
             onChange={(e) => props.setOutcome(e.target.value)}
           >
