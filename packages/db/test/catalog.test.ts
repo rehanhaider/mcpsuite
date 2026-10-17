@@ -512,6 +512,38 @@ describe("authorization + approval gating", () => {
     expect(pa.status).toBe("rejected");
   });
 
+  it.each(["pendingAction.cancel", "pendingAction.cancelOwnTask"])("%s attributes an agent's self-cancel to the agent", async (operation) => {
+    const company = await ok(run(owner, "company.create", { name: "Safe Inc" }));
+    const agent = agentCtx({ userId: ownerUserId, scopes: ["read", "write", "approvals"] });
+    const gated = await run(agent, "company.delete", { id: company.id });
+    expect(gated.status).toBe("pending_approval");
+    const pendingId = (gated as any).pendingActionId;
+
+    const cancelled = await ok(run(agent, operation, { id: pendingId }));
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.reviewedByUserId).toBeNull();
+    const stored = await ports.pendingActions.get(pendingId);
+    expect(stored?.status).toBe("cancelled");
+    expect(stored?.reviewedByUserId).toBeNull();
+  });
+
+  it("pendingAction.cancel records the human admin who cancels", async () => {
+    const created = await ok(run(owner, "user.create", { name: "Admin", email: "admin@example.com", role: "admin" }));
+    setUserStatus(created.user.id, "active");
+    const admin: RequestContext = { ...owner, userId: created.user.id, role: "admin" };
+    const company = await ok(run(owner, "company.create", { name: "Safe Inc" }));
+    const gated = await run(agentCtx({ userId: ownerUserId }), "company.delete", { id: company.id });
+    expect(gated.status).toBe("pending_approval");
+    const pendingId = (gated as any).pendingActionId;
+
+    const cancelled = await ok(run(admin, "pendingAction.cancel", { id: pendingId }));
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.reviewedByUserId).toBe(admin.userId);
+    const stored = await ports.pendingActions.get(pendingId);
+    expect(stored?.status).toBe("cancelled");
+    expect(stored?.reviewedByUserId).toBe(admin.userId);
+  });
+
   it("viewer cannot write", async () => {
     const viewer: RequestContext = { ...owner, role: "viewer" };
     const result = await run(viewer, "company.create", { name: "Nope" });

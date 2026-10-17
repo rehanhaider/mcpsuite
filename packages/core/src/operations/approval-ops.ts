@@ -102,7 +102,7 @@ export const approvalOps = [
       if (!isRequester && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
         throw OpError.forbidden("Only the requester or an admin can cancel");
       }
-      const updated = await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewedByUserId: op.ctx.userId });
+      const updated = await op.ports.pendingActions.setStatus(id, { status: "cancelled", reviewedByUserId: op.ctx.actorType === "agent" ? null : op.ctx.userId });
       await audit(op, {
         operation: "pendingAction.cancel",
         entityType: "pending_action",
@@ -125,7 +125,7 @@ export const approvalOps = [
     handler: async (op, { id }) => {
       const pa = await ownPendingAction(op, id);
       if (pa.status !== "pending") return pa;
-      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewedByUserId: op.ctx.userId });
+      const cancelled = await op.ports.pendingActions.cancelIfPending(id, { reviewedByUserId: op.ctx.actorType === "agent" ? null : op.ctx.userId });
       if (!cancelled) return found(await op.ports.pendingActions.get(id), "pending action", id);
       await audit(op, {
         operation: "pendingAction.cancel",
