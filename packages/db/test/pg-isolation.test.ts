@@ -911,6 +911,121 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
     expect(await importRun()).toMatchObject({ peopleCreated: 4, engagementsCreated: 4 });
     expect(await importRun()).toMatchObject({ peopleCreated: 0, peopleMatched: 4, engagementsCreated: 0, engagementsSkipped: 4 });
   });
+
+  // ── 10. Race outcomes ────────────────────────────────────────────────────
+
+  /** Both transactions must hold separate pool connections before either writes (app max: 2). */
+  async function raceInWorkspaces<T>(left: () => Promise<T>, right: () => Promise<T>) {
+    let start!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      start = resolve;
+    });
+    let arrived = 0;
+    const run = (ports: PgPorts, write: () => Promise<T>) =>
+      ports.tx(async () => {
+        arrived += 1;
+        if (arrived === 2) start();
+        await ready;
+        return write();
+      });
+    return Promise.allSettled([run(portsA, left), run(portsB, right)]);
+  }
+
+  it("concurrent invitations for one email have one winner without disclosing its workspace", async () => {
+    const workspaces = [await portsA.workspace.get(), await portsB.workspace.get()];
+    for (let i = 0; i < 5; i++) {
+      const email = `race-${i}@invites.test`;
+      const outcomes = await raceInWorkspaces(
+        () => portsA.users.createPending({ name: "Race A", email: i === 0 ? "Race-0@Invites.Test" : email, role: "member" }),
+        () => portsB.users.createPending({ name: "Race B", email, role: "member" }),
+      );
+      const fulfilled = outcomes.filter((o) => o.status === "fulfilled");
+      const rejected = outcomes.filter((o) => o.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      const winnerIndex = outcomes.findIndex((o) => o.status === "fulfilled");
+      const winner = workspaces[winnerIndex]!;
+      const error = rejected[0]!.reason;
+      expect(error).toBeInstanceOf(OpError);
+      expect(error).toMatchObject({ code: "conflict", message: "That email is unavailable" });
+      expect(String(error)).not.toContain(winner.id);
+      expect(String(error)).not.toContain(winner.name);
+
+      const users = await admin.pool.query("SELECT id, workspace_id, email FROM crm.users WHERE lower(email) = $1", [email]);
+      expect(users.rows).toEqual([{ id: fulfilled[0]!.value.userId, workspace_id: winner.id, email }]);
+      const memberships = await admin.pool.query(
+        "SELECT workspace_id, user_id FROM crm.memberships WHERE user_id = $1",
+        [fulfilled[0]!.value.userId],
+      );
+      expect(memberships.rows).toEqual([{ workspace_id: winner.id, user_id: fulfilled[0]!.value.userId }]);
+      const loserPorts = winnerIndex === 0 ? portsB : portsA;
+      expect((await loserPorts.users.list()).some((user) => user.email.toLowerCase() === email)).toBe(false);
+    }
+  });
+
+  // Lists, tags and offerings have no name-based upsert; race their create methods.
+  it.each(["lists", "tags", "offerings"] as const)("concurrent same-name %s creates stay workspace-local", async (kind) => {
+    for (let i = 0; i < 5; i++) {
+      const name = `race-${kind}-${i}`;
+      const create = async (ports: PgPorts) =>
+        kind === "offerings"
+          ? ports.offerings.create({ name, type: "product" })
+          : ports[kind].create({ name, color: "info" });
+      const outcomes = await raceInWorkspaces(() => create(portsA), () => create(portsB));
+      expect(outcomes.map((o) => o.status)).toEqual(["fulfilled", "fulfilled"]);
+      const [left, right] = outcomes;
+      if (left.status !== "fulfilled" || right.status !== "fulfilled") throw new Error("Expected both creates to succeed");
+      expect(left.value.id).not.toBe(right.value.id);
+
+      const rows = await admin.pool.query(`SELECT id, workspace_id FROM crm.${kind} WHERE name = $1 ORDER BY workspace_id`, [name]);
+      expect(rows.rows).toEqual([
+        { id: left.value.id, workspace_id: wsA },
+        { id: right.value.id, workspace_id: wsB },
+      ].sort((a, b) => a.workspace_id.localeCompare(b.workspace_id)));
+      const listA = kind === "offerings" ? await portsA.offerings.list(false) : await portsA[kind].list();
+      const listB = kind === "offerings" ? await portsB.offerings.list(false) : await portsB[kind].list();
+      expect(listA.filter((row) => row.name === name).map((row) => row.id)).toEqual([left.value.id]);
+      expect(listB.filter((row) => row.name === name).map((row) => row.id)).toEqual([right.value.id]);
+    }
+  });
+
+  it("concurrent custom-value inserts and updates for the same field key stay workspace-local", async () => {
+    for (let i = 0; i < 5; i++) {
+      const key = `race_value_${i}`;
+      const definition = { entityType: "company" as const, key, label: key, type: "text", options: null, required: false };
+      const fieldA = await portsA.customFields.createDef(definition);
+      const fieldB = await portsB.customFields.createDef(definition);
+      expect(fieldA.id).not.toBe(fieldB.id);
+      expect((await portsA.customFields.listDefs("company")).filter((field) => field.key === key).map((field) => field.id)).toEqual([fieldA.id]);
+      expect((await portsB.customFields.listDefs("company")).filter((field) => field.key === key).map((field) => field.id)).toEqual([fieldB.id]);
+
+      // First exercise INSERT, then ON CONFLICT DO UPDATE on the same keys.
+      for (const phase of ["insert", "update"]) {
+        const valueA = `A-${i}-${phase}`;
+        const valueB = `B-${i}-${phase}`;
+        const outcomes = await raceInWorkspaces(
+          () => portsA.customFields.setValue(fieldA.id, "company", A.companyId, valueA),
+          () => portsB.customFields.setValue(fieldB.id, "company", B.companyId, valueB),
+        );
+        expect(outcomes.map((o) => o.status)).toEqual(["fulfilled", "fulfilled"]);
+        const rows = await admin.pool.query(
+          `SELECT v.workspace_id, v.field_id, v.entity_id, v.value
+           FROM crm.company_custom_field_values v
+           JOIN crm.custom_field_definitions f ON f.id = v.field_id AND f.workspace_id = v.workspace_id
+           WHERE f.key = $1 ORDER BY v.workspace_id`,
+          [key],
+        );
+        expect(rows.rows).toEqual([
+          { workspace_id: wsA, field_id: fieldA.id, entity_id: A.companyId, value: valueA },
+          { workspace_id: wsB, field_id: fieldB.id, entity_id: B.companyId, value: valueB },
+        ].sort((a, b) => a.workspace_id.localeCompare(b.workspace_id)));
+        expect((await portsA.customFields.values("company", A.companyId))[key]).toBe(valueA);
+        expect((await portsB.customFields.values("company", B.companyId))[key]).toBe(valueB);
+        expect(await portsA.customFields.values("company", B.companyId)).toEqual({});
+        expect(await portsB.customFields.values("company", A.companyId)).toEqual({});
+      }
+    }
+  });
 });
 
 describe.runIf(!enabled)("postgres workspace isolation (skipped)", () => {
