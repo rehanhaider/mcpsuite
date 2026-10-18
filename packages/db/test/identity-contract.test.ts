@@ -222,21 +222,24 @@ for (const adapter of ADAPTERS) {
         expect(await identity.authKv.get(key)).toEqual({ value: "1", expiry });
       });
 
-      it.runIf(adapter.name === "postgres")("uses app time for expiry when the database clock is ahead", async () => {
-        const now = Date.now() - 60_000;
-        const expiry = now + 2000;
-        const key = joinAuthKey(["counter", "app-clock"]);
-        vi.useFakeTimers({ toFake: ["Date"] });
-        try {
-          vi.setSystemTime(now);
-          expect(await identity.authKv.increment(key, expiry)).toBe(1);
-          expect(await identity.authKv.increment(key, expiry)).toBe(2);
-          vi.setSystemTime(expiry + 1);
-          expect(await identity.authKv.increment(key, expiry + 60_000)).toBe(1);
-        } finally {
-          vi.useRealTimers();
-        }
-      });
+      // PostgreSQL only; not registered in the SQLite half, so it never counts as skipped.
+      if (adapter.name === "postgres") {
+        it("uses app time for expiry when the database clock is ahead", async () => {
+          const now = Date.now() - 60_000;
+          const expiry = now + 2000;
+          const key = joinAuthKey(["counter", "app-clock"]);
+          vi.useFakeTimers({ toFake: ["Date"] });
+          try {
+            vi.setSystemTime(now);
+            expect(await identity.authKv.increment(key, expiry)).toBe(1);
+            expect(await identity.authKv.increment(key, expiry)).toBe(2);
+            vi.setSystemTime(expiry + 1);
+            expect(await identity.authKv.increment(key, expiry + 60_000)).toBe(1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+      }
 
       it("parallel reservations return 1..20 without duplicates or lost updates", async () => {
         const key = joinAuthKey(["counter", "parallel"]);

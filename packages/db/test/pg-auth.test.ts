@@ -739,6 +739,9 @@ describe.runIf(enabled)("postgres OpenAuth identity model (crm_app under forced 
   });
 });
 
-describe.runIf(!enabled)("postgres OpenAuth identity model (skipped)", () => {
-  it.skip("set PG_TESTS=1 and DATABASE_URL (superuser) to run this suite", () => {});
-});
+// Registered only when disabled, so the PostgreSQL CI job reports 0 skipped.
+if (!enabled) {
+  describe("postgres OpenAuth identity model (skipped)", () => {
+    it.skip("set PG_TESTS=1 and DATABASE_URL (superuser) to run this suite", () => {});
+  });
+}

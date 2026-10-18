@@ -48,3 +48,76 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+  # docs/architecture/postgres-tenant-isolation.md, Hosted release gate: CI
+  # proves no unclassified table, unprotected workspace table, runtime owner,
+  # BYPASSRLS grant, or uncovered catalog operation can merge. Those checks
+  # live in the PG_TESTS=1 suites, which self-skip without a server.
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PG_TESTS: "1"
+      # Superuser: the suites create their databases and set throwaway
+      # passwords on crm_app / crm_operator, then connect as those roles.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm 10 (corepack)
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest-10 --activate
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test (PostgreSQL)
+        run: pnpm test --reporter=default --reporter=json --outputFile=vitest-report.json
+
+      # A skipped test here means a PostgreSQL suite did not run. Every
+      # package with a test script must have written a report.
+      - name: Require 0 skipped
+        run: |
+          node - <<'JS'
+          const fs = require("node:fs");
+          let skipped = 0;
+          for (const root of ["apps", "packages"]) {
+            for (const name of fs.readdirSync(root)) {
+              const pkg = `${root}/${name}`;
+              if (!JSON.parse(fs.readFileSync(`${pkg}/package.json`, "utf8")).scripts?.test) continue;
+              const report = JSON.parse(fs.readFileSync(`${pkg}/vitest-report.json`, "utf8"));
+              const count = report.numPendingTests + report.numTodoTests;
+              console.log(`${pkg}: ${report.numPassedTests} passed, ${count} skipped`);
+              for (const file of report.testResults) {
+                for (const test of file.assertionResults) {
+                  if (test.status !== "passed" && test.status !== "failed") console.log(`  ${test.status}: ${test.fullName}`);
+                }
+              }
+              skipped += count;
+            }
+          }
+          if (skipped > 0) {
+            console.error(`${skipped} skipped; the PostgreSQL job must report 0 skipped`);
+            process.exit(1);
+          }
+          JS
