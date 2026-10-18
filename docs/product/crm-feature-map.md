@@ -1,6 +1,6 @@
 # CRM feature map — where mcpsuite stands vs. the market
 
-_Last updated: 2026-07-06_
+_Last updated: 2026-10-18_
 
 This document maps what mcpsuite has today against the feature set of established
 CRMs (Attio, HubSpot, Pipedrive, Close, folk, Twenty), so gaps are explicit
@@ -69,7 +69,7 @@ links each segment. Agents do the same triage over MCP (`list_create`,
 | Multiple pipelines                      | Yes (per entity type, default pipeline)         | Yes                      | —                                                           |
 | Custom stages (reorder, rename, colors) | Yes                                             | Yes                      | —                                                           |
 | Kanban board                            | Yes (leads + deals)                             | Yes                      | —                                                           |
-| Win/loss with reasons                   | Yes (`deal.markWon` / `deal.markLost` + reason) | Yes                      | —                                                           |
+| Win/loss with reasons                   | Yes (`deal.markWon` + optional note, `deal.markLost` + optional reason and note; a dialog for each on the deal page) | Yes                      | —                                                           |
 | Deal value + currency                   | Yes (per-deal currency)                         | Yes                      | —                                                           |
 | Weighted pipeline / stage probability   | No                                              | Pipedrive/HubSpot: yes   | 0.3 — probability per stage, weighted forecast              |
 | Forecasting                             | No                                              | Yes (paid tiers usually) | 0.3+                                                        |
@@ -100,7 +100,7 @@ touch into the CRM through MCP**. Still, parity gaps worth naming:
 | BCC-to-CRM address                             | No                                           | Yes                    | 0.3 (P1) — cheap once inbound mail lands; great low-friction capture |
 | Templates & sequences                          | No                                           | Close/HubSpot: yes     | Not planned; agents replace canned sequences                         |
 | Calling / SMS                                  | No                                           | Close: yes             | Not planned                                                          |
-| Transactional email (invites, resets, digests) | No — invites print a one-time password in-UI | n/a (product plumbing) | **0.2 (P0)** — mailer port + SMTP/Resend impl; see `PRODUCTION.md`   |
+| Transactional email (invites, resets, digests) | No — invites and password resets show a one-time setup or reset code in-UI | n/a (product plumbing) | **0.2 (P0)** — mailer port + SMTP/Resend impl; see `PRODUCTION.md`   |
 
 ## 6. Automation & agents
 
@@ -109,9 +109,9 @@ touch into the CRM through MCP**. Still, parity gaps worth naming:
 | Workflow builder (if-this-then-that) | No                                                                       | HubSpot/Pipedrive: yes   | Not planned as click-ops. The operation catalog is the automation surface; agents compose it |
 | **Agent access (MCP)**               | **Yes — first-class: 100+ typed operations, resources, context bundles** | No one has this natively | Our moat; keep widening                                                                      |
 | **Approval workflow for risky ops**  | **Yes — trust profiles, pending actions, approve/reject UI**             | No equivalent            | —                                                                                            |
-| **Full audit trail**                 | **Yes — every op, human or agent, with actor + before/after**            | Partial in most          | —                                                                                            |
+| **Full audit trail**                 | **Partial — writes by humans and agents record the actor; updates record before/after values. Reads are not logged, and `tag.apply`, `tag.remove` and `deal.removeStakeholder` write no audit event** | Partial in most          | Not yet planned                                                                              |
 | Webhooks (outbound)                  | No                                                                       | Yes                      | 0.3 (P1) — `webhook.subscribe` + delivery worker; unlocks Zapier/n8n                         |
-| Public REST API                      | Yes (`POST /api/ops/:name`, bearer tokens)                               | Yes                      | Document + version it (0.2)                                                                  |
+| Public REST API                      | Partial (`POST /api/ops/:name`, session cookie only; no bearer tokens)   | Yes                      | Document + version it (0.2)                                                                  |
 | Zapier/Make integration              | No                                                                       | Yes                      | Via webhooks + API once 0.3 lands                                                            |
 
 ## 7. Reporting & insights
