@@ -1339,6 +1339,28 @@ describe("agent authority mirrors the owning user", () => {
     expect(cancelled.status).toBe("cancelled");
   });
 
+  it("savedView.update and savedView.delete keep private views to their owner or an admin", async () => {
+    const member = await createUser("member");
+    const other = await createUser("member");
+    const admin = await createUser("admin");
+    const mine = await ok(run(member, "savedView.create", { name: "Mine", entityType: "company", filters: { search: "acme" } }));
+    const shared = await ok(run(member, "savedView.create", { name: "Ours", entityType: "company", filters: {}, visibility: "shared" }));
+
+    expect((await ok<any[]>(run(other, "savedView.list", {}))).map((v) => v.id)).toEqual(expect.not.arrayContaining([mine.id]));
+    for (const name of ["savedView.update", "savedView.delete"]) {
+      const denied = await run(other, name, name === "savedView.update" ? { id: mine.id, visibility: "shared" } : { id: mine.id });
+      expect(denied.status).toBe("error");
+      expect((denied as any).error.code).toBe("forbidden");
+    }
+    expect((await ports.savedViews.get(mine.id))!.visibility).toBe("private");
+
+    const renamedByOther = await ok(run(other, "savedView.update", { id: shared.id, name: "Ours, renamed" }));
+    expect(renamedByOther.name).toBe("Ours, renamed");
+    await ok(run(admin, "savedView.update", { id: mine.id, visibility: "shared" }));
+    await ok(run(admin, "savedView.delete", { id: mine.id }));
+    expect(await ports.savedViews.get(mine.id)).toBeNull();
+  });
+
   it("an agent cannot approve its own pending actions", async () => {
     const company = await ok(run(owner, "company.create", { name: "Doomed Co" }));
     const requester = agentCtx({ clientId: "client-self", scopes: ["read", "write"] });
