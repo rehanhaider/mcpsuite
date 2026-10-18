@@ -1055,6 +1055,9 @@ describe.runIf(enabled)("postgres workspace isolation (crm_app under forced RLS)
   });
 });
 
-describe.runIf(!enabled)("postgres workspace isolation (skipped)", () => {
-  it.skip("set PG_TESTS=1 and DATABASE_URL (and install the pg driver) to run this suite", () => {});
-});
+// Registered only when disabled, so the PostgreSQL CI job reports 0 skipped.
+if (!enabled) {
+  describe("postgres workspace isolation (skipped)", () => {
+    it.skip("set PG_TESTS=1 and DATABASE_URL (and install the pg driver) to run this suite", () => {});
+  });
+}
