@@ -159,6 +159,38 @@ describe("audit before/after values (#44)", () => {
     expect(second.items[0].meta.changes).toEqual({ [field.key]: { before: "a", after: "b" } });
   });
 
+  it("records an archived custom field's stored value as before", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Acme" }));
+    const field = await ok(run(owner, "customField.create", { entityType: "company", label: "Account code", type: "text" }));
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "a" } }));
+    await ok(run(owner, "customField.archive", { id: field.id }));
+
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "b" } }));
+    const changed = await ok(run(owner, "audit.list", { operation: "customField.setValues", entityId: company.id }));
+    expect(changed.items[0].meta.changes).toEqual({ [field.key]: { before: "a", after: "b" } });
+
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "b" } }));
+    const unchanged = await ok(run(owner, "audit.list", { operation: "customField.setValues", entityId: company.id }));
+    expect(unchanged.items[0].meta.changes).toEqual({});
+  });
+
+  it("keeps audit meta out of the viewer home feed", async () => {
+    const company = await ok(run(agentCtx(), "company.create", { name: "Acme" }));
+    await ok(run(agentCtx(), "company.update", {
+      id: company.id,
+      expectedVersion: company.version,
+      name: "Acme updated",
+    }));
+
+    const viewer: RequestContext = { ...owner, role: "viewer" };
+    const home = await ok(run(viewer, "stats.home", {}));
+    expect(home.recentAgentEvents.length).toBeGreaterThan(0);
+    expect(home.recentAgentEvents.every((event: any) => event.meta === null)).toBe(true);
+
+    const events = await ok(run(owner, "audit.list", { operation: "company.update", entityId: company.id }));
+    expect(events.items[0].meta.changes.name).toEqual({ before: "Acme", after: "Acme updated" });
+  });
+
   it("records disabling a user and keeps the revocation counts", async () => {
     const created = await ok(run(owner, "user.create", { name: "Sam", email: "sam@example.com", role: "member" }));
     setUserStatus(created.user.id, "active");

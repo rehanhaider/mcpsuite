@@ -2622,7 +2622,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
           });
       });
     },
-    async values(entityType, entityId) {
+    async values(entityType, entityId, includeArchived = false) {
       return run(async (x) => {
         const vt = t.CUSTOM_FIELD_VALUE_TABLES[entityType];
         const rows = await x
@@ -2632,7 +2632,7 @@ export function createPgPorts(db: PgDb, workspaceId: string): PgPorts {
             t.customFieldDefs,
             and(eq(t.customFieldDefs.id, vt.fieldId), eq(t.customFieldDefs.workspaceId, ws)),
           )
-          .where(and(eq(vt.workspaceId, ws), eq(vt.entityId, uid(entityId)), isNull(t.customFieldDefs.archivedAt)));
+          .where(and(eq(vt.workspaceId, ws), eq(vt.entityId, uid(entityId)), includeArchived ? undefined : isNull(t.customFieldDefs.archivedAt)));
         const out: Record<string, CustomFieldValue> = {};
         for (const r of rows) out[r.key] = (r.value ?? null) as CustomFieldValue;
         return out;

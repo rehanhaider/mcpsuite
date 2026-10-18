@@ -244,7 +244,7 @@ export const customFieldOps = [
       }[entityType];
       found(await port(), entityType, entityId);
 
-      const before = await op.ports.customFields.values(entityType, entityId);
+      const before = await op.ports.customFields.values(entityType, entityId, true);
       const results: Record<string, CustomFieldValue> = {};
       for (const [key, raw] of Object.entries(values)) {
         const def = await op.ports.customFields.getDefByKey(entityType, key);

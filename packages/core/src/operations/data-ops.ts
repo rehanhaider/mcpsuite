@@ -286,7 +286,8 @@ export function buildDataOps(csvServices: CsvServices) {
           staleEngagements: { count: staleEng.total, sample: staleEng.items },
           staleDeals: { count: staleDeals.total, sample: staleDeals.items },
           pendingApprovals: await ports.pendingActions.countPending(),
-          recentAgentEvents: agentEvents.items,
+          // Viewer-level feed: field values stay in the admin-only audit log (#44).
+          recentAgentEvents: agentEvents.items.map((e) => ({ ...e, meta: null })),
           openDealValueByCurrency: valueByCurrency,
         };
       },
