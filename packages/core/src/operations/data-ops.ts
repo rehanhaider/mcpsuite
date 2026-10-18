@@ -464,10 +464,11 @@ export function buildDataOps(csvServices: CsvServices) {
               engagementsSkipped++;
               continue;
             }
+            // The title names the linked records as stored, not the CSV's spelling of them (issue #27).
             const company = companyId ? await op.ports.companies.get(companyId) : null;
-            const personName = row.person.name;
+            const person = personId ? await op.ports.people.get(personId) : null;
             const engagement = await op.ports.engagements.create({
-              title: personName && company ? `${personName} @ ${company.name}` : (personName ?? company?.name ?? "Imported lead"),
+              title: person && company ? `${person.name} @ ${company.name}` : (person?.name ?? company?.name ?? "Imported lead"),
               companyId,
               personId,
               pipelineId,
