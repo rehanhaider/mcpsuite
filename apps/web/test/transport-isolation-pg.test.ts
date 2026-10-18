@@ -192,8 +192,10 @@ describe.runIf(ENABLED)("#49 transport isolation — PostgreSQL as crm_app", () 
       `SELECT '${table}' AS name, to_jsonb(r) AS data FROM crm."${table}" r WHERE "${column}" = $${column === "user_id" ? 2 : 1}::uuid`,
     ).join(" UNION ALL ");
 
+    // Vitest sets NODE_ENV=test, and Vite keeps an inherited NODE_ENV: without
+    // this the build would not be a production build.
     const build = spawnSync(join(webDir, "node_modules/.bin/vite"), ["build", "--outDir", "dist/transport-isolation-e2e", "--logLevel", "warn"], {
-      cwd: webDir, encoding: "utf8", timeout: 240_000,
+      cwd: webDir, encoding: "utf8", timeout: 240_000, env: { ...process.env, NODE_ENV: "production" },
     });
     if (build.status !== 0) throw new Error(`Production build failed: ${build.error ?? build.status}\n${build.stdout}\n${build.stderr}`);
     webBase = `http://127.0.0.1:${await freePort()}`;
