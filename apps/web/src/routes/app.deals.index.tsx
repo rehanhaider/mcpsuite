@@ -21,8 +21,9 @@ import { listAccepts } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { daysUntil, formatMoneyMinor, relativeTime } from "~/lib/format.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
-import { BulkBar } from "~/components/BulkBar.tsx";
+import { BULK_OPERATIONS, BulkBar } from "~/components/BulkBar.tsx";
 import { DataTable } from "~/components/DataTable.tsx";
 import { DebouncedInput } from "~/components/filters.tsx";
 import { SavedViewsMenu } from "~/components/SavedViews.tsx";
@@ -74,6 +75,9 @@ function DealsPage() {
   const search = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const isAdmin = useIsAdmin();
+  const can = useCanRun();
+  const canCreate = can("deal.create");
+  const selectable = BULK_OPERATIONS.some(can);
   const [selection, setSelection] = useState<RowSelectionState>({});
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -307,9 +311,11 @@ function DealsPage() {
                 <Settings2 className="size-4" />
               </Button>
             ) : null}
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="size-4" /> New deal
-            </Button>
+            {canCreate ? (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="size-4" /> New deal
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -404,7 +410,7 @@ function DealsPage() {
         />
       </div>
 
-      {selectedIds.length > 0 ? (
+      {selectable && selectedIds.length > 0 ? (
         <BulkBar
           entityType="deal"
           ids={selectedIds}
@@ -424,7 +430,7 @@ function DealsPage() {
             stageId: d.stageId,
             node: <DealCard deal={d} />,
           }))}
-          onMove={(id, stageId) => moveStage.mutate({ id, stageId })}
+          onMove={can("deal.updateStage") ? (id, stageId) => moveStage.mutate({ id, stageId }) : undefined}
           columnFooter={(stage) => {
             const inStage = (deals.data?.items ?? []).filter(
               (d) => d.stageId === stage.id && d.amountMinor != null,
@@ -469,16 +475,16 @@ function DealsPage() {
             navigate({ to: "/app/deals/$id", params: { id: row.id } })
           }
           getRowId={(row) => row.id}
-          rowSelection={selection}
-          onRowSelectionChange={setSelection}
+          rowSelection={selectable ? selection : undefined}
+          onRowSelectionChange={selectable ? setSelection : undefined}
           empty={{
             title: search.q ? "No deals match" : "No deals yet",
-            hint: "Convert a lead or create a deal directly.",
-            action: (
+            hint: canCreate ? "Convert a lead or create a deal directly." : undefined,
+            action: canCreate ? (
               <Button size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="size-4" /> New deal
               </Button>
-            ),
+            ) : undefined,
           }}
         />
       )}

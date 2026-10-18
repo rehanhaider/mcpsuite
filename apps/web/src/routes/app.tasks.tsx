@@ -7,6 +7,7 @@ import type { Activity, Page, User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { daysUntil, formatDateTime, relativeTime } from "~/lib/format.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { OwnerSelect } from "~/components/pickers.tsx";
 import { EmptyState, PageHeader, Spinner } from "~/components/ui.tsx";
 import { Button } from "~/components/ui/button.tsx";
@@ -30,6 +31,7 @@ function TasksPage() {
   const [title, setTitle] = useState("");
   const [dueAt, setDueAt] = useState("");
   const [assignee, setAssignee] = useState<string | null>(null);
+  const canCreate = useCanRun()("task.create");
 
   const tasks = useQuery(
     opQuery<Page<Activity>>("activity.list", {
@@ -77,45 +79,47 @@ function TasksPage() {
         }
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card p-3">
-        <Input
-          className="min-w-48 flex-1"
-          placeholder="Add a task… (press Enter)"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && title.trim()) {
+      {canCreate ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card p-3">
+          <Input
+            className="min-w-48 flex-1"
+            placeholder="Add a task… (press Enter)"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && title.trim()) {
+                createTask.mutate({
+                  title: title.trim(),
+                  dueAt: dueAt || undefined,
+                  assigneeUserId: assignee ?? undefined,
+                });
+              }
+            }}
+          />
+          <Input
+            type="date"
+            className="w-40"
+            value={dueAt}
+            onChange={(e) => setDueAt(e.target.value)}
+          />
+          <div className="w-44">
+            <OwnerSelect value={assignee} onChange={setAssignee} />
+          </div>
+          <Button
+            size="sm"
+            disabled={!title.trim() || createTask.isPending}
+            onClick={() =>
               createTask.mutate({
                 title: title.trim(),
                 dueAt: dueAt || undefined,
                 assigneeUserId: assignee ?? undefined,
-              });
+              })
             }
-          }}
-        />
-        <Input
-          type="date"
-          className="w-40"
-          value={dueAt}
-          onChange={(e) => setDueAt(e.target.value)}
-        />
-        <div className="w-44">
-          <OwnerSelect value={assignee} onChange={setAssignee} />
+          >
+            <Plus className="size-4" /> Add
+          </Button>
         </div>
-        <Button
-          size="sm"
-          disabled={!title.trim() || createTask.isPending}
-          onClick={() =>
-            createTask.mutate({
-              title: title.trim(),
-              dueAt: dueAt || undefined,
-              assigneeUserId: assignee ?? undefined,
-            })
-          }
-        >
-          <Plus className="size-4" /> Add
-        </Button>
-      </div>
+      ) : null}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="flex items-center rounded-lg border border-border p-0.5">
@@ -152,7 +156,7 @@ function TasksPage() {
       ) : items.length === 0 ? (
         <EmptyState
           title="No tasks"
-          hint="Add one above, or ask your agent to create follow-ups."
+          hint={canCreate ? "Add one above, or ask your agent to create follow-ups." : undefined}
         />
       ) : (
         <div className="space-y-5">
@@ -225,6 +229,7 @@ function TaskGroup({
 }
 
 function TaskRow({ task: t, users }: { task: Activity; users: User[] }) {
+  const can = useCanRun();
   const complete = useOp("task.complete");
   const reopenTask = useOp("task.reopen");
   const done = t.completedAt != null;
@@ -259,6 +264,7 @@ function TaskRow({ task: t, users }: { task: Activity; users: User[] }) {
     <li className="flex items-center gap-3 px-3 py-2 hover:bg-accent/40">
       <Checkbox
         checked={done}
+        disabled={!can(done ? "task.reopen" : "task.complete")}
         onCheckedChange={() =>
           done ? reopenTask.mutate({ id: t.id }) : complete.mutate({ id: t.id })
         }

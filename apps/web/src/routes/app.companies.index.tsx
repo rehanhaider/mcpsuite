@@ -8,7 +8,8 @@ import type { CompanyListItem, ContactListWithCounts, Page, Tag, User } from "@m
 import { listAccepts } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { relativeTime } from "~/lib/format.ts";
-import { BulkBar } from "~/components/BulkBar.tsx";
+import { useCanRun } from "~/lib/use-can-run.ts";
+import { BULK_OPERATIONS, BulkBar } from "~/components/BulkBar.tsx";
 import { DataTable } from "~/components/DataTable.tsx";
 import { DebouncedInput } from "~/components/filters.tsx";
 import { SavedViewsMenu } from "~/components/SavedViews.tsx";
@@ -44,6 +45,9 @@ function CompaniesPage() {
   const navigate = useNavigate({ from: Route.fullPath });
   const [selection, setSelection] = useState<RowSelectionState>({});
   const [createOpen, setCreateOpen] = useState(false);
+  const can = useCanRun();
+  const canCreate = can("company.create");
+  const selectable = BULK_OPERATIONS.some(can);
 
   const companies = useQuery(
     opQuery<Page<CompanyListItem>>("company.list", {
@@ -132,9 +136,11 @@ function CompaniesPage() {
         title="Companies"
         subtitle={companies.data ? `${companies.data.total} compan${companies.data.total === 1 ? "y" : "ies"}` : "…"}
         actions={
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
-            <Plus className="size-4" /> New company
-          </Button>
+          canCreate ? (
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="size-4" /> New company
+            </Button>
+          ) : null
         }
       />
 
@@ -170,7 +176,7 @@ function CompaniesPage() {
         />
       </div>
 
-      {selectedIds.length > 0 ? (
+      {selectable && selectedIds.length > 0 ? (
         <BulkBar
           entityType="company"
           ids={selectedIds}
@@ -197,15 +203,15 @@ function CompaniesPage() {
         onPageChange={(page) => navigate({ search: (prev) => ({ ...prev, page }), replace: true })}
         onRowClick={(row) => navigate({ to: "/app/companies/$id", params: { id: row.id } })}
         getRowId={(row) => row.id}
-        rowSelection={selection}
-        onRowSelectionChange={setSelection}
+        rowSelection={selectable ? selection : undefined}
+        onRowSelectionChange={selectable ? setSelection : undefined}
         empty={{
           title: search.q ? "No companies match" : "No companies yet",
-          action: (
+          action: canCreate ? (
             <Button size="sm" onClick={() => setCreateOpen(true)}>
               <Plus className="size-4" /> New company
             </Button>
-          ),
+          ) : undefined,
         }}
       />
 

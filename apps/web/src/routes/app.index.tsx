@@ -18,6 +18,7 @@ import type {
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { formatMoneyMinor, relativeTime, truncate } from "~/lib/format.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { SectionCard, Spinner } from "~/components/ui.tsx";
 import { Checkbox } from "~/components/ui/checkbox.tsx";
 import { whoamiQuery } from "~/routes/__root.tsx";
@@ -386,10 +387,12 @@ function TaskRow({
   overdue: boolean;
 }) {
   const complete = useOp("task.complete", { successToast: "Task done" });
+  const canComplete = useCanRun()("task.complete");
   return (
     <li className="flex items-center gap-2 rounded-lg px-2 py-1 hover:bg-accent/50">
       <Checkbox
         checked={false}
+        disabled={!canComplete}
         onCheckedChange={() => complete.mutate({ id })}
         aria-label="Complete task"
       />

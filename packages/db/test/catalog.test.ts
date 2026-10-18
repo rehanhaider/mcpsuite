@@ -9,6 +9,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import {
   buildCatalog,
   actorStamp,
+  operationsForRole,
   runOperation,
   systemContext,
   type Catalog,
@@ -945,6 +946,29 @@ describe("authorization + approval gating", () => {
     const result = await run(viewer, "company.create", { name: "Nope" });
     expect(result.status).toBe("error");
     expect((result as any).error.code).toBe("forbidden");
+  });
+
+  it("operationsForRole leaves out exactly what the role floor refuses (#30)", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Kept Co" }));
+    const viewer: RequestContext = { ...owner, role: "viewer" };
+    const member: RequestContext = { ...owner, role: "member" };
+
+    const viewerOps = operationsForRole(catalog, "viewer");
+    expect(viewerOps).toContain("company.list");
+    expect(viewerOps).not.toContain("company.create");
+    const created = await run(viewer, "company.create", { name: "Nope" });
+    expect((created as any).error?.message).toBe("Requires role member+ (you are viewer)");
+
+    const memberOps = operationsForRole(catalog, "member");
+    expect(memberOps).toContain("company.create");
+    expect(memberOps).not.toContain("company.delete");
+    const deleted = await run(member, "company.delete", { id: company.id });
+    expect((deleted as any).error?.message).toBe("Requires role admin+ (you are member)");
+    expect((await ok(run(owner, "company.get", { id: company.id }))).id).toBe(company.id);
+
+    expect(operationsForRole(catalog, "admin")).toContain("company.delete");
+    expect(operationsForRole(catalog, "admin")).not.toContain("user.transferOwnership");
+    expect(operationsForRole(catalog, "owner")).toEqual([...catalog.keys()]);
   });
 
   it("pending action and its audit event commit atomically (audit failure rolls both back)", async () => {

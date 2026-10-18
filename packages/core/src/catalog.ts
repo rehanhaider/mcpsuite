@@ -10,7 +10,7 @@ import { internalErrorPayload, OpError, toErrorPayload } from "./errors.ts";
 import { nowIso } from "./ids.ts";
 import { actorStamp, type RequestContext } from "./context.ts";
 import type { AuditInput, Ports } from "./ports.ts";
-import { roleAtLeast, trustAllows } from "./policy.ts";
+import { roleAtLeast, trustAllows, type Role } from "./policy.ts";
 import { defineOperation, type OpCtx, type OperationDef, type OpResult } from "./operations/define.ts";
 import { companyOps } from "./operations/company-ops.ts";
 import { personOps } from "./operations/person-ops.ts";
@@ -151,6 +151,14 @@ export function buildCatalog(deps: CatalogDeps): Catalog {
   catalog.set(approve.name, approve as OperationDef);
 
   return catalog;
+}
+
+/**
+ * Operations a human of `role` may run: the role floor `authorize` applies.
+ * The web reads this from `whoami` to hide controls the server would refuse.
+ */
+export function operationsForRole(catalog: Catalog, role: Role): string[] {
+  return [...catalog.values()].filter((op) => roleAtLeast(role, op.minRole)).map((op) => op.name);
 }
 
 // ---------------------------------------------------------------------------

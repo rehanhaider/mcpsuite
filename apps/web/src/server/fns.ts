@@ -15,7 +15,7 @@
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { internalErrorPayload } from "@mcpsuite/core";
+import { internalErrorPayload, operationsForRole } from "@mcpsuite/core";
 import { getRuntimeAsync, workspaceLockedResult, WORKSPACE_LOCKED_MESSAGE } from "@mcpsuite/db";
 import { LOGIN_ERROR_MESSAGES, performPasswordLogin } from "./auth-issuer.ts";
 import { currentSession, requireContext, setSessionCookie, revokeSession } from "./session.ts";
@@ -56,6 +56,8 @@ export const whoami = createServerFn({ method: "GET" }).handler(async () => {
     // While set, the web app must route to /set-password; every catalog
     // operation answers password_change_required until it is cleared.
     passwordMustChange: session.passwordMustChange,
+    // Catalog operations this role may run; the UI hides controls for the rest.
+    operations: operationsForRole(runtime.catalog, session.role),
     workspace: await ports.workspace.get(),
     pendingApprovals:
       access.mode === "locked" || session.passwordMustChange ? 0 : await ports.pendingActions.countPending(),

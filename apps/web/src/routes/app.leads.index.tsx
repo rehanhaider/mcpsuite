@@ -22,12 +22,13 @@ import { CHANNEL_HINTS } from "~/lib/channels.ts";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { daysUntil, relativeTime } from "~/lib/format.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
 import { DataTable } from "~/components/DataTable.tsx";
 import { DebouncedInput } from "~/components/filters.tsx";
 import { SavedViewsMenu } from "~/components/SavedViews.tsx";
 import { Kanban } from "~/components/Kanban.tsx";
-import { BulkBar } from "~/components/BulkBar.tsx";
+import { BULK_OPERATIONS, BulkBar } from "~/components/BulkBar.tsx";
 import {
   EntityPicker,
   ListCellChips,
@@ -79,6 +80,9 @@ function LeadsPage() {
   const search = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const isAdmin = useIsAdmin();
+  const can = useCanRun();
+  const canCreate = can("engagement.create");
+  const selectable = BULK_OPERATIONS.some(can);
   const [selection, setSelection] = useState<RowSelectionState>({});
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -303,9 +307,11 @@ function LeadsPage() {
                 <Settings2 className="size-4" />
               </Button>
             ) : null}
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="size-4" /> New lead
-            </Button>
+            {canCreate ? (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="size-4" /> New lead
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -418,7 +424,7 @@ function LeadsPage() {
         />
       </div>
 
-      {selectedIds.length > 0 ? (
+      {selectable && selectedIds.length > 0 ? (
         <BulkBar
           entityType="engagement"
           ids={selectedIds}
@@ -438,7 +444,7 @@ function LeadsPage() {
             stageId: e.stageId,
             node: <LeadCard lead={e} />,
           }))}
-          onMove={(id, stageId) => moveStage.mutate({ id, stageId })}
+          onMove={can("engagement.updateStage") ? (id, stageId) => moveStage.mutate({ id, stageId }) : undefined}
         />
       ) : (
         <DataTable
@@ -466,18 +472,20 @@ function LeadsPage() {
             navigate({ to: "/app/leads/$id", params: { id: row.id } })
           }
           getRowId={(row) => row.id}
-          rowSelection={selection}
-          onRowSelectionChange={setSelection}
+          rowSelection={selectable ? selection : undefined}
+          onRowSelectionChange={selectable ? setSelection : undefined}
           empty={{
             title: search.q ? "No leads match" : "No leads yet",
             hint: search.q
               ? "Try a different search or clear filters."
-              : "Create your first lead or import a CSV from Admin → Data.",
-            action: (
+              : canCreate
+                ? "Create your first lead or import a CSV from Admin → Data."
+                : undefined,
+            action: canCreate ? (
               <Button size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="size-4" /> New lead
               </Button>
-            ),
+            ) : undefined,
           }}
         />
       )}

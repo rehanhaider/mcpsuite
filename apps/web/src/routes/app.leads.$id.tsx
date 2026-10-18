@@ -29,6 +29,7 @@ import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { CHANNEL_HINTS } from "~/lib/channels.ts";
 import { formatDate, relativeTime } from "~/lib/format.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { ActivityFeed } from "~/components/ActivityFeed.tsx";
 import { CustomFieldsCard } from "~/components/CustomFields.tsx";
 import { CompanyField, PersonField } from "~/routes/app.leads.index.tsx";
@@ -81,6 +82,7 @@ function LeadDetailPage() {
   const users = useQuery(opQuery<User[]>("user.list"));
   const [editOpen, setEditOpen] = useState(false);
   const [dealOpen, setDealOpen] = useState(false);
+  const can = useCanRun();
 
   const moveStage = useOp("engagement.updateStage", {
     successToast: "Stage updated",
@@ -139,7 +141,7 @@ function LeadDetailPage() {
                 <CircleDollarSign className="size-4 text-success" />{" "}
                 {data.deal.title}
               </Link>
-            ) : (
+            ) : can("deal.create") ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -147,51 +149,59 @@ function LeadDetailPage() {
               >
                 <CircleDollarSign className="size-4" /> Convert to deal
               </Button>
-            )}
-            <Button size="sm" onClick={() => setEditOpen(true)}>
-              <Pencil className="size-3.5" /> Edit
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="More actions"
-                  />
-                }
-              >
-                <MoreHorizontal className="size-4" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
-                {e.archivedAt ? (
-                  <DropdownMenuItem
-                    onClick={() => restore.mutate({ id: e.id })}
-                  >
-                    <ArchiveRestore className="size-3.5" /> Restore
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem
-                    onClick={() => archive.mutate({ id: e.id })}
-                  >
-                    <Archive className="size-3.5" /> Archive
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
-                  variant="destructive"
-                  onClick={() => {
-                    if (
-                      confirm(
-                        `Permanently delete "${e.title}"? This cannot be undone.`,
-                      )
-                    )
-                      hardDelete.mutate({ id: e.id });
-                  }}
+            ) : null}
+            {can("engagement.update") ? (
+              <Button size="sm" onClick={() => setEditOpen(true)}>
+                <Pencil className="size-3.5" /> Edit
+              </Button>
+            ) : null}
+            {can(e.archivedAt ? "engagement.restore" : "engagement.archive") || can("engagement.delete") ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="More actions"
+                    />
+                  }
                 >
-                  <Trash2 className="size-3.5" /> Delete forever
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <MoreHorizontal className="size-4" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  {e.archivedAt ? (
+                    can("engagement.restore") ? (
+                      <DropdownMenuItem
+                        onClick={() => restore.mutate({ id: e.id })}
+                      >
+                        <ArchiveRestore className="size-3.5" /> Restore
+                      </DropdownMenuItem>
+                    ) : null
+                  ) : can("engagement.archive") ? (
+                    <DropdownMenuItem
+                      onClick={() => archive.mutate({ id: e.id })}
+                    >
+                      <Archive className="size-3.5" /> Archive
+                    </DropdownMenuItem>
+                  ) : null}
+                  {can("engagement.delete") ? (
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onClick={() => {
+                        if (
+                          confirm(
+                            `Permanently delete "${e.title}"? This cannot be undone.`,
+                          )
+                        )
+                          hardDelete.mutate({ id: e.id });
+                      }}
+                    >
+                      <Trash2 className="size-3.5" /> Delete forever
+                    </DropdownMenuItem>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
           </div>
         </div>
       </div>
@@ -211,7 +221,7 @@ function LeadDetailPage() {
                 type="button"
                 variant="ghost"
                 size="xs"
-                disabled={isCurrent || moveStage.isPending}
+                disabled={isCurrent || moveStage.isPending || !can("engagement.updateStage")}
                 onClick={() => moveStage.mutate({ id: e.id, stageId: s.id })}
                 className={`shrink-0 gap-1.5 px-2.5 ${
                   isCurrent
@@ -286,14 +296,14 @@ function LeadDetailPage() {
               {relativeTime(e.lastActivityAt)}
             </Field>
             <Field label="Created">{formatDate(e.createdAt)}</Field>
-            <div className="mt-2 border-t border-border/60 pt-2.5">
+            <div className="mt-2 border-t border-border/60 pt-2.5 empty:hidden">
               <TagChips
                 entityType="engagement"
                 entityId={e.id}
                 tags={data.tags}
               />
             </div>
-            <div className="mt-2 border-t border-border/60 pt-2.5">
+            <div className="mt-2 border-t border-border/60 pt-2.5 empty:hidden">
               <ListChips
                 entityType="engagement"
                 entityId={e.id}

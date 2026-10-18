@@ -32,6 +32,7 @@ import type {
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { formatDate, formatMoneyMinor, relativeTime } from "~/lib/format.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { ActivityFeed } from "~/components/ActivityFeed.tsx";
 import { CustomFieldsCard } from "~/components/CustomFields.tsx";
 import {
@@ -89,6 +90,7 @@ function DealDetailPage() {
   const [wonOpen, setWonOpen] = useState(false);
   const [lostOpen, setLostOpen] = useState(false);
   const [stakeholderOpen, setStakeholderOpen] = useState(false);
+  const can = useCanRun();
 
   const moveStage = useOp("deal.updateStage", {
     successToast: "Stage updated",
@@ -159,22 +161,26 @@ function DealDetailPage() {
           <div className="flex items-center gap-2">
             {isOpen ? (
               <>
-                <Button
-                  size="sm"
-                  className="bg-success text-success-foreground hover:bg-success/85"
-                  onClick={() => setWonOpen(true)}
-                >
-                  <ThumbsUp className="size-3.5" /> Won
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setLostOpen(true)}
-                >
-                  <ThumbsDown className="size-3.5" /> Lost
-                </Button>
+                {can("deal.markWon") ? (
+                  <Button
+                    size="sm"
+                    className="bg-success text-success-foreground hover:bg-success/85"
+                    onClick={() => setWonOpen(true)}
+                  >
+                    <ThumbsUp className="size-3.5" /> Won
+                  </Button>
+                ) : null}
+                {can("deal.markLost") ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setLostOpen(true)}
+                  >
+                    <ThumbsDown className="size-3.5" /> Lost
+                  </Button>
+                ) : null}
               </>
-            ) : (
+            ) : can("deal.reopen") ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -182,47 +188,55 @@ function DealDetailPage() {
               >
                 <RotateCcw className="size-3.5" /> Reopen
               </Button>
-            )}
-            <Button size="sm" onClick={() => setEditOpen(true)}>
-              <Pencil className="size-3.5" /> Edit
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="More actions"
-                  />
-                }
-              >
-                <MoreHorizontal className="size-4" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
-                {d.archivedAt ? (
-                  <DropdownMenuItem
-                    onClick={() => restore.mutate({ id: d.id })}
-                  >
-                    <ArchiveRestore className="size-3.5" /> Restore
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem
-                    onClick={() => archive.mutate({ id: d.id })}
-                  >
-                    <Archive className="size-3.5" /> Archive
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
-                  variant="destructive"
-                  onClick={() => {
-                    if (confirm(`Permanently delete "${d.title}"?`))
-                      hardDelete.mutate({ id: d.id });
-                  }}
+            ) : null}
+            {can("deal.update") ? (
+              <Button size="sm" onClick={() => setEditOpen(true)}>
+                <Pencil className="size-3.5" /> Edit
+              </Button>
+            ) : null}
+            {can(d.archivedAt ? "deal.restore" : "deal.archive") || can("deal.delete") ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="More actions"
+                    />
+                  }
                 >
-                  <Trash2 className="size-3.5" /> Delete forever
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <MoreHorizontal className="size-4" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  {d.archivedAt ? (
+                    can("deal.restore") ? (
+                      <DropdownMenuItem
+                        onClick={() => restore.mutate({ id: d.id })}
+                      >
+                        <ArchiveRestore className="size-3.5" /> Restore
+                      </DropdownMenuItem>
+                    ) : null
+                  ) : can("deal.archive") ? (
+                    <DropdownMenuItem
+                      onClick={() => archive.mutate({ id: d.id })}
+                    >
+                      <Archive className="size-3.5" /> Archive
+                    </DropdownMenuItem>
+                  ) : null}
+                  {can("deal.delete") ? (
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onClick={() => {
+                        if (confirm(`Permanently delete "${d.title}"?`))
+                          hardDelete.mutate({ id: d.id });
+                      }}
+                    >
+                      <Trash2 className="size-3.5" /> Delete forever
+                    </DropdownMenuItem>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
           </div>
         </div>
       </div>
@@ -241,7 +255,7 @@ function DealDetailPage() {
                 type="button"
                 variant="ghost"
                 size="xs"
-                disabled={isCurrent || moveStage.isPending}
+                disabled={isCurrent || moveStage.isPending || !can("deal.updateStage")}
                 onClick={() => moveStage.mutate({ id: d.id, stageId: s.id })}
                 className={`shrink-0 gap-1.5 px-2.5 ${
                   isCurrent
@@ -337,10 +351,10 @@ function DealDetailPage() {
                 </Link>
               </Field>
             ) : null}
-            <div className="mt-2 border-t border-border/60 pt-2.5">
+            <div className="mt-2 border-t border-border/60 pt-2.5 empty:hidden">
               <TagChips entityType="deal" entityId={d.id} tags={data.tags} />
             </div>
-            <div className="mt-2 border-t border-border/60 pt-2.5">
+            <div className="mt-2 border-t border-border/60 pt-2.5 empty:hidden">
               <ListChips entityType="deal" entityId={d.id} lists={data.lists} />
             </div>
           </SectionCard>
@@ -348,14 +362,16 @@ function DealDetailPage() {
           <SectionCard
             title={`Stakeholders (${data.stakeholders.length})`}
             actions={
-              <Button
-                variant="ghost"
-                size="xs"
-                className="gap-1"
-                onClick={() => setStakeholderOpen(true)}
-              >
-                <Plus className="size-3" /> add
-              </Button>
+              can("deal.addStakeholder") ? (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="gap-1"
+                  onClick={() => setStakeholderOpen(true)}
+                >
+                  <Plus className="size-3" /> add
+                </Button>
+              ) : null
             }
           >
             {data.stakeholders.length === 0 ? (
@@ -389,15 +405,17 @@ function DealDetailPage() {
                         {sh.role ?? sh.person.title ?? "—"}
                       </p>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      className="opacity-0 group-hover:opacity-100"
-                      title="Remove"
-                      onClick={() => removeStakeholder.mutate({ id: sh.id })}
-                    >
-                      <X className="size-3" />
-                    </Button>
+                    {can("deal.removeStakeholder") ? (
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        className="opacity-0 group-hover:opacity-100"
+                        title="Remove"
+                        onClick={() => removeStakeholder.mutate({ id: sh.id })}
+                      >
+                        <X className="size-3" />
+                      </Button>
+                    ) : null}
                   </li>
                 ))}
               </ul>

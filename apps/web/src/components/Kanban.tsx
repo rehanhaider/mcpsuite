@@ -12,7 +12,8 @@ export interface KanbanCard {
 export function Kanban(props: {
   stages: Stage[];
   cards: KanbanCard[];
-  onMove(cardId: string, toStageId: string): void;
+  /** Omitted when the viewer cannot move cards: the board is read-only. */
+  onMove?(cardId: string, toStageId: string): void;
   /** Total per stage when the card list is truncated. */
   totals?: Record<string, number>;
   columnFooter?(stage: Stage): ReactNode;
@@ -32,6 +33,7 @@ export function Kanban(props: {
               overStage === stage.id && dragId ? "border-primary/60 bg-primary/5" : "border-border"
             }`}
             onDragOver={(e) => {
+              if (!props.onMove) return;
               e.preventDefault();
               setOverStage(stage.id);
             }}
@@ -41,7 +43,7 @@ export function Kanban(props: {
               const id = e.dataTransfer.getData("text/plain") || dragId;
               setOverStage(null);
               setDragId(null);
-              if (id) props.onMove(id, stage.id);
+              if (id) props.onMove?.(id, stage.id);
             }}
           >
             <div className="flex items-center gap-2 px-3 py-2.5">
@@ -53,7 +55,7 @@ export function Kanban(props: {
               {cards.map((card) => (
                 <div
                   key={card.id}
-                  draggable
+                  draggable={!!props.onMove}
                   onDragStart={(e) => {
                     e.dataTransfer.setData("text/plain", card.id);
                     e.dataTransfer.effectAllowed = "move";
@@ -63,7 +65,7 @@ export function Kanban(props: {
                     setDragId(null);
                     setOverStage(null);
                   }}
-                  className={`cursor-grab active:cursor-grabbing ${dragId === card.id ? "opacity-40" : ""}`}
+                  className={props.onMove ? `cursor-grab active:cursor-grabbing ${dragId === card.id ? "opacity-40" : ""}` : undefined}
                 >
                   {card.node}
                 </div>

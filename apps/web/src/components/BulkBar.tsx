@@ -3,10 +3,14 @@ import { Archive, ArrowRightLeft, Layers, Tags, UserRound, X } from "lucide-reac
 import type { ContactListWithCounts, ListableType, Stage, Tag, User } from "@mcpsuite/core/domain";
 import { listAccepts } from "@mcpsuite/core/domain";
 import { useOp } from "~/lib/api.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { dotClass } from "~/lib/colors.ts";
 import { ButtonSpinner } from "./ui.tsx";
 import { Button } from "~/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "~/components/ui/dropdown-menu";
+
+/** Operations the bar can run; tables offer row selection only when one is allowed. */
+export const BULK_OPERATIONS = ["bulk.updateStage", "bulk.assignOwner", "bulk.addTag", "list.addMembers", "bulk.archive"] as const;
 
 export function BulkBar(props: {
   entityType: ListableType;
@@ -17,6 +21,7 @@ export function BulkBar(props: {
   users: User[];
   onDone(): void;
 }) {
+  const can = useCanRun();
   const done = { onSuccess: () => props.onDone() };
   const moveStage = useOp("bulk.updateStage", { successToast: "Moved", ...done });
   const assignOwner = useOp("bulk.assignOwner", { successToast: "Owner assigned", ...done });
@@ -35,7 +40,7 @@ export function BulkBar(props: {
       </span>
       <div className="mx-1 h-4 w-px bg-border" />
 
-      {stageable && props.stages && props.stages.length > 0 ? (
+      {stageable && props.stages && props.stages.length > 0 && can("bulk.updateStage") ? (
         <PickMenu
           label="Stage"
           icon={<ArrowRightLeft className="size-3.5" />}
@@ -45,25 +50,29 @@ export function BulkBar(props: {
         />
       ) : null}
 
-      <PickMenu
-        label="Owner"
-        icon={<UserRound className="size-3.5" />}
-        disabled={busy}
-        items={[{ id: "__none", label: "Unassigned" }, ...props.users.filter((u) => !u.disabledAt).map((u) => ({ id: u.id, label: u.name }))]}
-        onPick={(ownerUserId) =>
-          assignOwner.mutate({ entityType: props.entityType, ids: props.ids, ownerUserId: ownerUserId === "__none" ? null : ownerUserId })
-        }
-      />
+      {can("bulk.assignOwner") ? (
+        <PickMenu
+          label="Owner"
+          icon={<UserRound className="size-3.5" />}
+          disabled={busy}
+          items={[{ id: "__none", label: "Unassigned" }, ...props.users.filter((u) => !u.disabledAt).map((u) => ({ id: u.id, label: u.name }))]}
+          onPick={(ownerUserId) =>
+            assignOwner.mutate({ entityType: props.entityType, ids: props.ids, ownerUserId: ownerUserId === "__none" ? null : ownerUserId })
+          }
+        />
+      ) : null}
 
-      <PickMenu
-        label="Tag"
-        icon={<Tags className="size-3.5" />}
-        disabled={busy}
-        items={props.tags.map((t) => ({ id: t.id, label: t.name, dot: dotClass(t.color) }))}
-        onPick={(tagId) => addTag.mutate({ entityType: props.entityType, ids: props.ids, tagId })}
-      />
+      {can("bulk.addTag") ? (
+        <PickMenu
+          label="Tag"
+          icon={<Tags className="size-3.5" />}
+          disabled={busy}
+          items={props.tags.map((t) => ({ id: t.id, label: t.name, dot: dotClass(t.color) }))}
+          onPick={(tagId) => addTag.mutate({ entityType: props.entityType, ids: props.ids, tagId })}
+        />
+      ) : null}
 
-      {eligibleLists.length > 0 ? (
+      {eligibleLists.length > 0 && can("list.addMembers") ? (
         <PickMenu
           label="List"
           icon={<Layers className="size-3.5" />}
@@ -73,15 +82,17 @@ export function BulkBar(props: {
         />
       ) : null}
 
-      <Button
-        variant="ghost"
-        size="xs"
-        className="gap-1 text-warning hover:text-warning"
-        disabled={busy}
-        onClick={() => archive.mutate({ entityType: props.entityType, ids: props.ids })}
-      >
-        <Archive className="size-3.5" /> Archive
-      </Button>
+      {can("bulk.archive") ? (
+        <Button
+          variant="ghost"
+          size="xs"
+          className="gap-1 text-warning hover:text-warning"
+          disabled={busy}
+          onClick={() => archive.mutate({ entityType: props.entityType, ids: props.ids })}
+        >
+          <Archive className="size-3.5" /> Archive
+        </Button>
+      ) : null}
 
       <span className="grow" />
       {busy ? <ButtonSpinner /> : null}

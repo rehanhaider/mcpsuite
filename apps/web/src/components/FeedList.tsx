@@ -16,6 +16,7 @@ import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import type { Activity, User } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { actorUserName } from "~/lib/actors.ts";
 import { daysUntil, formatDateTime, relativeTime } from "~/lib/format.ts";
 import { chipClass } from "~/lib/colors.ts";
@@ -78,6 +79,7 @@ function FeedRow({
   actorName: string | null;
   showLinks: boolean;
 }) {
+  const can = useCanRun();
   const complete = useOp("task.complete");
   const reopen = useOp("task.reopen");
   const del = useOp("activity.delete", { successToast: "Activity deleted" });
@@ -162,7 +164,7 @@ function FeedRow({
             </Link>
           ))}
           <span className="grow" />
-          {!system ? (
+          {!system && can("activity.delete") ? (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
@@ -192,6 +194,7 @@ function FeedRow({
             <Checkbox
               className="mt-0.5"
               checked={done}
+              disabled={!can(done ? "task.reopen" : "task.complete")}
               onCheckedChange={() =>
                 done
                   ? reopen.mutate({ id: a.id })

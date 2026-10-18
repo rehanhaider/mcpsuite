@@ -15,6 +15,7 @@ import {
   type SemanticColor,
 } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
 import { relativeTime } from "~/lib/format.ts";
 import { EmptyState, Modal, PageHeader, Spinner } from "~/components/ui.tsx";
@@ -46,6 +47,8 @@ function ListsPage() {
   const [edit, setEdit] = useState<ContactListWithCounts | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const del = useOp("list.delete", { successToast: "List deleted" });
+  const can = useCanRun();
+  const canCreate = can("list.create");
 
   const total = lists.data?.length ?? 0;
 
@@ -59,9 +62,11 @@ function ListsPage() {
             : "…"
         }
         actions={
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
-            <Plus className="size-4" /> New list
-          </Button>
+          canCreate ? (
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="size-4" /> New list
+            </Button>
+          ) : null
         }
       />
 
@@ -72,9 +77,11 @@ function ListsPage() {
           title="No lists yet"
           hint='Lists split your CRM into audiences — "Job search", "Product X prospects", "Q3 pipeline focus". Members show up as chips on tables, and agents can manage lists over MCP.'
           action={
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="size-4" /> Create your first list
-            </Button>
+            canCreate ? (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="size-4" /> Create your first list
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -147,30 +154,34 @@ function ListsPage() {
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="flex justify-end gap-0.5">
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Edit ${l.name}`}
-                        onClick={() => setEdit(l)}
-                      >
-                        <Pencil className="size-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        className="text-destructive"
-                        aria-label={`Delete ${l.name}`}
-                        onClick={() => {
-                          if (
-                            confirm(
-                              `Delete list "${l.name}"? ${memberTotal(l)} members will be detached (records are kept).`,
+                      {can("list.update") ? (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Edit ${l.name}`}
+                          onClick={() => setEdit(l)}
+                        >
+                          <Pencil className="size-3.5" />
+                        </Button>
+                      ) : null}
+                      {can("list.delete") ? (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="text-destructive"
+                          aria-label={`Delete ${l.name}`}
+                          onClick={() => {
+                            if (
+                              confirm(
+                                `Delete list "${l.name}"? ${memberTotal(l)} members will be detached (records are kept).`,
+                              )
                             )
-                          )
-                            del.mutate({ id: l.id });
-                        }}
-                      >
-                        <Trash2 className="size-3.5" />
-                      </Button>
+                              del.mutate({ id: l.id });
+                          }}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -180,7 +191,7 @@ function ListsPage() {
         </TableShell>
       )}
 
-      {total > 0 ? (
+      {total > 0 && can("list.addMembers") ? (
         <p className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground/70">
           <Layers className="size-3.5" />
           Tip: bulk-add from the{" "}

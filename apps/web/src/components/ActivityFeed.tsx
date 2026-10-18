@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import type { Activity, Page } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { ACTIVITY_KIND_ICON, FeedList } from "./FeedList.tsx";
 import { OwnerSelect } from "./pickers.tsx";
 import { ButtonSpinner, Spinner } from "./ui.tsx";
@@ -24,6 +25,7 @@ export function ActivityFeed(props: {
   showComposer?: boolean;
 }) {
   const [limit, setLimit] = useState(30);
+  const canLog = useCanRun()("activity.log");
   const query = useQuery(
     opQuery<Page<Activity>>("activity.list", {
       ...props.links,
@@ -34,7 +36,7 @@ export function ActivityFeed(props: {
 
   return (
     <div className="space-y-4">
-      {props.showComposer !== false ? <Composer links={props.links} /> : null}
+      {props.showComposer !== false && canLog ? <Composer links={props.links} /> : null}
       {query.isLoading ? (
         <Spinner />
       ) : (
