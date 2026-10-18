@@ -11,6 +11,7 @@ import { relativeTime } from "~/lib/format.ts";
 import { BulkBar } from "~/components/BulkBar.tsx";
 import { DataTable } from "~/components/DataTable.tsx";
 import { DebouncedInput } from "~/components/filters.tsx";
+import { SavedViewsMenu } from "~/components/SavedViews.tsx";
 import { ListCellChips, OwnerSelect } from "~/components/pickers.tsx";
 import { ButtonSpinner, Modal, PageHeader } from "~/components/ui.tsx";
 import { Button } from "~/components/ui/button.tsx";
@@ -29,6 +30,9 @@ const searchSchema = z.object({
   dir: z.enum(["asc", "desc"]).catch("desc"),
   page: z.number().int().min(0).catch(0),
 });
+
+/** URL search keys a saved view captures. */
+const VIEW_KEYS = ["q", "ownerUserId", "listId", "archived", "sort", "dir"] as const;
 
 export const Route = createFileRoute("/app/companies/")({
   validateSearch: searchSchema,
@@ -158,6 +162,12 @@ function CompaniesPage() {
           <Switch checked={search.archived ?? false} onCheckedChange={(checked) => patch({ archived: checked || undefined })} />
           archived
         </label>
+        <SavedViewsMenu
+          entityType="company"
+          search={search}
+          keys={VIEW_KEYS}
+          onApply={(next) => patch(next as Partial<z.infer<typeof searchSchema>>)}
+        />
       </div>
 
       {selectedIds.length > 0 ? (
