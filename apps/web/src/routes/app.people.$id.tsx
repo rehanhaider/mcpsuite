@@ -17,6 +17,7 @@ import type {
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass } from "~/lib/colors.ts";
 import { formatDate, formatMoneyMinor, relativeTime } from "~/lib/format.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { ActivityFeed } from "~/components/ActivityFeed.tsx";
 import { CustomFieldsCard } from "~/components/CustomFields.tsx";
 import { ListChips, OwnerSelect, TagChips } from "~/components/pickers.tsx";
@@ -47,6 +48,7 @@ function PersonDetailPage() {
   const ctx = useQuery(opQuery<PersonContext>("person.getContext", { id }));
   const users = useQuery(opQuery<User[]>("user.list"));
   const [editOpen, setEditOpen] = useState(false);
+  const can = useCanRun();
 
   const archive = useOp("person.archive", { successToast: "Archived" });
   const restore = useOp("person.restore", { successToast: "Restored" });
@@ -75,33 +77,41 @@ function PersonDetailPage() {
             {p.title ? <p className="text-sm text-muted-foreground">{p.title}</p> : null}
           </div>
           <div className="flex items-center gap-2">
-            <Button size="sm" onClick={() => setEditOpen(true)}>
-              <Pencil className="size-3.5" /> Edit
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="More actions" />}>
-                <MoreHorizontal className="size-4" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
-                {p.archivedAt ? (
-                  <DropdownMenuItem onClick={() => restore.mutate({ id: p.id })}>
-                    <ArchiveRestore className="size-3.5" /> Restore
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem onClick={() => archive.mutate({ id: p.id })}>
-                    <Archive className="size-3.5" /> Archive
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
-                  variant="destructive"
-                  onClick={() => {
-                    if (confirm(`Permanently delete "${p.name}"?`)) hardDelete.mutate({ id: p.id });
-                  }}
-                >
-                  <Trash2 className="size-3.5" /> Delete forever
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            {can("person.update") ? (
+              <Button size="sm" onClick={() => setEditOpen(true)}>
+                <Pencil className="size-3.5" /> Edit
+              </Button>
+            ) : null}
+            {can(p.archivedAt ? "person.restore" : "person.archive") || can("person.delete") ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label="More actions" />}>
+                  <MoreHorizontal className="size-4" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  {p.archivedAt ? (
+                    can("person.restore") ? (
+                      <DropdownMenuItem onClick={() => restore.mutate({ id: p.id })}>
+                        <ArchiveRestore className="size-3.5" /> Restore
+                      </DropdownMenuItem>
+                    ) : null
+                  ) : can("person.archive") ? (
+                    <DropdownMenuItem onClick={() => archive.mutate({ id: p.id })}>
+                      <Archive className="size-3.5" /> Archive
+                    </DropdownMenuItem>
+                  ) : null}
+                  {can("person.delete") ? (
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onClick={() => {
+                        if (confirm(`Permanently delete "${p.name}"?`)) hardDelete.mutate({ id: p.id });
+                      }}
+                    >
+                      <Trash2 className="size-3.5" /> Delete forever
+                    </DropdownMenuItem>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
           </div>
         </div>
       </div>
@@ -124,7 +134,7 @@ function PersonDetailPage() {
             <Field label="Country">{p.country ?? "—"}</Field>
             <Field label="Owner">{owner?.name ?? "—"}</Field>
             <Field label="Created">{formatDate(p.createdAt)}</Field>
-            <div className="mt-2 space-y-2 border-t border-border/60 pt-2.5">
+            <div className="mt-2 space-y-2 border-t border-border/60 pt-2.5 empty:hidden">
               <TagChips entityType="person" entityId={p.id} tags={data.tags} />
               <ListChips entityType="person" entityId={p.id} lists={data.lists} />
             </div>

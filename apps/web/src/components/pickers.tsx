@@ -26,6 +26,7 @@ import type {
 import { listAccepts } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
 import { chipClass, dotClass } from "~/lib/colors.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
 import type { Page } from "@mcpsuite/core/domain";
 import { Button } from "~/components/ui/button";
@@ -272,11 +273,13 @@ export function OwnerSelect(props: {
   value: string | null;
   onChange(v: string | null): void;
   allowNone?: boolean;
+  disabled?: boolean;
 }) {
   const users = useQuery(opQuery<User[]>("user.list"));
   return (
     <Select
       value={props.value ?? ""}
+      disabled={props.disabled}
       onChange={(e) => props.onChange(e.target.value || null)}
     >
       <option value="">
@@ -301,6 +304,8 @@ export function TagChips(props: {
 }) {
   const [adding, setAdding] = useState(false);
   const isAdmin = useIsAdmin();
+  const can = useCanRun();
+  const canCreate = can("tag.create");
   const allTags = useQuery({
     ...opQuery<Array<Tag & { usage: number }>>("tag.list"),
     enabled: adding,
@@ -338,123 +343,130 @@ export function TagChips(props: {
     [allTags.data, search, props.tags],
   );
 
+  if (props.tags.length === 0 && !can("tag.apply")) return null;
+
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {props.tags.map((tag) => (
         <span key={tag.id} className={chipClass(tag.color)}>
           {tag.name}
+          {can("tag.remove") ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className="size-4 rounded-full opacity-60 hover:bg-transparent hover:opacity-100"
+              aria-label={`Remove ${tag.name}`}
+              onClick={() =>
+                removeTag.mutate({
+                  tagId: tag.id,
+                  entityType: props.entityType,
+                  entityId: props.entityId,
+                })
+              }
+            >
+              <X className="size-2.5" />
+            </Button>
+          ) : null}
+        </span>
+      ))}
+      {can("tag.apply") ? (
+        <div className="relative" ref={rootRef}>
           <Button
             type="button"
             variant="ghost"
-            size="icon-xs"
-            className="size-4 rounded-full opacity-60 hover:bg-transparent hover:opacity-100"
-            aria-label={`Remove ${tag.name}`}
-            onClick={() =>
-              removeTag.mutate({
-                tagId: tag.id,
-                entityType: props.entityType,
-                entityId: props.entityId,
-              })
-            }
+            size="xs"
+            className="h-5 rounded-full px-1.5"
+            onClick={() => setAdding((a) => !a)}
           >
-            <X className="size-2.5" />
+            <Plus className="size-3" /> tag
           </Button>
-        </span>
-      ))}
-      <div className="relative" ref={rootRef}>
-        <Button
-          type="button"
-          variant="ghost"
-          size="xs"
-          className="h-5 rounded-full px-1.5"
-          onClick={() => setAdding((a) => !a)}
-        >
-          <Plus className="size-3" /> tag
-        </Button>
-        {adding ? (
-          <div className="animate-pop absolute left-0 z-30 mt-1 w-52 rounded-xl border border-border bg-popover shadow-xl">
-            <Input
-              autoFocus
-              className="h-auto rounded-none border-x-0 border-t-0 bg-transparent px-3 py-2 shadow-none focus-visible:ring-0 dark:bg-transparent"
-              placeholder="Add tag…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setAdding(false);
-                if (e.key === "Enter" && search.trim()) {
-                  e.preventDefault();
-                  const exact = candidates.find(
-                    (t) => t.name.toLowerCase() === search.trim().toLowerCase(),
-                  );
-                  if (exact)
-                    apply.mutate({
-                      tagId: exact.id,
-                      entityType: props.entityType,
-                      entityId: props.entityId,
-                    });
-                  else createTag.mutate({ name: search.trim() });
-                  setSearch("");
-                  setAdding(false);
-                }
-              }}
-            />
-            <ul className="max-h-48 overflow-y-auto p-1">
-              {candidates.map((t) => (
-                <li key={t.id}>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-auto w-full justify-start gap-2 px-2.5 py-1.5 text-left"
-                    onClick={() => {
+          {adding ? (
+            <div className="animate-pop absolute left-0 z-30 mt-1 w-52 rounded-xl border border-border bg-popover shadow-xl">
+              <Input
+                autoFocus
+                className="h-auto rounded-none border-x-0 border-t-0 bg-transparent px-3 py-2 shadow-none focus-visible:ring-0 dark:bg-transparent"
+                placeholder="Add tag…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setAdding(false);
+                  if (e.key === "Enter" && search.trim()) {
+                    e.preventDefault();
+                    const exact = candidates.find(
+                      (t) => t.name.toLowerCase() === search.trim().toLowerCase(),
+                    );
+                    if (exact)
                       apply.mutate({
-                        tagId: t.id,
+                        tagId: exact.id,
                         entityType: props.entityType,
                         entityId: props.entityId,
                       });
-                      setAdding(false);
-                      setSearch("");
-                    }}
-                  >
-                    <span
-                      className={`size-2 rounded-full ${dotClass(t.color)}`}
-                    />
-                    {t.name}
-                  </Button>
-                </li>
-              ))}
-              {search.trim() &&
-              !candidates.some(
-                (t) => t.name.toLowerCase() === search.trim().toLowerCase(),
-              ) ? (
-                <li>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    className="h-auto w-full justify-start gap-1.5 px-2.5 py-1.5 text-left text-primary"
-                    onClick={() => {
-                      createTag.mutate({ name: search.trim() });
-                      setAdding(false);
-                      setSearch("");
-                    }}
-                  >
-                    <Plus className="size-3" /> Create “{search.trim()}”
-                  </Button>
-                </li>
-              ) : null}
-              {isAdmin ? (
-                <li className="border-t border-border/60 pt-1">
-                  <Link
-                    to="/app/admin/tags"
-                    className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
-                  >
-                    <Settings2 className="size-3" /> Manage tags
-                  </Link>
-                </li>
-              ) : null}
-            </ul>
-          </div>
-        ) : null}
-      </div>
+                    else if (canCreate) createTag.mutate({ name: search.trim() });
+                    setSearch("");
+                    setAdding(false);
+                  }
+                }}
+              />
+              <ul className="max-h-48 overflow-y-auto p-1">
+                {candidates.map((t) => (
+                  <li key={t.id}>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-auto w-full justify-start gap-2 px-2.5 py-1.5 text-left"
+                      onClick={() => {
+                        apply.mutate({
+                          tagId: t.id,
+                          entityType: props.entityType,
+                          entityId: props.entityId,
+                        });
+                        setAdding(false);
+                        setSearch("");
+                      }}
+                    >
+                      <span
+                        className={`size-2 rounded-full ${dotClass(t.color)}`}
+                      />
+                      {t.name}
+                    </Button>
+                  </li>
+                ))}
+                {canCreate &&
+                search.trim() &&
+                !candidates.some(
+                  (t) => t.name.toLowerCase() === search.trim().toLowerCase(),
+                ) ? (
+                  <li>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-auto w-full justify-start gap-1.5 px-2.5 py-1.5 text-left text-primary"
+                      onClick={() => {
+                        createTag.mutate({ name: search.trim() });
+                        setAdding(false);
+                        setSearch("");
+                      }}
+                    >
+                      <Plus className="size-3" /> Create “{search.trim()}”
+                    </Button>
+                  </li>
+                ) : null}
+                {isAdmin ? (
+                  <li className="border-t border-border/60 pt-1">
+                    <Link
+                      to="/app/admin/tags"
+                      className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+                    >
+                      <Settings2 className="size-3" /> Manage tags
+                    </Link>
+                  </li>
+                ) : null}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -467,6 +479,7 @@ export function TagChips(props: {
  * Escape/outside closes.
  */
 function useListMembership(entityType: ListableType, entityId: string) {
+  const can = useCanRun();
   const add = useOp("list.addMembers");
   const remove = useOp("list.removeMembers");
   const createList = useOp<
@@ -477,6 +490,8 @@ function useListMembership(entityType: ListableType, entityId: string) {
       add.mutate({ listId: list.id, entityType, entityIds: [entityId] }),
   });
   return {
+    canEdit: can("list.addMembers") && can("list.removeMembers"),
+    canCreate: can("list.create"),
     toggle: (list: ContactList, isAttached: boolean) => {
       const input = { listId: list.id, entityType, entityIds: [entityId] };
       if (isAttached) remove.mutate(input);
@@ -503,7 +518,8 @@ export function ListPanel(props: {
   surfaceType: ListableType;
   attachedIds: ReadonlySet<string>;
   onToggle(list: ContactList, isAttached: boolean): void;
-  onCreate(name: string): void;
+  /** Omitted when the viewer cannot create lists. */
+  onCreate?(name: string): void;
 }) {
   const all = useQuery(opQuery<ContactListWithCounts[]>("list.list"));
   const [search, setSearch] = useState("");
@@ -539,7 +555,7 @@ export function ListPanel(props: {
             const first = rows[0];
             if (first && exactMatch)
               props.onToggle(first, props.attachedIds.has(first.id));
-            else props.onCreate(search.trim());
+            else props.onCreate?.(search.trim());
             setSearch("");
           }
         }}
@@ -551,7 +567,8 @@ export function ListPanel(props: {
           </li>
         ) : rows.length === 0 && !search.trim() ? (
           <li className="px-2.5 py-2 text-xs text-muted-foreground">
-            No {LIST_KIND_NOUN[props.surfaceType]} lists yet — type a name to create one.
+            No {LIST_KIND_NOUN[props.surfaceType]} lists yet
+            {props.onCreate ? " — type a name to create one." : "."}
           </li>
         ) : (
           rows.map((l) => {
@@ -581,14 +598,14 @@ export function ListPanel(props: {
             );
           })
         )}
-        {search.trim() && !exactMatch ? (
+        {props.onCreate && search.trim() && !exactMatch ? (
           <li>
             <Button
               type="button"
               variant="ghost"
               className="h-auto w-full justify-start gap-1.5 px-2.5 py-1.5 text-left text-primary"
               onClick={() => {
-                props.onCreate(search.trim());
+                props.onCreate?.(search.trim());
                 setSearch("");
               }}
             >
@@ -613,37 +630,43 @@ export function ListChips(props: {
   const membership = useListMembership(props.entityType, props.entityId);
   const attachedIds = new Set(props.lists.map((l) => l.id));
 
+  if (props.lists.length === 0 && !membership.canEdit) return null;
+
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {props.lists.map((list) => (
         <span key={list.id} className={chipClass(list.color)}>
           <Layers className="size-2.5 opacity-70" />
           {list.name}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className="size-4 rounded-full opacity-60 hover:bg-transparent hover:opacity-100"
-            aria-label={`Remove from ${list.name}`}
-            onClick={() => membership.detach(list)}
-          >
-            <X className="size-2.5" />
-          </Button>
+          {membership.canEdit ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              className="size-4 rounded-full opacity-60 hover:bg-transparent hover:opacity-100"
+              aria-label={`Remove from ${list.name}`}
+              onClick={() => membership.detach(list)}
+            >
+              <X className="size-2.5" />
+            </Button>
+          ) : null}
         </span>
       ))}
-      <Popover>
-        <PopoverTrigger className="inline-flex h-5 cursor-pointer items-center gap-1 rounded-full px-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
-          <Plus className="size-3" /> list
-        </PopoverTrigger>
-        <PopoverContent>
-          <ListPanel
-            surfaceType={props.entityType}
-            attachedIds={attachedIds}
-            onToggle={membership.toggle}
-            onCreate={membership.create}
-          />
-        </PopoverContent>
-      </Popover>
+      {membership.canEdit ? (
+        <Popover>
+          <PopoverTrigger className="inline-flex h-5 cursor-pointer items-center gap-1 rounded-full px-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+            <Plus className="size-3" /> list
+          </PopoverTrigger>
+          <PopoverContent>
+            <ListPanel
+              surfaceType={props.entityType}
+              attachedIds={attachedIds}
+              onToggle={membership.toggle}
+              onCreate={membership.canCreate ? membership.create : undefined}
+            />
+          </PopoverContent>
+        </Popover>
+      ) : null}
     </div>
   );
 }
@@ -658,6 +681,7 @@ export function OfferingLinks(props: {
   entityId: string;
   links: Array<OfferingLink & { offering: Offering }>;
 }) {
+  const can = useCanRun();
   const all = useQuery(opQuery<Offering[]>("offering.list"));
   const link = useOp("offering.link");
   const unlink = useOp("offering.unlink");
@@ -673,7 +697,7 @@ export function OfferingLinks(props: {
     <div className="space-y-2">
       {props.links.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          Nothing linked — what are you selling here?
+          {can("offering.link") ? "Nothing linked — what are you selling here?" : "Nothing linked."}
         </p>
       ) : (
         <ul className="space-y-1.5">
@@ -691,78 +715,82 @@ export function OfferingLinks(props: {
                   {l.note}
                 </span>
               ) : null}
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                className="size-5 self-center rounded-full text-muted-foreground/60 opacity-0 group-hover:opacity-100 hover:bg-transparent"
-                aria-label={`Unlink ${l.offering.name}`}
-                onClick={() =>
-                  unlink.mutate({
-                    offeringId: l.offeringId,
-                    entityType: props.entityType,
-                    entityId: props.entityId,
-                  })
-                }
-              >
-                <X className="size-3" />
-              </Button>
+              {can("offering.unlink") ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="size-5 self-center rounded-full text-muted-foreground/60 opacity-0 group-hover:opacity-100 hover:bg-transparent"
+                  aria-label={`Unlink ${l.offering.name}`}
+                  onClick={() =>
+                    unlink.mutate({
+                      offeringId: l.offeringId,
+                      entityType: props.entityType,
+                      entityId: props.entityId,
+                    })
+                  }
+                >
+                  <X className="size-3" />
+                </Button>
+              ) : null}
             </li>
           ))}
         </ul>
       )}
-      <Popover>
-        <PopoverTrigger className="inline-flex h-5 cursor-pointer items-center gap-1 rounded-full px-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
-          <Plus className="size-3" /> offering
-        </PopoverTrigger>
-        <PopoverContent>
-          <div className="w-60">
-            <Input
-              autoFocus
-              className="h-auto rounded-none border-x-0 border-t-0 bg-transparent px-3 py-2 shadow-none focus-visible:ring-0 dark:bg-transparent"
-              placeholder="Link offering…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-            <ul className="max-h-56 overflow-y-auto p-1">
-              {all.isLoading ? (
-                <li className="px-2.5 py-2 text-xs text-muted-foreground">
-                  Loading…
-                </li>
-              ) : candidates.length === 0 ? (
-                <li className="px-2.5 py-2 text-xs text-muted-foreground">
-                  {search.trim()
-                    ? "No matches"
-                    : "No offerings to link — create one under Offerings."}
-                </li>
-              ) : (
-                candidates.map((o) => (
-                  <li key={o.id}>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className="h-auto w-full justify-between gap-2 px-2.5 py-1.5 text-left"
-                      onClick={() => {
-                        link.mutate({
-                          offeringId: o.id,
-                          entityType: props.entityType,
-                          entityId: props.entityId,
-                        });
-                        setSearch("");
-                      }}
-                    >
-                      <span className="min-w-0 truncate">{o.name}</span>
-                      <span className="shrink-0 text-[10px] text-muted-foreground">
-                        {o.type}
-                      </span>
-                    </Button>
+      {can("offering.link") ? (
+        <Popover>
+          <PopoverTrigger className="inline-flex h-5 cursor-pointer items-center gap-1 rounded-full px-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+            <Plus className="size-3" /> offering
+          </PopoverTrigger>
+          <PopoverContent>
+            <div className="w-60">
+              <Input
+                autoFocus
+                className="h-auto rounded-none border-x-0 border-t-0 bg-transparent px-3 py-2 shadow-none focus-visible:ring-0 dark:bg-transparent"
+                placeholder="Link offering…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <ul className="max-h-56 overflow-y-auto p-1">
+                {all.isLoading ? (
+                  <li className="px-2.5 py-2 text-xs text-muted-foreground">
+                    Loading…
                   </li>
-                ))
-              )}
-            </ul>
-          </div>
-        </PopoverContent>
-      </Popover>
+                ) : candidates.length === 0 ? (
+                  <li className="px-2.5 py-2 text-xs text-muted-foreground">
+                    {search.trim()
+                      ? "No matches"
+                      : "No offerings to link — create one under Offerings."}
+                  </li>
+                ) : (
+                  candidates.map((o) => (
+                    <li key={o.id}>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-auto w-full justify-between gap-2 px-2.5 py-1.5 text-left"
+                        onClick={() => {
+                          link.mutate({
+                            offeringId: o.id,
+                            entityType: props.entityType,
+                            entityId: props.entityId,
+                          });
+                          setSearch("");
+                        }}
+                      >
+                        <span className="min-w-0 truncate">{o.name}</span>
+                        <span className="shrink-0 text-[10px] text-muted-foreground">
+                          {o.type}
+                        </span>
+                      </Button>
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
+          </PopoverContent>
+        </Popover>
+      ) : null}
     </div>
   );
 }
@@ -809,23 +837,25 @@ export function ListCellChips(props: {
           +{overflow}
         </span>
       ) : null}
-      <Popover>
-        <PopoverTrigger
-          aria-label="Add to list"
-          title="Add to list"
-          className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
-        >
-          <Plus className="size-3" />
-        </PopoverTrigger>
-        <PopoverContent>
-          <ListPanel
-            surfaceType={props.entityType}
-            attachedIds={attachedIds}
-            onToggle={membership.toggle}
-            onCreate={membership.create}
-          />
-        </PopoverContent>
-      </Popover>
+      {membership.canEdit ? (
+        <Popover>
+          <PopoverTrigger
+            aria-label="Add to list"
+            title="Add to list"
+            className="inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <Plus className="size-3" />
+          </PopoverTrigger>
+          <PopoverContent>
+            <ListPanel
+              surfaceType={props.entityType}
+              attachedIds={attachedIds}
+              onToggle={membership.toggle}
+              onCreate={membership.canCreate ? membership.create : undefined}
+            />
+          </PopoverContent>
+        </Popover>
+      ) : null}
     </div>
   );
 }

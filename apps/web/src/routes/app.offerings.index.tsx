@@ -10,6 +10,7 @@ import { useState } from "react";
 import type { Offering, OfferingLink, OfferingType, User } from "@mcpsuite/core/domain";
 import { OFFERING_TYPES } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { chipClass, type Tone } from "~/lib/colors.ts";
 import { relativeTime } from "~/lib/format.ts";
 import { OwnerSelect } from "~/components/pickers.tsx";
@@ -36,6 +37,7 @@ function OfferingsPage() {
   const [showArchived, setShowArchived] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<Offering | null>(null);
+  const canCreate = useCanRun()("offering.create");
 
   const offerings = useQuery(opQuery<Offering[]>("offering.list", { includeArchived: showArchived }));
   const users = useQuery(opQuery<User[]>("user.list"));
@@ -49,9 +51,11 @@ function OfferingsPage() {
         title="Offerings"
         subtitle={offerings.data ? `${rows.length} offering${rows.length === 1 ? "" : "s"}` : "…"}
         actions={
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
-            <Plus className="size-4" /> New offering
-          </Button>
+          canCreate ? (
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="size-4" /> New offering
+            </Button>
+          ) : null
         }
       />
 
@@ -70,9 +74,11 @@ function OfferingsPage() {
           hint="Offerings are what you sell — link them to leads and deals to track what you're pitching where."
           icon={<Package className="size-10 text-foreground/25" strokeWidth={1.25} />}
           action={
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="size-4" /> New offering
-            </Button>
+            canCreate ? (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="size-4" /> New offering
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -125,10 +131,14 @@ function OfferingsPage() {
   );
 }
 
-/** Create when `offering` is null, otherwise edit (with links + lifecycle actions). */
+/**
+ * Create when `offering` is null, otherwise edit (with links + lifecycle
+ * actions). A role that cannot update offerings sees the same form read-only.
+ */
 function OfferingModal({ open, offering, onClose }: { open: boolean; offering: Offering | null; onClose(): void }) {
+  const canUpdate = useCanRun()("offering.update");
   return (
-    <Modal open={open} onClose={onClose} title={offering ? `Edit ${offering.name}` : "New offering"}>
+    <Modal open={open} onClose={onClose} title={offering ? (canUpdate ? `Edit ${offering.name}` : offering.name) : "New offering"}>
       {open ? <OfferingForm offering={offering} onClose={onClose} /> : null}
     </Modal>
   );
@@ -141,6 +151,8 @@ function OfferingForm({ offering, onClose }: { offering: Offering | null; onClos
   const [active, setActive] = useState(offering?.active ?? true);
   const [owner, setOwner] = useState<string | null>(offering?.ownerUserId ?? null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const can = useCanRun();
+  const readOnly = offering !== null && !can("offering.update");
 
   const detail = useQuery({
     ...opQuery<Offering & { links: OfferingLink[] }>("offering.get", { id: offering?.id }),
@@ -173,11 +185,11 @@ function OfferingForm({ offering, onClose }: { offering: Offering | null; onClos
       <div className="grid grid-cols-[1fr_140px] gap-3">
         <label className="block">
           <span className="mb-1 block text-xs text-muted-foreground">Name *</span>
-          <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+          <Input autoFocus value={name} disabled={readOnly} onChange={(e) => setName(e.target.value)} />
         </label>
         <label className="block">
           <span className="mb-1 block text-xs text-muted-foreground">Type</span>
-          <Select value={type} onChange={(e) => setType(e.target.value as OfferingType)}>
+          <Select value={type} disabled={readOnly} onChange={(e) => setType(e.target.value as OfferingType)}>
             {OFFERING_TYPES.map((t) => (
               <option key={t} value={t}>
                 {t}
@@ -188,15 +200,15 @@ function OfferingForm({ offering, onClose }: { offering: Offering | null; onClos
       </div>
       <label className="block">
         <span className="mb-1 block text-xs text-muted-foreground">Description</span>
-        <Textarea className="min-h-20" value={description} onChange={(e) => setDescription(e.target.value)} />
+        <Textarea className="min-h-20" value={description} disabled={readOnly} onChange={(e) => setDescription(e.target.value)} />
       </label>
       <div className="grid grid-cols-2 items-end gap-3">
         <label className="block">
           <span className="mb-1 block text-xs text-muted-foreground">Owner</span>
-          <OwnerSelect value={owner} onChange={setOwner} />
+          <OwnerSelect value={owner} onChange={setOwner} disabled={readOnly} />
         </label>
         <label className="flex cursor-pointer items-center gap-2 pb-1.5 text-sm">
-          <Switch checked={active} onCheckedChange={setActive} />
+          <Switch checked={active} disabled={readOnly} onCheckedChange={setActive} />
           <span className="text-xs text-muted-foreground">Actively offered</span>
         </label>
       </div>
@@ -232,23 +244,25 @@ function OfferingForm({ offering, onClose }: { offering: Offering | null; onClos
 
       <div className="flex items-center justify-between gap-2 pt-2">
         <div className="flex items-center gap-1">
-          {offering && !offering.archivedAt ? (
+          {offering && !offering.archivedAt && can("offering.archive") ? (
             <Button variant="ghost" size="xs" className="gap-1 text-muted-foreground" disabled={busy} onClick={() => archive.mutate({ id: offering.id })}>
               <Archive className="size-3.5" /> Archive
             </Button>
           ) : null}
           {offering?.archivedAt ? (
             <>
-              <Button
-                variant="ghost"
-                size="xs"
-                className="gap-1 text-muted-foreground"
-                disabled={busy}
-                onClick={() => restore.mutate({ id: offering.id })}
-              >
-                <ArchiveRestore className="size-3.5" /> Restore
-              </Button>
-              {confirmDelete ? (
+              {can("offering.restore") ? (
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="gap-1 text-muted-foreground"
+                  disabled={busy}
+                  onClick={() => restore.mutate({ id: offering.id })}
+                >
+                  <ArchiveRestore className="size-3.5" /> Restore
+                </Button>
+              ) : null}
+              {!can("offering.delete") ? null : confirmDelete ? (
                 <Button variant="destructive" size="xs" className="gap-1" disabled={busy} onClick={() => del.mutate({ id: offering.id })}>
                   <Trash2 className="size-3.5" /> Really delete?
                 </Button>
@@ -262,12 +276,14 @@ function OfferingForm({ offering, onClose }: { offering: Offering | null; onClos
         </div>
         <div className="flex gap-2">
           <Button variant="ghost" size="sm" onClick={onClose}>
-            Cancel
+            {readOnly ? "Close" : "Cancel"}
           </Button>
-          <Button size="sm" disabled={busy || !name.trim()} onClick={submit}>
-            {busy ? <ButtonSpinner /> : null}
-            {offering ? "Save" : "Create"}
-          </Button>
+          {readOnly ? null : (
+            <Button size="sm" disabled={busy || !name.trim()} onClick={submit}>
+              {busy ? <ButtonSpinner /> : null}
+              {offering ? "Save" : "Create"}
+            </Button>
+          )}
         </div>
       </div>
     </div>

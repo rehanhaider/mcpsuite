@@ -5,6 +5,7 @@ import { Settings2 } from "lucide-react";
 import { useState } from "react";
 import type { CustomFieldDef, CustomFieldValue } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
 import { SectionCard } from "./ui.tsx";
 import { Button } from "~/components/ui/button";
@@ -19,6 +20,7 @@ export function CustomFieldsCard(props: {
   values: Record<string, CustomFieldValue>;
 }) {
   const isAdmin = useIsAdmin();
+  const readOnly = !useCanRun()("customField.setValues");
   const defs = useQuery(
     opQuery<CustomFieldDef[]>("customField.list", {
       entityType: props.entityType,
@@ -47,6 +49,7 @@ export function CustomFieldsCard(props: {
             key={def.id}
             def={def}
             value={props.values[def.key] ?? null}
+            readOnly={readOnly}
             onSave={(value) =>
               setValues.mutate({
                 entityType: props.entityType,
@@ -64,10 +67,13 @@ export function CustomFieldsCard(props: {
 function FieldEditor({
   def,
   value,
+  readOnly,
   onSave,
 }: {
   def: CustomFieldDef;
   value: CustomFieldValue;
+  /** Shows the value with every control disabled. */
+  readOnly: boolean;
   onSave(value: CustomFieldValue): void;
 }) {
   const [draft, setDraft] = useState<string>(
@@ -88,6 +94,7 @@ function FieldEditor({
           <Switch
             className="mt-1.5"
             checked={value === true}
+            disabled={readOnly}
             onCheckedChange={(checked) => onSave(checked)}
           />
         </div>
@@ -98,6 +105,7 @@ function FieldEditor({
           {label}
           <Select
             value={typeof value === "string" ? value : ""}
+            disabled={readOnly}
             onChange={(e) => onSave(e.target.value || null)}
           >
             <option value="">—</option>
@@ -122,6 +130,7 @@ function FieldEditor({
                   variant="ghost"
                   size="xs"
                   className={`cursor-pointer ${chipClass(on ? "primary" : "ghost")}`}
+                  disabled={readOnly}
                   onClick={() =>
                     onSave(
                       on ? current.filter((x) => x !== o) : [...current, o],
@@ -143,6 +152,7 @@ function FieldEditor({
           <Input
             type="date"
             value={typeof value === "string" ? value : ""}
+            disabled={readOnly}
             onChange={(e) => onSave(e.target.value || null)}
           />
         </div>
@@ -154,6 +164,7 @@ function FieldEditor({
           <Input
             type="number"
             value={draft}
+            disabled={readOnly}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => {
               if (draft === "") return onSave(null);
@@ -172,6 +183,7 @@ function FieldEditor({
             type={def.type === "email" ? "email" : "text"}
             value={draft}
             placeholder="—"
+            disabled={readOnly}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => {
               const v = draft.trim();

@@ -28,6 +28,7 @@ import type {
   PersonListItem,
 } from "@mcpsuite/core/domain";
 import { opQuery, useOp } from "~/lib/api.ts";
+import { useCanRun } from "~/lib/use-can-run.ts";
 import { dotClass } from "~/lib/colors.ts";
 import { EntityPicker, useCompanyOptions, useDealOptions, useEngagementOptions, usePersonOptions } from "~/components/pickers.tsx";
 import { Avatar, EmptyState, PageHeader, SectionCard, Spinner } from "~/components/ui.tsx";
@@ -92,6 +93,7 @@ function ListDetailPage() {
   const { id } = Route.useParams();
   const navigate = useNavigate();
   const [editOpen, setEditOpen] = useState(false);
+  const can = useCanRun();
 
   const list = useQuery(opQuery<ContactListWithCounts>("list.get", { id }));
   const del = useOp("list.delete", {
@@ -123,20 +125,24 @@ function ListDetailPage() {
         subtitle={l.description ?? "No description — add one so agents and teammates know what belongs here."}
         actions={
           <div className="flex gap-1.5">
-            <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
-              <Pencil className="size-3.5" /> Edit
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-destructive"
-              onClick={() => {
-                if (confirm(`Delete list "${l.name}"? ${memberTotal(l)} members will be detached (records are kept).`))
-                  del.mutate({ id: l.id });
-              }}
-            >
-              <Trash2 className="size-3.5" /> Delete
-            </Button>
+            {can("list.update") ? (
+              <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
+                <Pencil className="size-3.5" /> Edit
+              </Button>
+            ) : null}
+            {can("list.delete") ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-destructive"
+                onClick={() => {
+                  if (confirm(`Delete list "${l.name}"? ${memberTotal(l)} members will be detached (records are kept).`))
+                    del.mutate({ id: l.id });
+                }}
+              >
+                <Trash2 className="size-3.5" /> Delete
+              </Button>
+            ) : null}
           </div>
         }
       />
@@ -165,6 +171,7 @@ function MembersPanel({
 }) {
   const meta = PANEL_META[entityType];
   const [page, setPage] = useState(0);
+  const can = useCanRun();
 
   const members = useQuery(
     opQuery<MembersResult>("list.members", { id: listId, entityType, limit: MEMBER_PAGE, offset: page * MEMBER_PAGE }),
@@ -208,13 +215,15 @@ function MembersPanel({
         </span>
       }
     >
-      <div className="mb-2">
-        <AddMemberPicker
-          entityType={entityType}
-          placeholder={meta.placeholder}
-          onPick={(entityId) => add.mutate({ listId, entityType, entityIds: [entityId] })}
-        />
-      </div>
+      {can("list.addMembers") ? (
+        <div className="mb-2">
+          <AddMemberPicker
+            entityType={entityType}
+            placeholder={meta.placeholder}
+            onPick={(entityId) => add.mutate({ listId, entityType, entityIds: [entityId] })}
+          />
+        </div>
+      ) : null}
 
       {members.isLoading ? (
         <Spinner />
@@ -245,15 +254,17 @@ function MembersPanel({
                 </Link>
                 {m.sub ? <p className="truncate text-xs text-muted-foreground">{m.sub}</p> : null}
               </div>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Remove ${m.name} from list`}
-                className="text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive focus-visible:opacity-100"
-                onClick={() => remove.mutate({ listId, entityType, entityIds: [m.id] })}
-              >
-                <X className="size-3.5" />
-              </Button>
+              {can("list.removeMembers") ? (
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`Remove ${m.name} from list`}
+                  className="text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive focus-visible:opacity-100"
+                  onClick={() => remove.mutate({ listId, entityType, entityIds: [m.id] })}
+                >
+                  <X className="size-3.5" />
+                </Button>
+              ) : null}
             </li>
           ))}
         </ul>
