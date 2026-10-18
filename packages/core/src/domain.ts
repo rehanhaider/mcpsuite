@@ -868,6 +868,23 @@ export interface AuditEvent {
   createdAt: string;
 }
 
+/** One field an update changed, as stored before and after it (issue #44). */
+export interface AuditFieldChange {
+  before: unknown;
+  after: unknown;
+}
+
+/** `meta.changes` on an update's audit event: changed field name → old and new value. */
+export type AuditChanges = Record<string, AuditFieldChange>;
+
+const zAuditChanges = z.record(z.object({ before: z.unknown(), after: z.unknown() }).strict());
+
+/** The changed fields an audit event recorded, or null when it recorded none. */
+export function auditChanges(event: Pick<AuditEvent, "meta">): AuditChanges | null {
+  const parsed = zAuditChanges.safeParse(event.meta?.changes);
+  return parsed.success ? (parsed.data as AuditChanges) : null;
+}
+
 export type Surface = "web" | "mcp_http" | "mcp_stdio" | "api" | "system";
 
 export const zAuditFilter = z.object({

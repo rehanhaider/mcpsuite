@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { zId, zOfferingCreate, zOfferingLinkInput, zOfferingUpdate, type Offering } from "../domain.ts";
 import { defineOperation } from "./define.ts";
-import { audit, checkVersion, definedOnly, found } from "./helpers.ts";
+import { audit, checkVersion, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 const zGet = z.object({ id: zId });
 
@@ -71,6 +71,7 @@ export const offeringOps = [
         entityType: "offering",
         entityId: id,
         summary: `Updated offering "${updated.name}"`,
+        meta: { changes: fieldChanges(existing, updated, Object.keys(definedOnly(patch))) },
       });
       return updated;
     },

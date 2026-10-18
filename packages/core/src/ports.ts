@@ -305,7 +305,8 @@ export interface CustomFieldPort {
   updateDef(id: string, patch: { label?: string; options?: string[] | null; required?: boolean }): Promise<CustomFieldDef>;
   setDefArchived(id: string, archived: boolean): Promise<CustomFieldDef>;
   setValue(fieldId: string, entityType: CustomFieldEntity, entityId: string, value: CustomFieldValue): Promise<void>;
-  values(entityType: CustomFieldEntity, entityId: string): Promise<Record<string, CustomFieldValue>>;
+  /** Values keyed by field key; archived fields are left out unless includeArchived. */
+  values(entityType: CustomFieldEntity, entityId: string, includeArchived?: boolean): Promise<Record<string, CustomFieldValue>>;
 }
 
 export interface SavedViewPort {
