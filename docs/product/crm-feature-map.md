@@ -129,7 +129,7 @@ touch into the CRM through MCP**. Still, parity gaps worth naming:
 | Feature                                            | mcpsuite                                       | Typical CRM       | Plan                           |
 | -------------------------------------------------- | ------------------------------------------ | ----------------- | ------------------------------ |
 | List views with server-side filter/sort/pagination | Yes                                        | Yes               | —                              |
-| Saved views                                        | Yes (shared, per entity)                   | Yes               | —                              |
+| Saved views                                        | Yes (save, share, rerun, delete on the company, people, lead, and deal lists; MCP/API also covers activities) | Yes               | —                              |
 | Global search                                      | Yes (cross-entity)                         | Yes               | —                              |
 | Command palette                                    | Yes (⌘K)                                   | Attio/Twenty: yes | —                              |
 | Bulk actions (tag, stage, owner, archive)          | Yes                                        | Yes               | —                              |

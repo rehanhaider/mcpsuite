@@ -6,7 +6,7 @@ import { defineOperation } from "../src/operations/define.ts";
 import type { Ports } from "../src/ports.ts";
 import { auditChanges, displayRef, listAccepts, LISTABLE_TYPES, validateCustomFieldValue, type CustomFieldDef } from "../src/domain.ts";
 import { fieldChanges } from "../src/operations/helpers.ts";
-import { canCancelPendingAction, roleAtLeast, trustAllows } from "../src/policy.ts";
+import { canCancelPendingAction, canManageSavedView, roleAtLeast, trustAllows } from "../src/policy.ts";
 import { OpError, toErrorPayload } from "../src/errors.ts";
 import { newId, slugify } from "../src/ids.ts";
 
@@ -86,6 +86,20 @@ describe("policy", () => {
       { role: "member", userId: null, clientId: null },
       { requestedByUserId: null, requestedByClientId: null },
     )).toBe(false);
+  });
+
+  it("saved view manage rule", () => {
+    const mine = { visibility: "private" as const, ownerUserId: "user-1" };
+    const shared = { visibility: "shared" as const, ownerUserId: "user-2" };
+    const system = { visibility: "system" as const, ownerUserId: null };
+    expect(canManageSavedView({ role: "member", userId: "user-1" }, mine)).toBe(true);
+    expect(canManageSavedView({ role: "member", userId: "user-2" }, mine)).toBe(false);
+    expect(canManageSavedView({ role: "admin", userId: "user-2" }, mine)).toBe(true);
+    expect(canManageSavedView({ role: "member", userId: "user-1" }, shared)).toBe(true);
+    expect(canManageSavedView({ role: "viewer", userId: "user-2" }, shared)).toBe(false);
+    expect(canManageSavedView({ role: "viewer", userId: "user-1" }, mine)).toBe(false);
+    expect(canManageSavedView({ role: "owner", userId: "user-1" }, system)).toBe(false);
+    expect(canManageSavedView({ role: "member", userId: null }, { visibility: "private", ownerUserId: null })).toBe(false);
   });
 
   it("trust matrix", () => {

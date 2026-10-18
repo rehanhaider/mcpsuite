@@ -25,6 +25,7 @@ import { daysUntil, relativeTime } from "~/lib/format.ts";
 import { useIsAdmin } from "~/lib/use-is-admin.ts";
 import { DataTable } from "~/components/DataTable.tsx";
 import { DebouncedInput } from "~/components/filters.tsx";
+import { SavedViewsMenu } from "~/components/SavedViews.tsx";
 import { Kanban } from "~/components/Kanban.tsx";
 import { BulkBar } from "~/components/BulkBar.tsx";
 import {
@@ -65,6 +66,9 @@ const searchSchema = z.object({
   dir: z.enum(["asc", "desc"]).catch("desc"),
   page: z.number().int().min(0).catch(0),
 });
+
+/** URL search keys a saved view captures. */
+const VIEW_KEYS = ["q", "pipelineId", "stageId", "ownerUserId", "listId", "offeringId", "stale", "archived", "sort", "dir"] as const;
 
 export const Route = createFileRoute("/app/leads/")({
   validateSearch: searchSchema,
@@ -406,6 +410,12 @@ function LeadsPage() {
           />
           archived
         </label>
+        <SavedViewsMenu
+          entityType="engagement"
+          search={search}
+          keys={VIEW_KEYS}
+          onApply={(next) => patch(next as Partial<z.infer<typeof searchSchema>>)}
+        />
       </div>
 
       {selectedIds.length > 0 ? (

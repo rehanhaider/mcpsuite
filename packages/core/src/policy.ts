@@ -21,6 +21,20 @@ export function canCancelPendingAction(
   return isRequester || roleAtLeast(actor.role, "admin");
 }
 
+/**
+ * Edit/delete rule shared by savedView.update, savedView.delete, and the list
+ * pages. System views are read-only; shared views are editable by any member;
+ * private views only by their owner or an admin.
+ */
+export function canManageSavedView(
+  actor: { role: Role; userId: string | null },
+  view: { visibility: "private" | "shared" | "system"; ownerUserId: string | null },
+): boolean {
+  if (view.visibility === "system" || !roleAtLeast(actor.role, "member")) return false;
+  if (view.visibility === "shared") return true;
+  return (!!actor.userId && view.ownerUserId === actor.userId) || roleAtLeast(actor.role, "admin");
+}
+
 export const MCP_SCOPES = ["read", "write", "admin", "approvals"] as const;
 export type McpScope = (typeof MCP_SCOPES)[number];
 

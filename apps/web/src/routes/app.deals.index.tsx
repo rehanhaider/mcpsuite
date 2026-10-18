@@ -25,6 +25,7 @@ import { useIsAdmin } from "~/lib/use-is-admin.ts";
 import { BulkBar } from "~/components/BulkBar.tsx";
 import { DataTable } from "~/components/DataTable.tsx";
 import { DebouncedInput } from "~/components/filters.tsx";
+import { SavedViewsMenu } from "~/components/SavedViews.tsx";
 import { Kanban } from "~/components/Kanban.tsx";
 import { ListCellChips, OwnerSelect } from "~/components/pickers.tsx";
 import { CompanyField, PersonField } from "~/routes/app.leads.index.tsx";
@@ -60,6 +61,9 @@ const searchSchema = z.object({
   dir: z.enum(["asc", "desc"]).catch("desc"),
   page: z.number().int().min(0).catch(0),
 });
+
+/** URL search keys a saved view captures. */
+const VIEW_KEYS = ["q", "pipelineId", "stageId", "status", "ownerUserId", "listId", "offeringId", "archived", "sort", "dir"] as const;
 
 export const Route = createFileRoute("/app/deals/")({
   validateSearch: searchSchema,
@@ -392,6 +396,12 @@ function DealsPage() {
           />
           archived
         </label>
+        <SavedViewsMenu
+          entityType="deal"
+          search={search}
+          keys={VIEW_KEYS}
+          onApply={(next) => patch(next as Partial<z.infer<typeof searchSchema>>)}
+        />
       </div>
 
       {selectedIds.length > 0 ? (

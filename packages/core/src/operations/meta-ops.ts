@@ -2,6 +2,7 @@
 import { z } from "zod";
 import { OpError } from "../errors.ts";
 import { slugify } from "../ids.ts";
+import { canManageSavedView } from "../policy.ts";
 import {
   CUSTOM_FIELD_TYPES_ENTITIES,
   validateCustomFieldValue,
@@ -311,9 +312,7 @@ export const savedViewOps = [
     handler: async (op, { id, ...patch }) => {
       const view = found(await op.ports.savedViews.get(id), "saved view", id);
       if (view.visibility === "system") throw OpError.validation("System views cannot be edited");
-      if (view.visibility === "private" && view.ownerUserId !== op.ctx.userId && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
-        throw OpError.forbidden("Not your view");
-      }
+      if (!canManageSavedView(op.ctx, view)) throw OpError.forbidden("Not your view");
       const updated = await op.ports.savedViews.update(id, definedOnly(patch));
       await audit(op, {
         operation: "savedView.update",
@@ -336,9 +335,7 @@ export const savedViewOps = [
     handler: async (op, { id }) => {
       const view = found(await op.ports.savedViews.get(id), "saved view", id);
       if (view.visibility === "system") throw OpError.validation("System views cannot be deleted");
-      if (view.visibility === "private" && view.ownerUserId !== op.ctx.userId && op.ctx.role !== "owner" && op.ctx.role !== "admin") {
-        throw OpError.forbidden("Not your view");
-      }
+      if (!canManageSavedView(op.ctx, view)) throw OpError.forbidden("Not your view");
       await op.ports.savedViews.delete(id);
       await audit(op, { operation: "savedView.delete", entityType: "saved_view", entityId: id, summary: `Deleted saved view "${view.name}"` });
       return { deleted: id };
