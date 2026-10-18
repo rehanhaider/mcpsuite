@@ -2124,7 +2124,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
         )
         .run(newId(), ws, fieldId, entityType, entityId, JSON.stringify(value), nowIso());
     },
-    async values(entityType, entityId) {
+    async values(entityType, entityId, includeArchived = false) {
       const rows = db
         .select({ value: t.customFieldValues.value, key: t.customFieldDefs.key })
         .from(t.customFieldValues)
@@ -2134,7 +2134,7 @@ export function createPorts(db: Db, workspaceId: string): Ports {
             eq(t.customFieldValues.workspaceId, ws),
             eq(t.customFieldValues.entityType, entityType),
             eq(t.customFieldValues.entityId, entityId),
-            isNull(t.customFieldDefs.archivedAt),
+            includeArchived ? undefined : isNull(t.customFieldDefs.archivedAt),
           ),
         )
         .all();

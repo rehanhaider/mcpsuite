@@ -4,7 +4,7 @@ import { nowIso } from "../ids.ts";
 import { zActivityFilter, zActivityLog, zActivityUpdate, zId, zTaskCreate } from "../domain.ts";
 import { actorStamp } from "../context.ts";
 import { defineOperation, type OpCtx } from "./define.ts";
-import { audit, definedOnly, found } from "./helpers.ts";
+import { audit, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 const zGet = z.object({ id: zId });
 
@@ -80,7 +80,13 @@ export const activityOps = [
         throw OpError.validation("System-emitted activities cannot be edited");
       }
       const updated = await op.ports.activities.update(id, definedOnly(patch));
-      await audit(op, { operation: "activity.update", entityType: "activity", entityId: id, summary: "Updated activity" });
+      await audit(op, {
+        operation: "activity.update",
+        entityType: "activity",
+        entityId: id,
+        summary: "Updated activity",
+        meta: { changes: fieldChanges(existing, updated, Object.keys(definedOnly(patch))) },
+      });
       return updated;
     },
   }),
@@ -145,7 +151,13 @@ export const activityOps = [
       const task = found(await op.ports.activities.get(id), "task", id);
       if (task.kind !== "task") throw OpError.validation("Activity is not a task");
       const updated = await op.ports.activities.update(id, { completedAt: nowIso() });
-      await audit(op, { operation: "task.complete", entityType: "activity", entityId: id, summary: `Completed task "${task.title ?? id}"` });
+      await audit(op, {
+        operation: "task.complete",
+        entityType: "activity",
+        entityId: id,
+        summary: `Completed task "${task.title ?? id}"`,
+        meta: { changes: fieldChanges(task, updated, ["completedAt"]) },
+      });
       return updated;
     },
   }),
@@ -161,7 +173,13 @@ export const activityOps = [
       const task = found(await op.ports.activities.get(id), "task", id);
       if (task.kind !== "task") throw OpError.validation("Activity is not a task");
       const updated = await op.ports.activities.update(id, { completedAt: null });
-      await audit(op, { operation: "task.reopen", entityType: "activity", entityId: id, summary: `Reopened task "${task.title ?? id}"` });
+      await audit(op, {
+        operation: "task.reopen",
+        entityType: "activity",
+        entityId: id,
+        summary: `Reopened task "${task.title ?? id}"`,
+        meta: { changes: fieldChanges(task, updated, ["completedAt"]) },
+      });
       return updated;
     },
   }),

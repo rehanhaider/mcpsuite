@@ -4,13 +4,68 @@ import { runOperation, type Catalog } from "../src/catalog.ts";
 import { systemContext } from "../src/context.ts";
 import { defineOperation } from "../src/operations/define.ts";
 import type { Ports } from "../src/ports.ts";
-import { displayRef, listAccepts, LISTABLE_TYPES, validateCustomFieldValue, type CustomFieldDef } from "../src/domain.ts";
+import { auditChanges, displayRef, listAccepts, LISTABLE_TYPES, validateCustomFieldValue, type CustomFieldDef } from "../src/domain.ts";
+import { fieldChanges } from "../src/operations/helpers.ts";
 import { canCancelPendingAction, roleAtLeast, trustAllows } from "../src/policy.ts";
 import { OpError, toErrorPayload } from "../src/errors.ts";
 import { newId, slugify } from "../src/ids.ts";
 
 // Core typechecks without DOM or Node globals; the tests spy on this one.
 declare const console: { error(message: string): void };
+
+describe("fieldChanges", () => {
+  it("omits an unchanged field", () => {
+    expect(fieldChanges({ name: "a" }, { name: "a" }, ["name"])).toEqual({});
+  });
+
+  it("records a changed string and excludes fields outside the patch", () => {
+    expect(fieldChanges({ name: "a", version: 1 }, { name: "b", version: 2 }, ["name"])).toEqual({
+      name: { before: "a", after: "b" },
+    });
+  });
+
+  it("compares arrays by content and preserves their order", () => {
+    expect(fieldChanges({ options: ["a", "b"] }, { options: ["a", "b"] }, ["options"])).toEqual({});
+    expect(fieldChanges({ options: ["a", "b"] }, { options: ["b", "a"] }, ["options"])).toEqual({
+      options: { before: ["a", "b"], after: ["b", "a"] },
+    });
+  });
+
+  it("ignores object key order recursively, including objects in arrays", () => {
+    const before = { filters: { name: "a", nested: [{ x: 1, y: { a: 2, b: 3 } }] } };
+    const after = { filters: { nested: [{ y: { b: 3, a: 2 }, x: 1 }], name: "a" } };
+    expect(fieldChanges(before, after, ["filters"])).toEqual({});
+    expect(fieldChanges(before, { filters: { name: "b" } }, ["filters"])).toEqual({
+      filters: { before: before.filters, after: { name: "b" } },
+    });
+  });
+
+  it("treats undefined and null as unchanged", () => {
+    expect(fieldChanges({ name: undefined }, { name: null }, ["name"])).toEqual({});
+    expect(fieldChanges({ name: null }, {}, ["name"])).toEqual({});
+  });
+
+  it("records a missing value as null", () => {
+    expect(fieldChanges({}, { name: "x" }, ["name"])).toEqual({
+      name: { before: null, after: "x" },
+    });
+  });
+});
+
+describe("auditChanges", () => {
+  it("returns the recorded changes", () => {
+    const changes = { name: { before: "a", after: "b" } };
+    expect(auditChanges({ meta: { changes } })).toEqual(changes);
+    expect(auditChanges({ meta: { changes: {} } })).toEqual({});
+  });
+
+  it("returns null for absent or malformed changes", () => {
+    expect(auditChanges({ meta: null })).toBeNull();
+    expect(auditChanges({ meta: { fields: ["name"] } })).toBeNull();
+    expect(auditChanges({ meta: { changes: { name: "b" } } })).toBeNull();
+    expect(auditChanges({ meta: { changes: { name: { before: "a", after: "b", extra: true } } } })).toBeNull();
+  });
+});
 
 describe("policy", () => {
   it("role ladder", () => {

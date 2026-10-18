@@ -86,6 +86,156 @@ beforeEach(() => {
   owner = { ...systemContext(workspaceId), actorType: "human", userId: ownerUserId, surface: "web" };
 });
 
+describe("audit before/after values (#44)", () => {
+  it("records only changed company fields when all current fields are resent", async () => {
+    const company = await ok(run(owner, "company.create", {
+      name: "Acme",
+      domain: "acme.example",
+      website: "https://acme.example",
+      linkedin: "https://linkedin.com/company/acme",
+      industry: "Software",
+      hq: "London",
+      country: "UK",
+      description: "Company description",
+    }));
+    await ok(run(owner, "company.update", {
+      id: company.id,
+      expectedVersion: company.version,
+      name: company.name,
+      domain: company.domain,
+      website: null,
+      linkedin: company.linkedin,
+      industry: "Consulting",
+      hq: company.hq,
+      country: company.country,
+      description: company.description,
+      ownerUserId: company.ownerUserId,
+    }));
+    const events = await ok(run(owner, "audit.list", { operation: "company.update", entityId: company.id }));
+    expect(events.items[0].meta.changes).toEqual({
+      industry: { before: company.industry, after: "Consulting" },
+      website: { before: company.website, after: null },
+    });
+    expect(events.items[0].meta.fields).toBeUndefined();
+  });
+
+  it("records an empty map when a company update changes nothing", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Acme" }));
+    await ok(run(owner, "company.update", { id: company.id, name: company.name }));
+    const events = await ok(run(owner, "audit.list", { operation: "company.update", entityId: company.id }));
+    expect(events.items[0].meta.changes).toEqual({});
+  });
+
+  it("records deal stage ids and keeps the stage names", async () => {
+    const deal = await ok(run(owner, "deal.create", { title: "Stage move" }));
+    const pipelines = await ok(run(owner, "pipeline.list", { type: "deal" }));
+    const pipeline = pipelines.find((p: any) => p.id === deal.pipelineId);
+    const from = pipeline.stages.find((s: any) => s.id === deal.stageId);
+    const to = pipeline.stages.find((s: any) => s.id !== deal.stageId);
+    await ok(run(owner, "deal.updateStage", { id: deal.id, stageId: to.id }));
+    const events = await ok(run(owner, "audit.list", { operation: "deal.updateStage", entityId: deal.id }));
+    expect(events.items[0].meta.changes.stageId).toEqual({ before: deal.stageId, after: to.id });
+    expect(events.items[0].meta.from).toBe(from.name);
+    expect(events.items[0].meta.to).toBe(to.name);
+  });
+
+  it("records a lost deal's status and reason", async () => {
+    const deal = await ok(run(owner, "deal.create", { title: "Lost deal" }));
+    await ok(run(owner, "deal.markLost", { id: deal.id, lostReason: "Budget unavailable" }));
+    const events = await ok(run(owner, "audit.list", { operation: "deal.markLost", entityId: deal.id }));
+    expect(events.items[0].meta.changes.status).toEqual({ before: "open", after: "lost" });
+    expect(events.items[0].meta.changes.lostReason).toEqual({ before: null, after: "Budget unavailable" });
+  });
+
+  it("records custom-field values before each write", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Acme" }));
+    const field = await ok(run(owner, "customField.create", { entityType: "company", label: "Account code", type: "text" }));
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "a" } }));
+    const first = await ok(run(owner, "audit.list", { operation: "customField.setValues", entityId: company.id }));
+    expect(first.items[0].meta.changes).toEqual({ [field.key]: { before: null, after: "a" } });
+
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "b" } }));
+    const second = await ok(run(owner, "audit.list", { operation: "customField.setValues", entityId: company.id }));
+    expect(second.items[0].meta.changes).toEqual({ [field.key]: { before: "a", after: "b" } });
+  });
+
+  it("records an archived custom field's stored value as before", async () => {
+    const company = await ok(run(owner, "company.create", { name: "Acme" }));
+    const field = await ok(run(owner, "customField.create", { entityType: "company", label: "Account code", type: "text" }));
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "a" } }));
+    await ok(run(owner, "customField.archive", { id: field.id }));
+
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "b" } }));
+    const changed = await ok(run(owner, "audit.list", { operation: "customField.setValues", entityId: company.id }));
+    expect(changed.items[0].meta.changes).toEqual({ [field.key]: { before: "a", after: "b" } });
+
+    await ok(run(owner, "customField.setValues", { entityType: "company", entityId: company.id, values: { [field.key]: "b" } }));
+    const unchanged = await ok(run(owner, "audit.list", { operation: "customField.setValues", entityId: company.id }));
+    expect(unchanged.items[0].meta.changes).toEqual({});
+  });
+
+  it("keeps audit meta out of the viewer home feed", async () => {
+    const company = await ok(run(agentCtx(), "company.create", { name: "Acme" }));
+    await ok(run(agentCtx(), "company.update", {
+      id: company.id,
+      expectedVersion: company.version,
+      name: "Acme updated",
+    }));
+
+    const viewer: RequestContext = { ...owner, role: "viewer" };
+    const home = await ok(run(viewer, "stats.home", {}));
+    expect(home.recentAgentEvents.length).toBeGreaterThan(0);
+    expect(home.recentAgentEvents.every((event: any) => event.meta === null)).toBe(true);
+
+    const events = await ok(run(owner, "audit.list", { operation: "company.update", entityId: company.id }));
+    expect(events.items[0].meta.changes.name).toEqual({ before: "Acme", after: "Acme updated" });
+  });
+
+  it("records disabling a user and keeps the revocation counts", async () => {
+    const created = await ok(run(owner, "user.create", { name: "Sam", email: "sam@example.com", role: "member" }));
+    setUserStatus(created.user.id, "active");
+    const member: RequestContext = { ...owner, userId: created.user.id, role: "member" };
+    createSession(db, created.user.id);
+    await ok(run(member, "mcpClient.create", { name: "Sam bot", scopes: ["read", "write"] }));
+    const updated = await ok(run(owner, "user.update", { id: created.user.id, disabled: true }));
+    const events = await ok(run(owner, "audit.list", { operation: "user.update", entityId: created.user.id }));
+    expect(events.items[0].meta.changes.disabledAt).toEqual({ before: null, after: updated.disabledAt });
+    expect(events.items[0].meta.changes.disabledAt.after).toEqual(expect.any(String));
+    expect(events.items[0].meta.endedSessions).toBe(1);
+    expect(events.items[0].meta.revokedMcpClients).toBe(1);
+  });
+
+  it("records workspace settings as individual fields", async () => {
+    const workspace = await ok(run(owner, "workspace.get"));
+    const staleDealDays = workspace.settings.staleDealDays + 1;
+    await ok(run(owner, "workspace.update", { staleDealDays }));
+    const events = await ok(run(owner, "audit.list", { operation: "workspace.update", entityId: workspace.id }));
+    expect(events.items[0].meta.changes).toEqual({
+      "settings.staleDealDays": { before: workspace.settings.staleDealDays, after: staleDealDays },
+    });
+  });
+
+  it("records stakeholder changes against the deal", async () => {
+    const deal = await ok(run(owner, "deal.create", { title: "Stakeholder deal" }));
+    const person = await ok(run(owner, "person.create", { name: "Buyer Bob" }));
+    const stakeholder = await ok(run(owner, "deal.addStakeholder", { dealId: deal.id, personId: person.id, role: "champion" }));
+    const updated = await ok(run(owner, "deal.updateStakeholder", { id: stakeholder.id, role: "decision maker" }));
+    expect(updated.role).toBe("decision maker");
+    const events = await ok(run(owner, "audit.list", { operation: "deal.updateStakeholder", entityId: deal.id }));
+    expect(events.items[0]).toMatchObject({
+      operation: "deal.updateStakeholder",
+      entityType: "deal",
+      entityId: deal.id,
+      summary: "Updated stakeholder",
+      meta: {
+        stakeholderId: stakeholder.id,
+        personId: person.id,
+        changes: { role: { before: "champion", after: "decision maker" } },
+      },
+    });
+  });
+});
+
 describe("bootstrap", () => {
   it("seeds workspace, pending owner and default pipelines", async () => {
     const ws = await ok(run(owner, "workspace.get"));

@@ -13,8 +13,17 @@ import {
   type TrustProfile,
 } from "../policy.ts";
 import { defineOperation, type OpCtx } from "./define.ts";
-import { audit, definedOnly, found } from "./helpers.ts";
-import type { McpClient } from "../domain.ts";
+import { audit, definedOnly, fieldChanges, found } from "./helpers.ts";
+import type { McpClient, Workspace } from "../domain.ts";
+
+const auditView = (w: Workspace) => ({
+  name: w.name,
+  defaultCurrency: w.defaultCurrency,
+  timezone: w.timezone,
+  "settings.staleEngagementDays": w.settings.staleEngagementDays,
+  "settings.staleDealDays": w.settings.staleDealDays,
+  "settings.prefixes": w.settings.prefixes,
+});
 
 /** Reject scopes the given role is not allowed to grant to an agent. */
 function assertGrantableScopes(scopes: readonly McpScope[], role: Role): void {
@@ -77,7 +86,13 @@ export function buildAdminOps(auth: AuthServices) {
           ...definedOnly({ name: input.name, defaultCurrency: input.defaultCurrency, timezone: input.timezone }),
           settings,
         });
-        await audit(op, { operation: "workspace.update", entityType: "workspace", entityId: ws.id, summary: "Updated workspace settings" });
+        await audit(op, {
+          operation: "workspace.update",
+          entityType: "workspace",
+          entityId: ws.id,
+          summary: "Updated workspace settings",
+          meta: { changes: fieldChanges(auditView(ws), auditView(updated), Object.keys(auditView(ws))) },
+        });
         return updated;
       },
     }),
@@ -176,10 +191,11 @@ export function buildAdminOps(auth: AuthServices) {
           throw OpError.validation("The owner account cannot be demoted or disabled");
         }
         if (patch.role === "owner") throw OpError.validation("Use user.transferOwnership to change the workspace owner");
-        const updated = await op.ports.users.update(id, {
+        const userPatch = {
           ...definedOnly(patch),
           ...(disabled === undefined ? {} : { disabledAt: disabled ? new Date().toISOString() : null }),
-        });
+        };
+        const updated = await op.ports.users.update(id, userPatch);
         // Disabling revokes everything, in the SAME transaction as the update
         // (the executor wraps this handler in ports.tx): all sessions are
         // deleted and every MCP client the user created is revoked. Re-enabling
@@ -196,7 +212,7 @@ export function buildAdminOps(auth: AuthServices) {
           entityType: "user",
           entityId: id,
           summary: `Updated user ${user.email}`,
-          ...(revocation ? { meta: revocation } : {}),
+          meta: { ...revocation, changes: fieldChanges(user, updated, Object.keys(userPatch)) },
         });
         return updated;
       },
@@ -380,7 +396,7 @@ export function buildAdminOps(auth: AuthServices) {
           entityType: "mcp_client",
           entityId: id,
           summary: `Updated MCP client "${client.name}"`,
-          meta: { fields: Object.keys(definedOnly(patch)) },
+          meta: { changes: fieldChanges(client, updated, Object.keys(definedOnly(patch))) },
         });
         return updated;
       },

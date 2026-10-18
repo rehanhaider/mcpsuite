@@ -11,7 +11,7 @@ import {
 } from "../domain.ts";
 import { actorStamp } from "../context.ts";
 import { defineOperation, type OpCtx } from "./define.ts";
-import { audit, checkVersion, definedOnly, found } from "./helpers.ts";
+import { audit, checkVersion, definedOnly, fieldChanges, found } from "./helpers.ts";
 
 const zGet = z.object({ id: zId });
 
@@ -136,7 +136,7 @@ export const engagementOps = [
         entityType: "engagement",
         entityId: id,
         summary: `Updated engagement "${updated.title}"`,
-        meta: { fields: Object.keys(definedOnly(patch)) },
+        meta: { changes: fieldChanges(existing, updated, Object.keys(definedOnly(patch))) },
       });
       return updated;
     },
@@ -176,7 +176,7 @@ export const engagementOps = [
         entityType: "engagement",
         entityId: id,
         summary: `Moved "${engagement.title}" to stage "${to.name}"`,
-        meta: { from: from?.name, to: to.name },
+        meta: { from: from?.name, to: to.name, changes: fieldChanges(engagement, updated, ["stageId"]) },
       });
       return { ...updated, stageId, lastActivityAt: at };
     },
